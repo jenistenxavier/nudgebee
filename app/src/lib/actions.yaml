@@ -2804,6 +2804,18 @@ actions:
     permissions:
       - role: tenant_admin
     comment: Update a notification channel account mapping
+  - name: notifications_google_chat_permission_status
+    definition:
+      kind: "synchronous"
+      handler: '{{NOTIFICATION_SERVICE_URL}}/api/channels/google-chat/permission-status'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+    comment: Probe whether the Google Chat bot's self-join permission is authorized
   - name: notifications_list_channels
     definition:
       kind: "synchronous"

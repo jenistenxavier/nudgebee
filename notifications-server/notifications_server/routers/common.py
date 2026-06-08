@@ -335,6 +335,49 @@ async def notify_google_chat_binding(body: Dict[Any, Any]):
     return JSONResponse({"success": bool(leave_result.get("success"))})
 
 
+@router.post("/integrations/google-chat/join", dependencies=[Depends(verify_action_token)])
+async def join_google_chat_space(body: Dict[Any, Any]):
+    """Have the Chat app self-join a space (e.g. a ZenDuty-created incident space).
+
+    Requires the chat.app.memberships scope authorized by the Workspace admin; until
+    then Google returns 403, surfaced as reason='needs_authorization'."""
+    space_id = body.get("space_id")
+    if not space_id:
+        raise HTTPException(status_code=400, detail="space_id is required")
+    if not GoogleChatAppClient.is_enabled():
+        return JSONResponse({"success": False, "reason": "sa_not_configured"})
+    return JSONResponse(GoogleChatAppClient.join_space(space_id))
+
+
+@router.post("/integrations/google-chat/membership-status", dependencies=[Depends(verify_action_token)])
+async def google_chat_membership_status(body: Dict[Any, Any]):
+    """Probe whether the app can manage its membership in a space, for the guided
+    'grant join-permission' UI. status: already_member | can_join | needs_authorization | error."""
+    space_id = body.get("space_id")
+    if not space_id:
+        raise HTTPException(status_code=400, detail="space_id is required")
+    if not GoogleChatAppClient.is_enabled():
+        return JSONResponse({"status": "sa_not_configured"})
+    return JSONResponse(GoogleChatAppClient.membership_status(space_id))
+
+
+@router.post("/channels/google-chat/permission-status", dependencies=[Depends(verify_action_token)])
+async def google_chat_permission_status_endpoint(request: Request, body: Dict[Any, Any]):
+    """Tenant-scoped probe for the guided 'grant join-permission' UI: resolves a bound
+    space for the caller's tenant and reports whether the bot's self-join permission is
+    authorized. status: authorized | needs_authorization | no_spaces | sa_not_configured | unknown."""
+    try:
+        session_variables = body.get("session_variables", {})
+        tenant = session_variables.get("tenant_id") or request.headers.get("tenant")
+        if not tenant:
+            return JSONResponse({"status": "unknown", "error": ERROR_TENANT_NOT_FOUND})
+        with CommonService(engine=sync_engine, slack_app=slack_app, teams_app=teams_app) as controller:
+            return JSONResponse(content=controller.google_chat_permission_status(tenant))
+    except Exception:
+        LOG.exception("Error in google_chat_permission_status endpoint")
+        return JSONResponse({"status": "unknown"})
+
+
 @router.post("/rules/save", status_code=201, dependencies=[Depends(verify_action_token)])
 async def save_or_update_rule(data: Dict[Any, Any]):
     service = NotificationRulesService(engine)

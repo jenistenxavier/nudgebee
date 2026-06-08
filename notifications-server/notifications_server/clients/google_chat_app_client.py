@@ -16,9 +16,14 @@ from notifications_server.configs.settings import settings
 
 LOG = logging.getLogger(__name__)
 
-# The only scope a bot needs to receive events, post messages (with cards),
-# and update its own messages. Does not require admin approval.
+# Baseline scope: receive events, post messages (with cards), update own messages.
+# Does not require admin approval.
 CHAT_BOT_SCOPE = "https://www.googleapis.com/auth/chat.bot"
+
+# Lets the app manage its own space memberships (self-join / leave). The Workspace
+# admin must authorize this scope for the app in Google before membership calls
+# succeed; until then Google returns 403, which we surface for the guided-grant UI.
+CHAT_MEMBERSHIPS_SCOPE = "https://www.googleapis.com/auth/chat.app.memberships"
 
 
 class GoogleChatAppClient:
@@ -55,7 +60,9 @@ class GoogleChatAppClient:
             if not sa_key:
                 raise ValueError("Google Chat service account key is not configured (GOOGLE_CHAT_SA_KEY).")
             sa_info = json.loads(sa_key)
-            credentials = service_account.Credentials.from_service_account_info(sa_info, scopes=[CHAT_BOT_SCOPE])
+            credentials = service_account.Credentials.from_service_account_info(
+                sa_info, scopes=[CHAT_BOT_SCOPE, CHAT_MEMBERSHIPS_SCOPE]
+            )
             cls._service = build("chat", "v1", credentials=credentials, cache_discovery=False)
             return cls._service
 
@@ -156,3 +163,61 @@ class GoogleChatAppClient:
         except Exception as e:
             LOG.exception("Unexpected error leaving Google Chat space %s", space_id)
             return {"success": False, "channel_id": space_id, "reason": "unexpected_error", "error": str(e)}
+
+    @classmethod
+    def join_space(cls, space):
+        """Add the Chat app's own membership to a space (the bot self-joins).
+
+        Requires the chat.app.memberships scope to be authorized for the app in the
+        target Workspace; until an admin grants it Google returns 403, surfaced as
+        reason='needs_authorization' so the UI can prompt the admin. 409 (already a
+        member) is treated as success. Best effort: never raises.
+        """
+        space_id = _normalize_space(space)
+        try:
+            service = cls._get_service()
+            membership = (
+                service.spaces()
+                .members()
+                .create(parent=space_id, body={"member": {"name": "users/app", "type": "BOT"}})
+                .execute()
+            )
+            return {"success": True, "channel_id": space_id, "raw": membership}
+        except HttpError as e:
+            status_code, error_status, error_message = parse_http_error(e)
+            if status_code == 409:
+                return {"success": True, "channel_id": space_id, "reason": "already_member"}
+            reason = "needs_authorization" if status_code == 403 else (error_status or "api_error")
+            LOG.error(
+                "Google Chat (app auth) join-space error for %s: %s (status=%s)",
+                space_id,
+                error_message,
+                status_code,
+            )
+            return {"success": False, "channel_id": space_id, "reason": reason, "error": error_message}
+        except Exception as e:
+            LOG.exception("Unexpected error joining Google Chat space %s", space_id)
+            return {"success": False, "channel_id": space_id, "reason": "unexpected_error", "error": str(e)}
+
+    @classmethod
+    def membership_status(cls, space):
+        """Best-effort probe of the app's membership/permission in a space, for the
+        guided 'grant join-permission' UI. Returns one of:
+          already_member | can_join | needs_authorization | error
+        needs_authorization (403) means an admin hasn't authorized chat.app.memberships.
+        """
+        space_id = _normalize_space(space)
+        try:
+            service = cls._get_service()
+            service.spaces().members().get(name=f"{space_id}/members/app").execute()
+            return {"status": "already_member", "channel_id": space_id}
+        except HttpError as e:
+            status_code, error_status, error_message = parse_http_error(e)
+            if status_code == 404:
+                return {"status": "can_join", "channel_id": space_id}
+            if status_code == 403:
+                return {"status": "needs_authorization", "channel_id": space_id}
+            return {"status": "error", "channel_id": space_id, "reason": error_status, "error": error_message}
+        except Exception as e:
+            LOG.exception("Unexpected error probing Google Chat membership for %s", space_id)
+            return {"status": "error", "channel_id": space_id, "error": str(e)}
