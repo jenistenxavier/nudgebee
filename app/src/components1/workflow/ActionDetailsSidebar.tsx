@@ -19,6 +19,8 @@ import HybridField from './components/HybridField';
 import AccountField from './components/AccountField';
 import CallWorkflowFields from './components/CallWorkflowFields';
 import FilterDropdownButton from '@components1/common/FilterDropdownButton';
+import { Select, SelectOptionLike } from '@components1/ds/Select';
+import SafeIcon from '@components1/common/SafeIcon';
 import { getPreviousTasksForNode, getSwitchChildNodeIds, getSwitchDryRunEligibility } from './utils/templateUtils';
 import { parseDurationToSeconds, sanitizeTaskId } from './utils/taskUtils';
 import apiWorkflow from '@api1/workflow';
@@ -357,6 +359,16 @@ const DEFAULT_FORM_FIELD_PROPS = {
   minRows: 1,
   maxLength: 500,
 };
+
+// Map workflow dropdown options ({label,value,icon?}) to DS Select options.
+// `icon` arrives as an image `src` string, so wrap it in SafeIcon for the
+// node-typed `icon` slot DS Select expects.
+const toDsSelectOptions = (opts: Array<{ label?: string; value: string; icon?: any; type?: string }>): SelectOptionLike[] =>
+  (opts || []).map((o) => ({
+    value: o.value,
+    label: o.label ?? o.value,
+    icon: o.icon ? <SafeIcon src={o.icon} alt={o.type ?? ''} style={{ width: 16, height: 16, flexShrink: 0, objectFit: 'contain' }} /> : undefined,
+  }));
 
 const FIELD_PLACEHOLDERS: Record<string, string> = {
   script: "#!/bin/bash\necho 'Starting script execution...'\ncurl -X GET 'https://api.example.com/data'\necho 'Script completed successfully'",
@@ -3518,45 +3530,18 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                     workflowInputs={workflowInputs}
                     workflowConfigs={workflowConfigs}
                   />
-                ) : (options as any[]).some((o) => o?.icon) ? (
-                  <FilterDropdownButton
-                    id={fieldName}
-                    options={options as any[]}
-                    value={(options as any[]).find((o) => o?.value === renderedValue) ?? null}
-                    onSelect={(_e: any, selected: any) => handleDataChange(fieldName, selected?.value ?? '')}
-                    disabled={isReadOnly || viewOnlyMode}
-                    required={isRequired}
-                    placeholder={`Select ${fieldName.replace(/_/g, ' ')}`}
-                    searchPlaceholder={`Search ${fieldName.replace(/_/g, ' ')}`}
-                    sx={{
-                      width: '100%',
-                      ...(validationErrors[fieldName] && {
-                        border: `1px solid ${colors.border?.error || '#d32f2f'}`,
-                        boxShadow: 'none',
-                      }),
-                    }}
-                  />
                 ) : (
-                  <FormField
-                    {...DEFAULT_FORM_FIELD_PROPS}
-                    description={fieldSchema.description || ''}
-                    value={renderedValue}
-                    onChange={(e: any) => handleDataChange(fieldName, e.target.value)}
-                    onSelect={(e: any) => handleDataChange(fieldName, e?.target?.value)}
+                  <Select
+                    id={fieldName}
+                    options={toDsSelectOptions(options as any[])}
+                    value={renderedValue || null}
+                    onChange={(next) => handleDataChange(fieldName, next)}
                     placeholder={`Select ${fieldName.replace(/_/g, ' ')}`}
                     disabled={isReadOnly || viewOnlyMode}
-                    error={validationErrors[fieldName] || ''}
-                    fieldType='autocomplete'
-                    options={options as any}
                     required={isRequired}
+                    error={validationErrors[fieldName] || undefined}
                     minWidth='100%'
-                    maxLength={0}
                   />
-                )}
-                {!isAccountField && (options as any[]).some((o) => o?.icon) && validationErrors[fieldName] && (
-                  <Typography sx={{ mt: 0.5, fontSize: 'var(--ds-text-small)', color: colors.border?.error || '#d32f2f' }}>
-                    {validationErrors[fieldName]}
-                  </Typography>
                 )}
                 {showDefaultProviderChip && (
                   <Box sx={{ mt: 0.75 }}>
@@ -4193,26 +4178,24 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                     Time Range
                   </Typography>
                   <Box sx={{ flex: '1 1 300px', minWidth: '200px', display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <FormField
-                      {...DEFAULT_FORM_FIELD_PROPS}
-                      fieldType='autocomplete'
+                    <Select
+                      options={modeOptions}
                       value={timeMode}
-                      onSelect={(e: any) => handleTimeModeChange(e?.target?.value === 'absolute' ? 'absolute' : 'relative')}
-                      options={modeOptions as any}
+                      onChange={(next) => handleTimeModeChange(next === 'absolute' ? 'absolute' : 'relative')}
                       placeholder='Select time range type'
                       disabled={viewOnlyMode}
+                      clearable={false}
                       minWidth='100%'
                     />
                     {timeMode === 'relative' ? (
-                      <FormField
-                        {...DEFAULT_FORM_FIELD_PROPS}
-                        fieldType='autocomplete'
+                      <Select
+                        options={durationOptions}
                         value={localData?.['duration'] ?? (durationSchema?.default as string) ?? '1h'}
-                        onSelect={(e: any) => handleDataChange('duration', e?.target?.value)}
-                        options={durationOptions as any}
+                        onChange={(next) => handleDataChange('duration', next)}
                         placeholder='Select duration'
-                        description={durationSchema?.description || ''}
+                        help={durationSchema?.description || undefined}
                         disabled={viewOnlyMode}
+                        clearable={false}
                         minWidth='100%'
                       />
                     ) : (
@@ -4266,14 +4249,13 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                     Resize
                   </Typography>
                   <Box sx={{ flex: '1 1 300px', minWidth: '200px', display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <FormField
-                      {...DEFAULT_FORM_FIELD_PROPS}
-                      fieldType='autocomplete'
+                    <Select
+                      options={modeOptions}
                       value={changeMode}
-                      onSelect={(e: any) => handleChangeModeChange(e?.target?.value === 'to' ? 'to' : 'by')}
-                      options={modeOptions as any}
+                      onChange={(next) => handleChangeModeChange(next === 'to' ? 'to' : 'by')}
                       placeholder='Select resize mode'
                       disabled={viewOnlyMode}
+                      clearable={false}
                       minWidth='100%'
                     />
                     <FormField
