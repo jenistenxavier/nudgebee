@@ -1897,6 +1897,42 @@ func ListResource(ctx *security.RequestContext, id string) (models.Resource, err
 	return rcrc, err
 }
 
+// GetResourceByWorkload resolves a K8s workload resource from cloud_resourses using
+// the cloud account id plus the workload's namespace and name. It is a fallback for
+// events that carry no cloud_resource_id (e.g. resolved before the resource synced).
+//
+// K8s workload resourse_id is "<namespace>/<Kind>/<name>" (see k8s-collector
+// discovery_handler.process_service_discovery). We match on the name column plus a
+// "<namespace>/%/<name>" resourse_id pattern so the Kind's exact casing comes from the
+// stored row rather than being guessed from the event's SubjectType. Returns an empty
+// Resource (nil error) when nothing matches, so callers can apply their own not-found handling.
+func GetResourceByWorkload(ctx *security.RequestContext, accountId, namespace, name string) (models.Resource, error) {
+	if accountId == "" || namespace == "" || name == "" {
+		return models.Resource{}, nil
+	}
+	databaseManager, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return models.Resource{}, err
+	}
+	pattern := namespace + "/%/" + name
+	r := databaseManager.Db.QueryRowx(`SELECT id, created_at, created_by, updated_at, updated_by, resourse_id, name, type,
+			status, resourse_created_on, account, cloud_provider, region, arn, tenant, tags, meta,
+			service_name, first_seen, last_seen, is_active, external_resource_id
+		FROM cloud_resourses
+		WHERE account = $1 AND name = $2 AND resourse_id LIKE $3 AND cloud_provider = 'K8s'
+		ORDER BY last_seen DESC NULLS LAST
+		LIMIT 1`, accountId, name, pattern)
+	if r.Err() != nil {
+		return models.Resource{}, r.Err()
+	}
+	rcrc := models.Resource{}
+	err = r.StructScan(&rcrc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return models.Resource{}, nil
+	}
+	return rcrc, err
+}
+
 func GetAccount(ctx *security.RequestContext, id string) (models.Account, error) {
 	databaseManager, err := database.GetDatabaseManager(database.Metastore)
 	if err != nil {

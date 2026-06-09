@@ -306,6 +306,15 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 			ctx.GetLogger().Error("error getting resource", "error", err)
 			return EventRecommendationApplyResponse{}, err
 		}
+	} else if r.SubjectNamespace != nil && *r.SubjectNamespace != "" && r.SubjectName != nil && *r.SubjectName != "" {
+		// Event was never linked to a cloud_resource_id (e.g. resolved before the
+		// resource synced). Fall back to resolving the K8s workload by namespace+name
+		// within the validated account so revert/replace can still find the resource.
+		cr, err = account.GetResourceByWorkload(ctx, query.AccountId, *r.SubjectNamespace, *r.SubjectName)
+		if err != nil {
+			ctx.GetLogger().Error("error resolving resource from subject", "error", err)
+			return EventRecommendationApplyResponse{}, err
+		}
 	} else {
 		cr = models.Resource{}
 	}
@@ -1027,6 +1036,9 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 
 func getRevertRecommendationRequest(cr models.Resource, r models.Event) (map[string]any, error) {
 	oldYaml := ""
+	if cr.ResourceId == nil {
+		return map[string]any{}, common.ErrorBadRequest("event resolution: cannot revert, event is not linked to a cloud resource")
+	}
 	resourceKeys := strings.Split(*cr.ResourceId, "/")
 	if len(resourceKeys) != 3 {
 		return map[string]any{}, fmt.Errorf("resolution: service key is not correct")
