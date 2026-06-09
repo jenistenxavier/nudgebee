@@ -12,6 +12,7 @@ import { useTaskFormData } from './hooks/data-fetchers/useTaskFormData';
 import { useTicketDynamicFields } from './hooks/data-fetchers/useTicketDynamicFields';
 import { useOptionsSource } from './hooks/data-fetchers/useOptionsSource';
 import { useSelectedNodeConfig } from './hooks/useSelectedNodeConfig';
+import { validateTaskData } from './hooks/useTaskValidation';
 import TemplateTextField, { TemplateSuggestion } from './components/TemplateTextField';
 import PlatformFieldItem from './components/PlatformFieldItem';
 import HybridField from './components/HybridField';
@@ -423,7 +424,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
   taskData,
   onTaskDataChange,
   onTaskConfigChange,
-  validationErrors = {},
+  validationErrors: committedValidationErrors = {},
   viewOnlyMode = false,
   previousNodeOutputSchema,
   accountId,
@@ -459,6 +460,22 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
   // Use ref to track the latest localData for stable callbacks
   const localDataRef = useRef(localData);
   localDataRef.current = localData;
+
+  // Field-level validation errors shown inline must reflect the in-flight
+  // `localData`, not the parent's committed errors. The parent only
+  // re-validates on Save (handleSave → onTaskDataChange), so reading the
+  // committed prop left a required-field error like "account id is required"
+  // visible even after the user selected a value (#31887). Recomputing against
+  // localData with the same validator the parent uses clears each field's error
+  // the moment it becomes valid. When the task has no input schema (raw-JSON
+  // config path), validateTaskData reports nothing, so fall back to the
+  // committed prop and don't silently drop any node-level errors.
+  const validationErrors = useMemo(() => {
+    if (!selectedActionType) return committedValidationErrors;
+    const schema = taskDefinitions.find((td: any) => td.name === selectedActionType);
+    if (!schema?.input_schema) return committedValidationErrors;
+    return validateTaskData(selectedActionType, localData, taskDefinitions).errors;
+  }, [selectedActionType, localData, taskDefinitions, committedValidationErrors]);
 
   // Refs for stable access in callbacks without adding to dependency arrays
   const taskDefinitionsRef = useRef(taskDefinitions);
