@@ -34,6 +34,7 @@ import {
   generateNubiBriefing,
   formatDollars,
   sortInsights,
+  secondaryLine,
   type InsightItem,
   type SortKey,
   type Provider,
@@ -145,7 +146,7 @@ const SummaryView = () => {
   const [viewMode, setViewMode] = useState<'cards' | 'list'>('cards');
 
   // ── Data (fetched via hook) ──
-  const { accounts, insights, loading, lastUpdated, costByCurrency, accountCosts, costLoading } = useSummaryData();
+  const { accounts, insights, loading, lastUpdated, totalSavings, savingsLoading, costByCurrency, accountCosts, costLoading } = useSummaryData();
 
   // ── Action modal state ──
   const [resolveModalRec, setResolveModalRec] = useState<any>(null);
@@ -224,26 +225,12 @@ const SummaryView = () => {
     return filteredByCatProvider.filter((i) => i.accountId === accountFilter);
   }, [filteredByCatProvider, accountFilter]);
 
-  const savingsByCurrency = useMemo(() => {
-    const byCurr: Record<string, number> = {};
-    for (const item of filtered) {
-      if (item.dollarImpact <= 0) continue;
-      const symbol = accountCosts[item.accountId]?.currencySymbol || '$';
-      byCurr[symbol] = (byCurr[symbol] || 0) + item.dollarImpact;
-    }
-    return Object.entries(byCurr)
-      .filter(([, v]) => v > 0)
-      .map(([symbol, amount]) => ({ symbol, amount }));
-  }, [filtered, accountCosts]);
-
-  const totalSavingsUsd = useMemo(
-    () => savingsByCurrency.find((s) => s.symbol === '$')?.amount ?? savingsByCurrency[0]?.amount ?? 0,
-    [savingsByCurrency]
-  );
-  const headlineSymbol = savingsByCurrency[0]?.symbol ?? '$';
+  // Headline savings = total across ALL in-scope recommendations (the same aggregate
+  // the Recommendations tab uses), so the two tabs always agree. It is intentionally
+  // decoupled from the curated list below, which shows only the top urgent +
+  // highest-impact recs rather than the full set the total is summed over.
   const savingsTone: 'high-savings' | 'medium-savings' | 'low-savings' | 'neutral' =
-    totalSavingsUsd <= 0 ? 'neutral' : totalSavingsUsd > 10000 ? 'high-savings' : totalSavingsUsd > 1000 ? 'medium-savings' : 'low-savings';
-  const multiCurrencyExtra = savingsByCurrency.slice(1);
+    totalSavings <= 0 ? 'neutral' : totalSavings > 10000 ? 'high-savings' : totalSavings > 1000 ? 'medium-savings' : 'low-savings';
 
   const top3 = useMemo(() => getTop3(filtered), [filtered]);
   const accountSummaries = useMemo(() => getAccountSummaries(filteredByCatProvider), [filteredByCatProvider]);
@@ -255,7 +242,7 @@ const SummaryView = () => {
     [accounts]
   );
   const selectedAccountName = accountFilter ? accounts[accountFilter]?.account_name || accountFilter : '';
-  const nubiBriefing = useMemo(() => generateNubiBriefing(filtered), [filtered]);
+  const nubiBriefing = useMemo(() => generateNubiBriefing(filtered, totalSavings), [filtered, totalSavings]);
 
   const costItems = useMemo(() => filtered.filter((i) => i.category === 'cost'), [filtered]);
   const perfItems = useMemo(() => filtered.filter((i) => i.category === 'performance'), [filtered]);
@@ -307,25 +294,12 @@ const SummaryView = () => {
             zIndex: 2,
           }}
         >
-          {loading ? (
+          {loading || savingsLoading ? (
             <Skeleton shape='text' size='heading' width={140} />
           ) : (
             <Box sx={{ display: 'flex', alignItems: 'flex-end', gap: ds.space[2] }}>
-              <CostCallout
-                value={totalSavingsUsd}
-                size='display'
-                tone={savingsTone}
-                period='/ mo'
-                currency={headlineSymbol === '₹' ? 'INR' : 'USD'}
-              />
-              <Box sx={{ display: 'flex', flexDirection: 'column' }}>
-                <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.medium, color: ds.gray[500] }}>Potential savings</Typography>
-                {multiCurrencyExtra.length > 0 && (
-                  <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500] }}>
-                    {multiCurrencyExtra.map(({ symbol, amount }) => `+ ${symbol}${amount.toLocaleString()}/mo`).join(' ')}
-                  </Typography>
-                )}
-              </Box>
+              <CostCallout value={totalSavings} size='display' tone={savingsTone} period='/ mo' currency='USD' />
+              <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.medium, color: ds.gray[500] }}>Potential savings</Typography>
             </Box>
           )}
           <StatusIndicator
@@ -598,18 +572,33 @@ const SummaryView = () => {
                     },
                     {
                       component: (
-                        <Typography
-                          sx={{
-                            fontSize: ds.text.small,
-                            fontWeight: ds.weight.medium,
-                            whiteSpace: 'nowrap',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            color: ds.gray[700],
-                          }}
-                        >
-                          {item.summary}
-                        </Typography>
+                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], minWidth: 0 }}>
+                          <Typography
+                            sx={{
+                              fontSize: ds.text.small,
+                              fontWeight: ds.weight.medium,
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              color: ds.gray[700],
+                            }}
+                          >
+                            {item.title || item.summary}
+                          </Typography>
+                          {secondaryLine(item) && (
+                            <Typography
+                              sx={{
+                                fontSize: ds.text.caption,
+                                whiteSpace: 'nowrap',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                color: ds.gray[500],
+                              }}
+                            >
+                              {secondaryLine(item)}
+                            </Typography>
+                          )}
+                        </Box>
                       ),
                     },
                     {

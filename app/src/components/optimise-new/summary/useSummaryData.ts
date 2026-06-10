@@ -15,6 +15,8 @@ export function useSummaryData() {
   const [rawApiRows, setRawApiRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [totalSavings, setTotalSavings] = useState(0);
+  const [savingsLoading, setSavingsLoading] = useState(true);
   const [costByCurrency, setCostByCurrency] = useState<CurrencyCostSummary[]>([]);
   const [accountCosts, setAccountCosts] = useState<Record<string, AccountCost>>({});
   const [currencySymbols, setCurrencySymbols] = useState<Record<string, string>>({});
@@ -41,26 +43,31 @@ export function useSummaryData() {
     };
   }, []);
 
-  // Fetch recommendations — runs in parallel with accounts since this query
-  // doesn't need account metadata (transform joins on accounts later via useMemo).
-  // Uses a 10-min TTL cache; second visits are instant.
+  // Curated list = most urgent (finops_score) ∪ highest-impact (estimated_savings).
+  // The finops ranking alone is dominated by the large volume of high-severity
+  // config findings, which crowds high-$ cost recs out of the top-N entirely; a
+  // savings-ordered fetch unioned in guarantees the biggest savings opportunities
+  // surface. Both list queries run in parallel and share a 10-min TTL cache, so
+  // second visits are instant.
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
 
     (async () => {
       try {
-        const resp: any = await recommendationApi.getOptimisationSummaryRecommendations({
-          category: NON_SECURITY_CATEGORIES as any,
-          status: DEFAULT_STATUS,
-          orderBy: 'finops_score',
-          orderAsc: false,
-          limit: 100,
-        });
+        const listArgs = { category: NON_SECURITY_CATEGORIES as any, status: DEFAULT_STATUS, orderAsc: false, limit: 100 };
+        const [urgentResp, impactResp]: [any, any] = await Promise.all([
+          recommendationApi.getOptimisationSummaryRecommendations({ ...listArgs, orderBy: 'finops_score' }),
+          recommendationApi.getOptimisationSummaryRecommendations({ ...listArgs, orderBy: 'estimated_savings' }),
+        ]);
 
         if (cancelled) return;
 
-        setRawApiRows(resp?.data?.recommendation || []);
+        // Merge by id, urgency-ranked rows first so the finops order is preserved.
+        const byId = new Map<string, any>();
+        for (const r of urgentResp?.data?.recommendation || []) byId.set(r.id, r);
+        for (const r of impactResp?.data?.recommendation || []) if (!byId.has(r.id)) byId.set(r.id, r);
+        setRawApiRows(Array.from(byId.values()));
         setLastUpdated(new Date());
       } catch (err) {
         console.error('Failed to fetch recommendations:', err);
@@ -74,12 +81,43 @@ export function useSummaryData() {
     };
   }, []);
 
+  // Total potential savings across the FULL in-scope set (same aggregate the
+  // Recommendations tab uses), so the two tabs always agree. Fetched separately
+  // from the list so the slower full-set aggregate never blocks the curated list
+  // from rendering — it only gates the headline number.
+  useEffect(() => {
+    let cancelled = false;
+    setSavingsLoading(true);
+
+    (async () => {
+      try {
+        const rows: any = await recommendationApi.getK8sRecommendationSummaryByRuleName({
+          accountId: '',
+          category: NON_SECURITY_CATEGORIES as any,
+          status: DEFAULT_STATUS,
+        });
+        if (cancelled) return;
+        setTotalSavings(Array.isArray(rows) ? rows.reduce((sum: number, row: any) => sum + (row.sum_estimated_savings || 0), 0) : 0);
+      } catch (err) {
+        console.error('Failed to fetch savings total:', err);
+      } finally {
+        if (!cancelled) setSavingsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const insights = useMemo(() => {
     if (rawApiRows.length === 0) return [];
     return rawApiRows.map((r: any) => transformApiToInsight(r, accounts, currencySymbols));
   }, [rawApiRows, accounts, currencySymbols]);
 
-  // Fetch cost data per account (with currency awareness)
+  // Fetch cost data for all accounts in one batched query. The previous version
+  // fanned out 2 calls per account (a 13-aggregate summary + a 7-day trend used
+  // only for its currency symbol) — ~70 requests that queued behind the browser's
+  // per-origin connection limit and dominated first load.
   useEffect(() => {
     const accountIds = Object.keys(accounts);
     if (accountIds.length === 0) return;
@@ -88,38 +126,38 @@ export function useSummaryData() {
 
     (async () => {
       try {
-        const [summaryResults, trendResults] = await Promise.all([
-          Promise.allSettled(accountIds.map((id) => apiCloudAccount.cloudAccountSummary(id))),
-          Promise.allSettled(
-            accountIds.map((id) =>
-              apiCloudAccount.listCloudAccountTrend({ accountId: id }, new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), new Date(), 'Day')
-            )
-          ),
-        ]);
+        const { mtd: mtdRows, prevMonth: prevRows, ytd: ytdRows } = await apiCloudAccount.listAccountsSpendSummary(accountIds);
 
         if (cancelled) return;
 
-        const accountCurrency: Record<string, string> = {};
-        trendResults.forEach((result, idx) => {
-          const id = accountIds[idx];
-          if (result.status !== 'fulfilled') return;
-          const firstRecord = (result.value as any)?.data?.spend_groupings?.[0];
-          accountCurrency[id] = CURRENCY_MAP[firstRecord?.currency_type] || DEFAULT_SYMBOL;
-        });
+        // Fold (account_id, currency) grouped rows into per-account totals.
+        const folded: Record<string, { mtd: number; prevMonth: number; ytd: number; currency: string }> = {};
+        const fold = (rows: any[], key: 'mtd' | 'prevMonth' | 'ytd') => {
+          for (const row of rows || []) {
+            const id = row?.account_id;
+            if (!id) continue;
+            if (!folded[id]) folded[id] = { mtd: 0, prevMonth: 0, ytd: 0, currency: '' };
+            folded[id][key] += row.spend_amount || 0;
+            if (!folded[id].currency && row.currency_type) folded[id].currency = row.currency_type;
+          }
+        };
+        fold(mtdRows, 'mtd');
+        fold(prevRows, 'prevMonth');
+        fold(ytdRows, 'ytd');
 
+        const accountCurrency: Record<string, string> = {};
         const byCurrency: Record<string, { mtd: number; prevMonth: number; ytd: number; accountNames: string[] }> = {};
         const perAccount: Record<string, AccountCost> = {};
 
-        summaryResults.forEach((result, idx) => {
-          const id = accountIds[idx];
-          if (result.status !== 'fulfilled' || !result.value) return;
-          const data: any = result.value;
-          const symbol = accountCurrency[id] || DEFAULT_SYMBOL;
+        accountIds.forEach((id) => {
+          const data = folded[id];
+          const symbol = CURRENCY_MAP[data?.currency || ''] || DEFAULT_SYMBOL;
+          accountCurrency[id] = symbol;
           const acctName = accounts[id]?.account_name || id;
 
-          const mtd = data.spends_aggregate?.aggregate?.sum?.amount || 0;
-          const prevMonth = data.lm_spends_aggregate?.aggregate?.sum?.amount || 0;
-          const ytd = data.yearly_spends_aggregate?.aggregate?.sum?.amount || 0;
+          const mtd = data?.mtd || 0;
+          const prevMonth = data?.prevMonth || 0;
+          const ytd = data?.ytd || 0;
 
           if (!byCurrency[symbol]) byCurrency[symbol] = { mtd: 0, prevMonth: 0, ytd: 0, accountNames: [] };
           byCurrency[symbol].mtd += mtd;
@@ -164,5 +202,5 @@ export function useSummaryData() {
     };
   }, [accounts]);
 
-  return { accounts, insights, loading, lastUpdated, costByCurrency, accountCosts, costLoading };
+  return { accounts, insights, loading, lastUpdated, totalSavings, savingsLoading, costByCurrency, accountCosts, costLoading };
 }

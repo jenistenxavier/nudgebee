@@ -29,6 +29,11 @@ export interface InsightItem {
   impactLabel: string;
   /** Parsed dollar value for sorting/totals — 0 if non-monetary */
   dollarImpact: number;
+  /** Concise rule/catalog title used as the card & list headline (e.g. "Pod Right Sizing"). */
+  title: string;
+  /** Terse action/context line under the title (e.g. "Reduce CPU 96%"); '' when none. */
+  brief: string;
+  /** Full prose description — hover tooltip + ticket subject only, no longer the headline. */
   summary: string;
   nextStep: { label: string; destructive?: boolean };
   /** Days since detected or time-in-state */
@@ -159,6 +164,17 @@ export const formatDollars = (n: number): string => {
   return '$' + n.toLocaleString('en-US');
 };
 
+// Secondary line for cards/list rows: show the terse `brief` under the title only
+// when it adds information beyond the title. Drops it when it duplicates the title,
+// and hard-clamps the rare long one so a row stays a single scannable line rather
+// than wrapping a full sentence (the original "titles too big" complaint).
+const SECONDARY_LINE_MAX = 80;
+export const secondaryLine = (item: InsightItem): string => {
+  const b = (item.brief || '').trim();
+  if (!b || b === item.title) return '';
+  return b.length > SECONDARY_LINE_MAX ? b.slice(0, SECONDARY_LINE_MAX - 1).trimEnd() + '…' : b;
+};
+
 export const formatAge = (days: number): string => {
   if (days < 1) {
     const hours = days * 24;
@@ -211,9 +227,11 @@ export const subCategorySummaryLine = (items: InsightItem[]): string => {
 
 // ─── Nubi briefing generator ───────────────────────────────────────────────
 
-export const generateNubiBriefing = (items: InsightItem[]): string => {
+// `totalDollars` is the canonical full-set savings total (the headline number); pass
+// it so the briefing agrees with the headline instead of summing only the shown rows.
+export const generateNubiBriefing = (items: InsightItem[], totalDollars?: number): string => {
   const criticals = items.filter((i) => i.severity === 'critical').length;
-  const dollars = subtotal(items);
+  const dollars = totalDollars ?? subtotal(items);
 
   if (criticals > 0 && dollars > 0) {
     return `${criticals} critical issues and ${formatDollars(
