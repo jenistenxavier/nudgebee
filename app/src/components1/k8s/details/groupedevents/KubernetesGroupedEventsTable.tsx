@@ -84,7 +84,7 @@ const getMenuItems = (disableTicket: boolean, canWrite: boolean) => [
     icon: TicketsIcon,
     label: 'Create Ticket',
     id: 0,
-    disabled: disableTicket || !canWrite,
+    disabled: disableTicket,
     iconBlack: true,
   },
   {
