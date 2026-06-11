@@ -113,19 +113,25 @@ jest.mock('@hooks/useTenantBranding', () => ({
   useTenantBranding: jest.fn(() => ({ assistantName: 'Nubi', baseTitle: 'Nudgebee' })),
 }));
 
-// Mock src/utils/colors
-jest.mock('src/utils/colors', () => ({
-  colors: {
-    text: {
-      darkGray: '#555',
-      secondary: '#3B82F6',
-      white: '#fff',
+// Mock src/utils/colors. `ds` is the design-system token namespace accessed as
+// ds.<palette>[<shade>] (e.g. ds.amber[100]); a nested Proxy resolves any such
+// access to a color string so the component renders without enumerating tokens.
+jest.mock('src/utils/colors', () => {
+  const anyShade = new Proxy({}, { get: () => '#000' });
+  return {
+    colors: {
+      text: {
+        darkGray: '#555',
+        secondary: '#3B82F6',
+        white: '#fff',
+      },
+      background: {
+        tertiarymedium: '#ddd',
+      },
     },
-    background: {
-      tertiarymedium: '#ddd',
-    },
-  },
-}));
+    ds: new Proxy({}, { get: () => anyShade }),
+  };
+});
 
 // Mock child components
 jest.mock('@components1/common/SafeIcon', () => ({
@@ -595,6 +601,22 @@ describe('Header1', () => {
   });
 
   describe('reload notification', () => {
+    // jest.clearAllMocks() (outer beforeEach) resets call history but NOT mock
+    // implementations, so a getItem override from one test would leak into the
+    // next. Reinstall a fresh stateful store before each test so the seed->compare
+    // flow is deterministic; individual tests may still override.
+    //
+    // The component reads/writes the booted version via sessionStorage (tab-scoped),
+    // so alias window.sessionStorage to the same mock the assertions inspect.
+    beforeEach(() => {
+      const store = {};
+      localStorageMock.getItem.mockImplementation((key) => (key in store ? store[key] : null));
+      localStorageMock.setItem.mockImplementation((key, val) => {
+        store[key] = String(val);
+      });
+      Object.defineProperty(window, 'sessionStorage', { value: localStorageMock, writable: true, configurable: true });
+    });
+
     it('shows reload notification when appVersion differs from localStorage', async () => {
       localStorageMock.getItem.mockImplementation((key) => {
         if (key === 'appVersion') return 'v0.9.0';
@@ -629,10 +651,52 @@ describe('Header1', () => {
         render(<Header1 />);
       });
       const alerts = screen.getAllByRole('alert');
-      const reloadAlert = alerts.find((a) => a.textContent.includes('New Application Version'));
+      const reloadAlert = alerts.find((a) => a.textContent.toLowerCase().includes('new application version'));
       const closeBtn = reloadAlert.querySelector('button');
       if (closeBtn) fireEvent.click(closeBtn);
       expect(screen.queryByText(/New Application Version/i)).not.toBeInTheDocument();
+    });
+
+    it('seeds the booted version and shows no notification on first load (empty storage)', async () => {
+      // Default stateful localStorageMock starts empty (cleared in beforeEach).
+      await act(async () => {
+        render(<Header1 />);
+      });
+      // A fresh load is by definition the current build — no nudge...
+      expect(screen.queryByText(/New Application Version/i)).not.toBeInTheDocument();
+      // ...and the current version is captured for later comparison.
+      expect(localStorageMock.setItem).toHaveBeenCalledWith('appVersion', 'v1.0.0');
+    });
+
+    it('does not nudge or store "undefined" when appVersion is unset (local dev)', async () => {
+      useSession.mockReturnValue({ data: { onPrem: false } }); // NEXT_PUBLIC_APP_VERSION unset
+
+      await act(async () => {
+        render(<Header1 />);
+      });
+
+      expect(screen.queryByText(/New Application Version/i)).not.toBeInTheDocument();
+      // The original bug: seeding wrote the string "undefined", which then never
+      // matched the falsy session version, firing the banner on every tab change.
+      expect(localStorageMock.setItem).not.toHaveBeenCalledWith('appVersion', expect.anything());
+    });
+
+    it('nudges proactively when the session reports a newer version mid-session', async () => {
+      // Boot at v1.0.0 — captured into storage, no nudge.
+      let view;
+      await act(async () => {
+        view = render(<Header1 />);
+      });
+      expect(screen.queryByText(/New Application Version/i)).not.toBeInTheDocument();
+
+      // Server redeploys; useSession refetch returns the new version while this
+      // tab stays mounted. The booted version (v1.0.0) is NOT overwritten.
+      useSession.mockReturnValue({ data: { onPrem: false, appVersion: 'v2.0.0' } });
+      await act(async () => {
+        view.rerender(<Header1 />);
+      });
+
+      expect(screen.getByText(/New Application Version/i)).toBeInTheDocument();
     });
   });
 

@@ -463,25 +463,42 @@ const Header1 = ({ showBorder = false }) => {
     }
   }, [router.pathname, headerItems]);
 
+  // Capture the version this tab booted with — once, when the session first
+  // resolves (data is null while useSession is loading). We deliberately never
+  // overwrite it during the tab's life: a stale long-lived tab must keep
+  // remembering its original version so the deploy nudge below can fire. A full
+  // page reload remounts this component and re-captures the now-current version,
+  // which clears the nudge.
+  //
+  // sessionStorage (not localStorage) so the booted version is scoped to THIS
+  // tab. With shared localStorage, a second tab booting on the new version would
+  // clobber an older tab's stored version, and the older tab would then read the
+  // new value, match, and silently skip its deploy nudge.
+  const bootVersionCaptured = useRef(false);
   useEffect(() => {
-    const localAppVersion = localStorage.getItem('appVersion');
-    if (data.appVersion != localAppVersion) {
+    if (data?.appVersion && !bootVersionCaptured.current) {
+      bootVersionCaptured.current = true;
+      sessionStorage.setItem('appVersion', data.appVersion);
+      setShowReloadNotification(false);
+    }
+  }, [data?.appVersion]);
+
+  // Nudge to refresh when the server starts serving a newer version than the one
+  // this tab booted with (detected when the session refetches a new appVersion).
+  // Requiring a present bootedVersion avoids false positives on first load /
+  // cleared storage and on local dev where NEXT_PUBLIC_APP_VERSION is unset
+  // (data.appVersion falsy). Keying on the version (not tab changes) makes the
+  // nudge proactive and lets a manual dismiss stick.
+  useEffect(() => {
+    const bootedVersion = sessionStorage.getItem('appVersion');
+    if (data?.appVersion && bootedVersion && data.appVersion !== bootedVersion) {
       setShowReloadNotification(true);
       setReloadMsg('A new Application version is deployed. Please consider refreshing the page');
     } else {
       setShowReloadNotification(false);
       setReloadMsg('');
     }
-  }, [anchorActiveTab]);
-
-  useEffect(() => {
-    const state = window.history.state;
-
-    if (state && !state.reloaded) {
-      setShowReloadNotification(false);
-      localStorage.setItem('appVersion', data.appVersion);
-    }
-  }, []);
+  }, [data?.appVersion]);
 
   const handleDropdownChange = (e) => {
     const currentRouter = router;
