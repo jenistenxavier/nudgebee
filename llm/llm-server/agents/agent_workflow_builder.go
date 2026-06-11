@@ -304,18 +304,40 @@ func (a *WorkflowBuilderAgent) handleEntry(ctx *security.RequestContext, request
 	// regenerated or silently-modified automation — or crashed the fix-diagnosis loop. Classify
 	// the turn first: pure questions are ANSWERED, never built or modified. This runs only at the
 	// non-mid-stage entry; mid-stage turns are stage responses handled by their cases in Execute.
+	// The WorkflowAgent delegates as an agent-as-tool and already knows whether this is a create or a
+	// fix (and which workflow). It transmits that decision structurally via a JSON command
+	// ({"mode":"create"|"fix","workflow_id":"...","query":"..."}) so the builder routes on explicit
+	// fields rather than re-deriving mode by scanning prose. Unwrap it up front: `directiveMode` /
+	// `directiveWorkflowId` drive deterministic routing below, and request.Query is replaced with the
+	// inner instruction text so every downstream LLM call (read-only classifier, intent, plan) sees
+	// clean text instead of the JSON envelope.
+	directiveMode, directiveWorkflowId, commandText := parseDelegationCommand(request.Query)
+	request.Query = commandText
+
 	if a.isReadOnlyTurn(ctx, request) {
 		return a.handleReadOnly(ctx, request)
 	}
 
-	// Check QueryConfig first (direct invocation with explicit workflow_id)
+	// Deterministic routing — explicit signals only, no text inference. An account UUID embedded in a
+	// create payload can never be read as a workflow id here (we only consult explicit fields).
+	//  1. UI-canvas / direct API path stamps QueryConfig.WorkflowId.
+	//  2. Chat delegation stamps mode + workflow_id in the JSON command.
 	if request.QueryConfig.WorkflowId != "" {
 		return a.handleFixEntry(ctx, request, request.QueryConfig.WorkflowId)
 	}
+	if directiveMode == "fix" && directiveWorkflowId != "" {
+		ctx.GetLogger().Info("workflow_builder: routing to fix via delegation directive", "workflow_id", directiveWorkflowId)
+		return a.handleFixEntry(ctx, request, directiveWorkflowId)
+	}
+	if directiveMode == "create" {
+		// Explicit create — never fall through to text inference.
+		return a.handleIntentAndPlan(ctx, request)
+	}
 
-	// Fallback: extract workflow ID from query text (agent-as-tool delegation from WorkflowAgent)
-	if workflowId := extractWorkflowIdFromQuery(request.Query); workflowId != "" {
-		ctx.GetLogger().Info("workflow_builder: detected workflow ID in query text", "workflow_id", workflowId)
+	// Backstop for legacy/unstructured delegations that carry no directive: infer the workflow id from
+	// text, excluding account UUIDs that legitimately appear in create payloads (avoids fix-mode misroute).
+	if workflowId := extractWorkflowIdFromQuery(request.Query, a.knownAccountIds(ctx)); workflowId != "" {
+		ctx.GetLogger().Info("workflow_builder: detected workflow ID in query text (no directive)", "workflow_id", workflowId)
 		return a.handleFixEntry(ctx, request, workflowId)
 	}
 
@@ -382,7 +404,7 @@ func isReadOnlyClassification(answer string) bool {
 func (a *WorkflowBuilderAgent) handleReadOnly(ctx *security.RequestContext, request core.NBAgentRequest) (core.NBAgentResponse, error) {
 	workflowId := request.QueryConfig.WorkflowId
 	if workflowId == "" {
-		workflowId = extractWorkflowIdFromQuery(request.Query)
+		workflowId = extractWorkflowIdFromQuery(request.Query, a.knownAccountIds(ctx))
 	}
 
 	var definitionContext string
@@ -437,9 +459,39 @@ INSTRUCTIONS:
 - When you have the answer, emit a <final_answer> whose <content> is your prose answer in Markdown. Do NOT output a workflow JSON definition. Do NOT call finalize.`, userQuery, defSection)
 }
 
+// parseDelegationCommand interprets a builder delegation command. The WorkflowAgent is instructed to
+// delegate as a JSON object — {"mode":"create"|"fix","workflow_id":"<id>","query":"<instructions>"} —
+// so create-vs-fix routing is read from explicit fields instead of inferred from prose. Returns the
+// lower-cased mode, the workflow id (fix only), and the instruction text to use for downstream LLM
+// calls. A plain-string command (or JSON without these fields) yields empty mode/id and the original
+// text unchanged, so legacy/unstructured delegations fall through to the heuristic backstop.
+func parseDelegationCommand(query string) (mode, workflowId, text string) {
+	text = query
+	var d struct {
+		Mode       string `json:"mode"`
+		WorkflowId string `json:"workflow_id"`
+		Query      string `json:"query"`
+	}
+	if err := common.UnmarshalJson([]byte(query), &d); err == nil {
+		if strings.TrimSpace(d.Query) != "" {
+			text = d.Query
+		}
+		mode = strings.ToLower(strings.TrimSpace(d.Mode))
+		workflowId = strings.TrimSpace(d.WorkflowId)
+	}
+	return mode, workflowId, text
+}
+
 // extractWorkflowIdFromQuery looks for a UUID in the query text that likely represents a workflow ID.
 // The WorkflowAgent is instructed to include the workflow ID when delegating fix requests.
-func extractWorkflowIdFromQuery(query string) string {
+//
+// excludeIds holds account UUIDs (the k8s account plus every configured cloud account) that
+// legitimately appear in *create* delegations — e.g. `params.account_id` on k8s.cli / cloud.*.cli
+// tasks. Those must never be treated as a workflow ID: doing so misroutes a create request into fix
+// mode, which then issues GET workflows/{account_id} → 404 ("workflow not found"). The first non-
+// excluded UUID is returned, so a genuine fix delegation ("Fix automation <wf-id> in account <acct-id>")
+// still resolves to the workflow ID even when an account UUID precedes it in the text.
+func extractWorkflowIdFromQuery(query string, excludeIds map[string]bool) string {
 	lowerQuery := strings.ToLower(query)
 	// Only extract if the query looks like a fix/debug request (not a new workflow creation)
 	fixKeywords := []string{"fix", "debug", "error", "failed", "failing", "broken", "issue", "wrong", "update", "modify", "change", "repair"}
@@ -454,8 +506,41 @@ func extractWorkflowIdFromQuery(query string) string {
 		return ""
 	}
 
-	match := uuidRegex.FindString(query)
-	return match
+	for _, match := range uuidRegex.FindAllString(query, -1) {
+		if !excludeIds[strings.ToLower(match)] {
+			return match
+		}
+	}
+	return ""
+}
+
+// knownAccountIds returns the set of account UUIDs (lower-cased) that legitimately appear in build
+// payloads: this k8s account plus every configured cloud-account (aws/gcp/azure/k8s). These are
+// excluded from workflow-ID extraction so a create delegation embedding an account_id is not
+// mistaken for a fix request. Degrades gracefully — if configs can't be listed, only the primary
+// account ID is excluded (still covers the most common misroute).
+func (a *WorkflowBuilderAgent) knownAccountIds(ctx *security.RequestContext) map[string]bool {
+	ids := map[string]bool{}
+	// Fail closed: an empty account id would make ListAllToolConfigs unscoped, and a nil ctx has no
+	// logger. Either way there is nothing to exclude — return the empty set.
+	if a.accountId == "" || ctx == nil {
+		return ids
+	}
+	ids[strings.ToLower(a.accountId)] = true
+	configs, err := toolcore.ListAllToolConfigs(ctx, a.accountId)
+	if err != nil {
+		ctx.GetLogger().Warn("workflow_builder: knownAccountIds: ListAllToolConfigs failed, excluding only the primary account id", "error", err)
+		return ids
+	}
+	for _, cfg := range configs {
+		if !cloudAccountConfigTypes[strings.ToLower(cfg.Schema.ConfigType)] {
+			continue
+		}
+		if id := cloudAccountId(cfg); id != "" {
+			ids[strings.ToLower(id)] = true
+		}
+	}
+	return ids
 }
 
 // handleIntentAndPlan extracts intent, optionally asks clarifying questions, generates a plan, and asks for user approval.
@@ -1489,9 +1574,102 @@ func (a *WorkflowBuilderAgent) autoSaveWorkflow(ctx *security.RequestContext, wo
 
 	resp, err := tools.DoRunbookRequest("POST", "workflows", definition, a.accountId, tenantId, userId)
 	if err != nil {
+		// The builder is invoked statelessly per agent-as-tool call, so a re-delegation of the same
+		// build (e.g. the WorkflowAgent retrying) re-POSTs and collides on the per-tenant/account name
+		// uniqueness constraint. If THIS conversation already created that workflow
+		// (created_from_session_id matches), converge by updating it instead of failing — an
+		// idempotent save. We never overwrite a workflow we can't prove this session created, so a
+		// name owned by a different/human-authored workflow is left untouched (data-loss guard).
+		if isNameConflictError(err) && sessionId != "" {
+			if existingId := a.findOwnWorkflowByName(ctx, workflowDefinitionName(definition), sessionId); existingId != "" {
+				putResp, putErr := tools.DoRunbookRequest("PUT", fmt.Sprintf("workflows/%s", existingId), definition, a.accountId, tenantId, userId)
+				if putErr == nil {
+					ctx.GetLogger().Info("workflow_builder: create collided with this session's prior save, converged via update", "workflow_id", existingId)
+					return extractWorkflowId(putResp, existingId), nil
+				}
+				ctx.GetLogger().Warn("workflow_builder: idempotent update after create-conflict failed", "workflow_id", existingId, "error", putErr)
+			}
+			return "", fmt.Errorf("workflow_builder: an automation named %q already exists for this account; rename it or open the existing one to edit", workflowDefinitionName(definition))
+		}
 		return "", fmt.Errorf("workflow_builder: auto-create failed: %w", err)
 	}
 	return extractWorkflowId(resp, ""), nil
+}
+
+// isNameConflictError reports whether a DoRunbookRequest error is the runbook server's
+// per-tenant/account name-uniqueness rejection (HTTP 400/409 with an "already exists" body).
+func isNameConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "already exists")
+}
+
+// workflowDefinitionName extracts the top-level "name" from an EnsureDefinitionObject payload
+// ({"name": ..., "definition": {...}}). Returns "" when absent.
+func workflowDefinitionName(definition interface{}) string {
+	if defMap, ok := definition.(map[string]interface{}); ok {
+		if name, ok := defMap["name"].(string); ok {
+			return name
+		}
+	}
+	return ""
+}
+
+// findOwnWorkflowByName resolves the ID of a workflow with the exact given name that was created
+// from sessionId — i.e. one this conversation owns. Returns "" if name/session is empty, the lookup
+// fails, no exact-name match exists, or no match proves same-session ownership (the conservative
+// data-loss guard: we only converge onto a workflow we can show this session created).
+func (a *WorkflowBuilderAgent) findOwnWorkflowByName(ctx *security.RequestContext, name, sessionId string) string {
+	if name == "" || sessionId == "" || ctx == nil || ctx.GetSecurityContext() == nil {
+		return ""
+	}
+	// Fail closed in a multi-tenant store: a blank tenant or account would issue an unscoped lookup.
+	tenantId := ctx.GetSecurityContext().GetTenantId()
+	if tenantId == "" || a.accountId == "" {
+		return ""
+	}
+	resp, err := tools.DoRunbookRequest("GET", fmt.Sprintf("workflows?name=%s", url.QueryEscape(name)), nil, a.accountId, tenantId, ctx.GetSecurityContext().GetUserId())
+	if err != nil {
+		ctx.GetLogger().Warn("workflow_builder: findOwnWorkflowByName: list failed", "name", name, "error", err)
+		return ""
+	}
+	var parsed struct {
+		Workflows []map[string]interface{} `json:"workflows"`
+	}
+	if jsonErr := json.Unmarshal(resp, &parsed); jsonErr != nil {
+		ctx.GetLogger().Warn("workflow_builder: findOwnWorkflowByName: parse failed", "error", jsonErr)
+		return ""
+	}
+	for _, wf := range parsed.Workflows {
+		// The server `name` filter is a partial match — require an exact name match.
+		if wfName, _ := wf["name"].(string); wfName != name {
+			continue
+		}
+		// Ownership: created_from_session_id may live at the top level or inside the definition,
+		// depending on how the server persists it. Only converge when it equals this session.
+		if workflowSessionId(wf) != sessionId {
+			continue
+		}
+		if id, ok := wf["id"].(string); ok && id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+// workflowSessionId reads created_from_session_id from a workflow object, tolerating it being
+// stored either at the top level or nested under "definition".
+func workflowSessionId(wf map[string]interface{}) string {
+	if sid, ok := wf["created_from_session_id"].(string); ok && sid != "" {
+		return sid
+	}
+	if def, ok := wf["definition"].(map[string]interface{}); ok {
+		if sid, ok := def["created_from_session_id"].(string); ok && sid != "" {
+			return sid
+		}
+	}
+	return ""
 }
 
 // extractWorkflowId tries to extract the workflow ID from the server response.
