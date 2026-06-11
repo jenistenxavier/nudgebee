@@ -274,3 +274,52 @@ func TestExtractKubectlOutput(t *testing.T) {
 		})
 	}
 }
+
+func TestParseLogTextToOutputLogs(t *testing.T) {
+	t.Run("json lines lift timestamp/level/message; full object retained in labels", func(t *testing.T) {
+		text := `{"time":"2026-06-09T03:08:15.378710783Z","level":"INFO","msg":"anomaly: no anomalies found","account":"ff87"}`
+		entries := parseLogTextToOutputLogs(text)
+		require.Len(t, entries, 1)
+		assert.Equal(t, "2026-06-09T03:08:15.378710783Z", entries[0].Timestamp)
+		assert.Equal(t, "anomaly: no anomalies found", entries[0].Message)
+		assert.Equal(t, "INFO", entries[0].Severity)
+		assert.Equal(t, "ff87", entries[0].Labels["account"])
+	})
+
+	t.Run("plain text line becomes message with guessed level and no timestamp", func(t *testing.T) {
+		entries := parseLogTextToOutputLogs("10.14.128.5:5432 - accepting connections")
+		require.Len(t, entries, 1)
+		assert.Empty(t, entries[0].Timestamp)
+		assert.Equal(t, "10.14.128.5:5432 - accepting connections", entries[0].Message)
+		assert.Nil(t, entries[0].Labels)
+	})
+
+	t.Run("blank lines are skipped and mixed lines parse independently", func(t *testing.T) {
+		text := "first plain line\n\n   \n{\"time\":\"t1\",\"message\":\"second\",\"severity\":\"error\"}\n"
+		entries := parseLogTextToOutputLogs(text)
+		require.Len(t, entries, 2)
+		assert.Equal(t, "first plain line", entries[0].Message)
+		assert.Equal(t, "second", entries[1].Message)
+		assert.Equal(t, "t1", entries[1].Timestamp)
+		assert.Equal(t, "ERROR", entries[1].Severity)
+	})
+
+	t.Run("numeric timestamp/level fields are coerced, not dropped", func(t *testing.T) {
+		entries := parseLogTextToOutputLogs(`{"ts":1717900000,"level":3,"message":"numeric fields"}`)
+		require.Len(t, entries, 1)
+		assert.Equal(t, "1717900000", entries[0].Timestamp)
+		assert.Equal(t, "3", entries[0].Severity)
+		assert.Equal(t, "numeric fields", entries[0].Message)
+	})
+
+	t.Run("empty input yields empty slice", func(t *testing.T) {
+		assert.Empty(t, parseLogTextToOutputLogs(""))
+	})
+
+	t.Run("malformed json falls back to raw line as message", func(t *testing.T) {
+		entries := parseLogTextToOutputLogs(`{"time":"t1","msg":`)
+		require.Len(t, entries, 1)
+		assert.Equal(t, `{"time":"t1","msg":`, entries[0].Message)
+		assert.Empty(t, entries[0].Timestamp)
+	})
+}

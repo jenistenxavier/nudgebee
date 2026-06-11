@@ -4372,6 +4372,28 @@ var table_metadata = map[string]TableDefinition{
 		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
 			pushdownFilters := extractFilterSQL(&request, "account_id", "r.cloud_account_id")
 			pushdownFilters += extractFilterSQL(&request, "status", "r.status")
+			// Push tenant_id and category into the CTE WHERE so the ROW_NUMBER()
+			// window is computed over only the relevant slice. The window's
+			// PARTITION BY does NOT include tenant_id, so the planner cannot push
+			// an outer tenant filter through the window fence — without this the
+			// CTE scans every tenant's recommendations (hundreds of thousands of
+			// rows) before the outer query narrows to one tenant. category IS in
+			// the PARTITION BY (partitions are per-category, so filtering it keeps
+			// resource_rank correct) and lets the composite
+			// tenant_status_category_rule_name index drive the scan.
+			pushdownFilters += extractFilterSQL(&request, "category", "r.category")
+			// Fail closed: a non-super-admin must always be tenant-scoped. The
+			// query framework (service.go) also appends a tenant filter on the
+			// outer query, but only when tenant_id is non-empty — so guard here
+			// rather than silently returning unscoped rows for an empty tenant.
+			sc := ctx.GetSecurityContext()
+			tenantId := sc.GetTenantId()
+			if tenantId == "" && !sc.IsSuperAdmin() {
+				return "", request, fmt.Errorf("tenant_id is required")
+			}
+			if tenantId != "" {
+				pushdownFilters += " AND r.tenant_id = " + (&postgresDialect{}).QuoteLiteral(tenantId)
+			}
 			def := `(
 					WITH all_recommendations AS (
 						SELECT

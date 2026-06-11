@@ -175,8 +175,10 @@ func probeOne(ctx context.Context, t probeTarget) ProbeResult {
 //
 // Inheritance rules:
 //   - Per-tier provider: llm_tier_provider_<tier>, falls back to global
-//   - Per-tier credentials: tier rows do NOT have their own credential schema
-//     keys, so they inherit global credentials wholesale.
+//   - Per-tier credentials: each credential key has a per-tier variant
+//     (llm_tier_api_key_<tier>, llm_tier_access_key_<tier>, etc.) that
+//     overrides the global one when present. Falls back to global otherwise —
+//     same shape as per-agent credentials.
 //   - Per-agent provider: llm_provider_<agent>, falls back to global
 //   - Per-agent credentials: each credential key has a per-agent variant
 //     (llm_provider_api_key_<agent>, etc.) that overrides the global one when
@@ -214,17 +216,16 @@ func enumerateProbeTargets(cfg map[string]string) []probeTarget {
 		addTarget(provider, fb, "global-fallback", cfg)
 	}
 
-	// 2) Per-tier (reasoning / retrieval / summary).
+	// 2) Per-tier (reasoning / retrieval / summary). Mirror per-agent semantics
+	// for credentials: a tier-scoped api_key / endpoint / region / version / aws
+	// key overrides the global value for probes against that tier's provider.
 	for _, tier := range []string{"reasoning", "retrieval", "summary"} {
 		tierProvider := cfg["llm_tier_provider_"+tier]
 		if tierProvider == "" {
 			tierProvider = provider
 		}
 		tierModel := cfg["llm_tier_model_"+tier]
-		tierCfg := overlayCfg(cfg, map[string]string{
-			cfgKeyProvider: tierProvider,
-			cfgKeyModel:    tierModel,
-		})
+		tierCfg := overlayCfg(cfg, tierCredsOverlay(cfg, tier, tierProvider, tierModel))
 		if tierModel != "" {
 			addTarget(tierProvider, tierModel, "tier-"+tier, tierCfg)
 		}
@@ -310,6 +311,35 @@ func agentCredsOverlay(cfg map[string]string, agent, agentProvider, agentModel s
 	} {
 		if v := cfg[k+"_"+agent]; v != "" {
 			overlay[k] = v
+		}
+	}
+	return overlay
+}
+
+// tierCredsOverlay is the tier equivalent of agentCredsOverlay. Tier credential
+// keys live under llm_tier_<credtype>_<tier> and were added alongside the
+// per-tier credential resolvers in llm_config.go. Only keys with non-empty
+// values are merged so global creds remain the default fallthrough.
+func tierCredsOverlay(cfg map[string]string, tier, tierProvider, tierModel string) map[string]string {
+	overlay := map[string]string{
+		cfgKeyProvider: tierProvider,
+		cfgKeyModel:    tierModel,
+	}
+	// Map from generic credential key (cfgKey*) → tier-specific key name. The
+	// per-credential resolvers in llm_config.go read from
+	// llm_tier_<credtype>_<tier>; mirror that here.
+	tierKeyMap := map[string]string{
+		cfgKeyAPIKey:       "llm_tier_api_key_" + tier,
+		cfgKeyAPIEndpoint:  "llm_tier_api_endpoint_" + tier,
+		cfgKeyAPIVersion:   "llm_tier_api_version_" + tier,
+		cfgKeyRegion:       "llm_tier_region_" + tier,
+		cfgKeyAccessKey:    "llm_tier_access_key_" + tier,
+		cfgKeySecretKey:    "llm_tier_secret_key_" + tier,
+		cfgKeySessionToken: "llm_tier_session_token_" + tier,
+	}
+	for generic, scoped := range tierKeyMap {
+		if v := cfg[scoped]; v != "" {
+			overlay[generic] = v
 		}
 	}
 	return overlay

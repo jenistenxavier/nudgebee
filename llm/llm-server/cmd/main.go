@@ -71,17 +71,19 @@ func authHandlerMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Lenient X-ACTION-TOKEN gate: llm-server is in-cluster only (reached via
-		// RPC / api-server, which auth the caller) and every handler also does
-		// its own per-request authz via services-server. So a missing token is
-		// allowed for now (some callers don't attach one yet); a wrong token is
-		// still rejected. Temporary — restore the strict check once we've fully
-		// moved off RPC and every caller routes through api-server with the token.
-		authHeader := c.Request.Header.Get(config.Config.LlmServerTokenHeader)
-		if authHeader != "" && authHeader != config.Config.LlmServerToken {
-			logger.Error("main: invalid service token", "path", c.Request.URL.Path, "method", c.Request.Method)
-			c.AbortWithStatusJSON(401, gin.H{"message": "invalid " + config.Config.LlmServerTokenHeader})
-			return
+		// Single auth contract: if LLM_SERVER_TOKEN is configured, every
+		// request must carry a matching header; if it's unset, the gate is a
+		// no-op. Actual user authentication happens at the api-server layer
+		// — this token only authenticates service-to-service callers
+		// (frontend gateway, notifications-server, etc.) when the operator
+		// chose to enforce it.
+		if config.Config.LlmServerToken != "" {
+			authHeader := c.Request.Header.Get(config.Config.LlmServerTokenHeader)
+			if authHeader != config.Config.LlmServerToken {
+				logger.Error("main: invalid service token", "path", c.Request.URL.Path, "method", c.Request.Method)
+				c.AbortWithStatusJSON(401, gin.H{"message": "invalid " + config.Config.LlmServerTokenHeader})
+				return
+			}
 		}
 		c.Set(CTX_IS_PUBLIC, false)
 		c.Next()

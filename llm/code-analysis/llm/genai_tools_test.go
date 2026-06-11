@@ -638,4 +638,85 @@ func TestGenAISession_RecordIfFC(t *testing.T) {
 		assert.Len(t, a.responses, 1)
 		assert.Empty(t, b.responses)
 	})
+
+	t.Run("captures signature keyed by call identity", func(t *testing.T) {
+		s := NewGenAISession()
+		s.recordIfFC(&genai.Content{Role: "model", Parts: []*genai.Part{{
+			FunctionCall:     &genai.FunctionCall{Name: "repo_clone", Args: map[string]any{"url": "x"}},
+			ThoughtSignature: []byte("sig-rc"),
+		}}})
+		key := callSigKey(&genai.FunctionCall{Name: "repo_clone", Args: map[string]any{"url": "x"}})
+		assert.Equal(t, []byte("sig-rc"), s.sigByCall[key])
+	})
+}
+
+// TestUnsignedFunctionCalls verifies the diagnostic flags exactly the model
+// functionCall parts that lack a signature, with Gemini's 1-based position.
+func TestUnsignedFunctionCalls(t *testing.T) {
+	history := []*genai.Content{
+		{Role: "user", Parts: []*genai.Part{genai.NewPartFromText("q")}},
+		{Role: "model", Parts: []*genai.Part{{
+			FunctionCall:     &genai.FunctionCall{Name: "repo_clone"},
+			ThoughtSignature: []byte("sig"),
+		}}},
+		{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: "repo_clone"}}}},
+		{Role: "model", Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{Name: "file_view"}, // unsigned
+		}}},
+	}
+	assert.Equal(t, []string{"file_view@4"}, unsignedFunctionCalls(history))
+
+	// All signed → empty.
+	history[3].Parts[0].ThoughtSignature = []byte("sig2")
+	assert.Empty(t, unsignedFunctionCalls(history))
+}
+
+// TestReattachSignatures verifies the identity-keyed backstop fills in a
+// signature on a reconstructed functionCall part the positional splice missed,
+// which is what stops Gemini 3 from rejecting the replayed tool-call history.
+func TestReattachSignatures(t *testing.T) {
+	recorded := &genai.Content{Role: "model", Parts: []*genai.Part{{
+		FunctionCall:     &genai.FunctionCall{Name: "repo_clone", Args: map[string]any{"url": "x"}},
+		ThoughtSignature: []byte("sig-rc"),
+	}}}
+
+	t.Run("fills missing signature by identity", func(t *testing.T) {
+		s := NewGenAISession()
+		s.recordIfFC(recorded)
+		// A reconstructed FC content (no signature) that the splice did not replace.
+		history := []*genai.Content{{Role: "model", Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{Name: "repo_clone", Args: map[string]any{"url": "x"}},
+		}}}}
+		result := s.reattachSignatures(history)
+		assert.Equal(t, []byte("sig-rc"), result[0].Parts[0].ThoughtSignature)
+	})
+
+	t.Run("does not overwrite an existing signature", func(t *testing.T) {
+		s := NewGenAISession()
+		s.recordIfFC(recorded)
+		history := []*genai.Content{{Role: "model", Parts: []*genai.Part{{
+			FunctionCall:     &genai.FunctionCall{Name: "repo_clone", Args: map[string]any{"url": "x"}},
+			ThoughtSignature: []byte("original"),
+		}}}}
+		result := s.reattachSignatures(history)
+		assert.Equal(t, []byte("original"), result[0].Parts[0].ThoughtSignature)
+	})
+
+	t.Run("leaves unknown calls untouched", func(t *testing.T) {
+		s := NewGenAISession()
+		s.recordIfFC(recorded)
+		history := []*genai.Content{{Role: "model", Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{Name: "file_view", Args: map[string]any{"path": "y"}},
+		}}}}
+		result := s.reattachSignatures(history)
+		assert.Nil(t, result[0].Parts[0].ThoughtSignature)
+	})
+
+	t.Run("nil/empty session is a no-op", func(t *testing.T) {
+		var s *GenAISession
+		history := []*genai.Content{{Role: "model", Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{Name: "repo_clone"},
+		}}}}
+		assert.NotPanics(t, func() { s.reattachSignatures(history) })
+	})
 }

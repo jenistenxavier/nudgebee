@@ -1103,6 +1103,8 @@ actions:
         - name: X-ACTION-TOKEN
           value_from_env: ACTION_API_SERVER_TOKEN
     permissions:
+      - role: account_admin
+      - role: account_admin_readonly
       - role: tenant_admin
     comment: pprof profile
   - name: applications_list_profiles
@@ -1806,6 +1808,7 @@ actions:
           value_from_env: ACTION_API_SERVER_TOKEN
     permissions:
       - role: tenant_admin
+      - role: account_admin
   - name: event_update_nb_status
     definition:
       kind: synchronous
@@ -2591,6 +2594,7 @@ actions:
           value_from_env: ACTION_API_SERVER_TOKEN
     permissions:
       - role: account_admin
+      - role: account_admin_readonly
       - role: tenant_admin
       - role: tenant_admin_readonly
       - role: tenant_usage
@@ -2974,8 +2978,19 @@ actions:
       headers:
         - name: X-ACTION-TOKEN
           value_from_env: ACTION_API_SERVER_TOKEN
+    # Read-capable roles can load live cluster resources (PVC/PV/Services tabs,
+    # which send action_name: get_resource). The api-server relay handler
+    # (services/api/relay.go) re-checks every request: read actions need
+    # account Read access, while mutating action_names (writeActions map:
+    # delete_pod, replace_workload, ...) require Update — so read-only roles
+    # here can list but never mutate. k8s_namespace_admin roles are excluded:
+    # the list forwards all_namespaces=true, which would over-expose a
+    # namespace-scoped user.
     permissions:
       - role: tenant_admin
+      - role: tenant_admin_readonly
+      - role: account_admin
+      - role: account_admin_readonly
   - name: resource_groupings_v2
     definition:
       kind: "synchronous"
@@ -3282,6 +3297,7 @@ actions:
           value_from_env: ACTION_API_SERVER_TOKEN
     permissions:
       - role: account_admin
+      - role: account_admin_readonly
       - role: tenant_admin
   - name: ticket_groupings_v2
     definition:
@@ -3391,6 +3407,7 @@ actions:
           value_from_env: ACTION_API_SERVER_TOKEN
     permissions:
       - role: account_admin
+      - role: account_admin_readonly
       - role: tenant_usage
       - role: tenant_admin_readonly
       - role: tenant_admin
@@ -3404,6 +3421,7 @@ actions:
           value_from_env: ACTION_API_SERVER_TOKEN
     permissions:
       - role: account_admin
+      - role: account_admin_readonly
       - role: tenant_usage
       - role: tenant_admin_readonly
       - role: tenant_admin
@@ -3481,6 +3499,7 @@ actions:
           value_from_env: ACTION_API_SERVER_TOKEN
     permissions:
       - role: account_admin
+      - role: account_admin_readonly
       - role: tenant_usage
       - role: tenant_admin_readonly
       - role: tenant_admin
@@ -3494,6 +3513,7 @@ actions:
           value_from_env: ACTION_API_SERVER_TOKEN
     permissions:
       - role: account_admin
+      - role: account_admin_readonly
       - role: tenant_admin
       - role: tenant_admin_readonly
       - role: tenant_usage
@@ -4104,6 +4124,8 @@ actions:
     permissions:
       - role: tenant_admin_readonly
       - role: tenant_admin
+      - role: account_admin
+      - role: account_admin_readonly
       - role: k8s_namespace_admin_readonly
       - role: k8s_namespace_admin
   - name: workflow_list_executions_for_event

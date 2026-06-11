@@ -95,7 +95,7 @@ export async function hasAccountAccess(userId: string, tenantId: string, account
 
     if (authResp.ok) {
       const responseJson = await authResp.json();
-      const allowed = responseJson?.access && responseJson.access?.length > 0 && responseJson.access[0]?.allowed;
+      const allowed = responseJson?.access?.[0]?.allowed === true;
       if (allowed) {
         span.setStatus({ code: SpanStatusCode.OK });
       } else {

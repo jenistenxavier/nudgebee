@@ -32,6 +32,7 @@ import k8sApi from '@api1/kubernetes';
 import apiUser from '@api1/user';
 import ticketsApi from '@api1/tickets';
 import { applyFiltersOnRouter } from '@lib/router';
+import { hasWriteAccess } from '@lib/auth';
 import { convertToReadableFormat, titleCaseForAggregationKey, syncFilterFromQuery, toSeverityLevel } from 'src/utils/common';
 import { Box, Typography } from '@mui/material';
 import useKubernetesEventFilters from '@hooks/useKubernetesEventFilters';
@@ -75,8 +76,10 @@ const getNBStatusDisplay = (nbStatus: string) => {
   return statusMap[nbStatus] || { label: nbStatus || '-', variant: '' };
 };
 
-// Menu items for ThreeDotsMenu — disableTicket flips when a ticket already exists for this fingerprint
-const getMenuItems = (disableTicket: boolean) => [
+// Menu items for ThreeDotsMenu — disableTicket flips when a ticket already
+// exists for this fingerprint; canWrite gates both modification actions for
+// read-only users (e.g. tenant_admin_readonly).
+const getMenuItems = (disableTicket: boolean, canWrite: boolean) => [
   {
     icon: TicketsIcon,
     label: 'Create Ticket',
@@ -88,6 +91,7 @@ const getMenuItems = (disableTicket: boolean) => [
     icon: WorkflowIcon,
     label: 'Create Automation',
     id: 1,
+    disabled: !canWrite,
     iconBlack: true,
   },
 ];
@@ -154,6 +158,11 @@ const transformTableData = (
     const existingTicket = ticketMap?.get(item.fingerprint);
     const hasExistingTicket = Boolean(existingTicket);
 
+    // Modification actions (classify, change status, create ticket/automation)
+    // require write access on the row's account. Read-only users
+    // (tenant_admin_readonly, account_admin_readonly) see them disabled.
+    const canWrite = hasWriteAccess(item.account_id);
+
     // Columns based on type
     if (groupEventType === 'fingerprint') {
       return [
@@ -201,6 +210,7 @@ const transformTableData = (
                   currentStatus={item.latest_nb_status}
                   onStatusChange={onStatusChange}
                   onCreateTicket={() => onCreateTicket?.(item)}
+                  disabled={!canWrite}
                   disableTooltip
                 />
               </Box>
@@ -234,7 +244,8 @@ const transformTableData = (
                     composition='icon-only'
                     icon={<CategoryOutlinedIcon />}
                     aria-label='Classify'
-                    tooltip='Classify'
+                    tooltip={canWrite ? 'Classify' : 'You do not have permission to classify'}
+                    disabled={!canWrite}
                     onClick={(e) => e.stopPropagation()}
                   />
                 }
@@ -251,7 +262,7 @@ const transformTableData = (
                   onSelect: () => onClassify?.(item, option.value),
                 }))}
               />
-              <ThreeDotsMenu sx={{ ...action.primary }} menuItems={getMenuItems(hasExistingTicket)} data={item} onMenuClick={onMenuClick} />
+              <ThreeDotsMenu sx={{ ...action.primary }} menuItems={getMenuItems(hasExistingTicket, canWrite)} data={item} onMenuClick={onMenuClick} />
             </Box>
           ),
         },
@@ -545,7 +556,7 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
           name: 'Severity',
           width: '10%',
           info: "Severity is the original urgency level assigned by the source monitoring/alerting system, based on that tool's built-in rules or your configured thresholds",
-          infoPlacement: 'top-start',
+          infoPlacement: 'top',
         },
         {
           name: 'Application',
@@ -585,7 +596,7 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
           name: 'Severity',
           width: '12%',
           info: "Severity is the original urgency level assigned by the source monitoring/alerting system, based on that tool's built-in rules or your configured thresholds",
-          infoPlacement: 'top-start',
+          infoPlacement: 'top',
         },
         {
           name: 'Event Type',

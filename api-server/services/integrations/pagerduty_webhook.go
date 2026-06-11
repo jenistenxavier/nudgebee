@@ -628,12 +628,10 @@ func (m PagerDutyWebhook) ProcessEventWebook(sc *security.RequestContext, settin
 		parsedPayload.Investigation.RuleName = alertname
 	}
 
-	// Improve title: Alertmanager default title is a concatenation of all label values
-	// Use annotation summary or alertname for a readable title
-	if summary, ok := parsedPayload.Investigation.Labels["annotation_summary"]; ok && summary != "" {
-		parsedPayload.EventTitle = summary
-	} else if alertname, ok := parsedPayload.Investigation.Labels["alertname"]; ok && alertname != "" {
-		parsedPayload.EventTitle = alertname
+	// Improve title: Alertmanager default title is a concatenation of all label values.
+	// Prefer a human-readable summary; fall back to alertname.
+	if title := resolveEventTitleFromLabels(parsedPayload.Investigation.Labels); title != "" {
+		parsedPayload.EventTitle = title
 	}
 
 	// Resolve subject name/namespace from enriched labels
@@ -3260,6 +3258,25 @@ func mapSeverityToEventPriority(severity string) event.EventPriortiy {
 		// Default to low if severity is unrecognized or empty
 		return event.EventPriortiyLow
 	}
+}
+
+// resolveEventTitleFromLabels picks a human-readable event title from enriched alert labels.
+// The Alertmanager-generated incident title is an unreadable concatenation of every label
+// value, so we prefer the alert's summary instead. The summary may arrive either as an
+// annotation (annotation_summary) or as a plain label (summary) depending on whether the
+// alert rule declares it under Annotations: or Labels: in the firing text — and the firing-text
+// parser keys both the same way, so plain "summary" is the common case. Fall back to alertname
+// when no summary is present. Returns "" when no better title is available (caller keeps the original).
+func resolveEventTitleFromLabels(labels map[string]string) string {
+	if labels == nil {
+		return ""
+	}
+	for _, key := range []string{"annotation_summary", "summary", "alertname"} {
+		if v, ok := labels[key]; ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // resolveSubjectFromLabels attempts to determine EventSubjectName, EventSubjectNamespace,

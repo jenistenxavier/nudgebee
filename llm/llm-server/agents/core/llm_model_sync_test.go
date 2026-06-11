@@ -67,7 +67,7 @@ func TestSync_LiteModel_MismatchWithoutFix(t *testing.T) {
 	// (No call to syncModelWithContextOverrides.)
 	provider, model := "googleai", fullModel
 
-	cacheKey := generateCacheKey(CacheScopeConversation, "acc", "conv", "agent", model)
+	cacheKey := generateCacheKey(CacheScopeConversation, "acc", "conv", "agent", model, "")
 
 	assert.Equal(t, fullModel, model, "pre-fix: currentModel is the full model")
 	assert.Contains(t, cacheKey, fullModel, "pre-fix: cache key references the full model")
@@ -114,12 +114,12 @@ func TestSync_LiteModel_FixedBySyncModelWithContextOverrides(t *testing.T) {
 		"provider unchanged — only model name changes for lite substitution")
 
 	// Cache key now uses the lite model, matching the flash llm client.
-	cacheKey := generateCacheKey(CacheScopeConversation, accountId, "conv", "agent", model)
+	cacheKey := generateCacheKey(CacheScopeConversation, accountId, "conv", "agent", model, "")
 	assert.Contains(t, cacheKey, liteModel, "cache key references the lite model")
 	assert.NotContains(t, cacheKey, fullModel, "cache key no longer references the full model")
 
 	// Verify the two cache keys are different (old wrong key vs new correct key).
-	wrongKey := generateCacheKey(CacheScopeConversation, accountId, "conv", "agent", fullModel)
+	wrongKey := generateCacheKey(CacheScopeConversation, accountId, "conv", "agent", fullModel, "")
 	assert.NotEqual(t, wrongKey, cacheKey,
 		"pre-fix and post-fix cache keys are different — wrong entry would have been used")
 }
@@ -148,7 +148,7 @@ func TestSync_QueryConfigOverride_MismatchWithoutFix(t *testing.T) {
 	// Without the sync, currentModel stays as the config model.
 	model := configModel
 
-	cacheKey := generateCacheKey(CacheScopeConversation, "acc", "conv", "agent", model)
+	cacheKey := generateCacheKey(CacheScopeConversation, "acc", "conv", "agent", model, "")
 	assert.Equal(t, configModel, model, "pre-fix: currentModel is config model, not the override")
 	assert.NotContains(t, cacheKey, overrideModel, "pre-fix: override model absent from cache key")
 }
@@ -174,11 +174,11 @@ func TestSync_QueryConfigOverride_FixedBySyncModelWithContextOverrides(t *testin
 	assert.Equal(t, overrideProvider, provider,
 		"after fix: provider also synced from context")
 
-	cacheKey := generateCacheKey(CacheScopeConversation, accountId, "conv", "agent", model)
+	cacheKey := generateCacheKey(CacheScopeConversation, accountId, "conv", "agent", model, "")
 	assert.Contains(t, cacheKey, overrideModel, "cache key references the override model")
 	assert.NotContains(t, cacheKey, configModel, "cache key no longer references the config model")
 
-	wrongKey := generateCacheKey(CacheScopeConversation, accountId, "conv", "agent", configModel)
+	wrongKey := generateCacheKey(CacheScopeConversation, accountId, "conv", "agent", configModel, "")
 	assert.NotEqual(t, wrongKey, cacheKey, "correct and wrong cache keys are distinct")
 }
 

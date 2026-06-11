@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import Tooltip from '@components1/ds/Tooltip';
 import PropTypes from 'prop-types';
-import { Box, Stack, Typography, Table, TableHead, TableRow, TableCell, TableBody, CircularProgress } from '@mui/material';
+import { Box, Stack, Typography, CircularProgress } from '@mui/material';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import { Modal } from '@components1/ds/Modal';
 import { Input } from '@components1/ds/Input';
 import { Select } from '@components1/ds/Select';
@@ -81,7 +83,49 @@ const PROVIDER_EXAMPLES = {
   },
 };
 
-const emptyConfig = () => ({ model: '', fallbacks: '' });
+// Per-tier and per-agent override shape. provider === '' means "inherit from
+// global"; any other value triggers conditional credential fields for that
+// provider. Secret fields (apiKey / accessKey / secretKey) follow the same
+// omit-to-keep contract as the global secrets — see SecretInput + buildConfigValues.
+//
+// providerOverrideOpen controls a per-card collapse for the Provider +
+// credential inputs. When false, the card shows only Model + Fallbacks and a
+// "+ Override provider" affordance; when true, the override pane is rendered.
+// Opens on demand, and the render block also auto-treats it open if the row
+// has a saved provider override on edit-mode load — so users never hit a
+// "where did my setting go" moment.
+const emptyConfig = () => ({
+  model: '',
+  fallbacks: '',
+  provider: '',
+  apiKey: '',
+  apiEndpoint: '',
+  apiVersion: '',
+  apiType: '',
+  region: '',
+  accessKey: '',
+  secretKey: '',
+  providerOverrideOpen: false,
+});
+
+// Sentinel value used by the per-tier and per-agent Provider dropdowns to
+// represent "Inherit from global". The shared DS Select treats value === '' as
+// "no selection" and renders the placeholder, so an empty-string option label
+// would never display. State still stores '' for inherit — the sentinel only
+// lives at the Select-binding boundary.
+const INHERIT_SENTINEL = '__inherit__';
+
+// providerFieldShape returns which credential inputs apply for a given provider.
+// Mirrors the global section's showsApiKey / showsApiEndpoint / ... booleans so
+// the tier and agent cards can render the same provider-conditional inputs.
+const providerFieldShape = (p) => ({
+  showsApiKey: ['anthropic', 'azure', 'googleai', 'huggingface', 'openai', 'vertexai'].includes(p),
+  showsApiEndpoint: ['azure', 'openai', 'sagemaker', 'anthropic', 'huggingface'].includes(p),
+  showsApiVersion: p === 'azure',
+  showsRegion: ['bedrock', 'sagemaker'].includes(p),
+  showsBedrockKeys: p === 'bedrock',
+  showsApiType: p === 'openai',
+});
 
 /**
  * Custom Add/Edit modal for the LLM Configuration. Writes flat config keys
@@ -208,8 +252,15 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
     summary: emptyConfig(),
   });
 
-  // Per-agent overrides — array of { agent, model, fallbacks } rows.
+  // Per-agent overrides — array of { agent, model, fallbacks, provider, apiKey,
+  // apiEndpoint, apiVersion, apiType, region, accessKey, secretKey, collapsed }
+  // rows. provider === '' = inherit from global; collapsed controls the card
+  // expand/collapse state.
   const [agentRows, setAgentRows] = useState([]);
+
+  // Free-text filter applied to agent override cards. Only shown when there
+  // are more than 3 rows — at small counts the filter just adds noise.
+  const [agentFilter, setAgentFilter] = useState('');
 
   // initialOverrideKeys captures every llm_tier_* and llm_*_<agent> override
   // key that was present in the integration when the modal was opened. On
@@ -379,28 +430,62 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
       setApiType(cfg.llm_provider_api_type || '');
       setAdapterId(cfg.llm_provider_adapter_id || '');
       setRequireAdapterId(cfg.llm_provider_require_adapter_id || '');
-      setSecretsConfigured({
+      // Capture every secret-shaped key (global, per-tier, per-agent) so the
+      // tier and agent cards can render "✓ Configured" hints on their own
+      // SecretInputs after edit-mode load. The set keys here mirror the names
+      // we read in buildConfigValues / pushSecret below.
+      const secretsCfg = {
         llm_provider_api_key: !!hasValueByName.llm_provider_api_key,
         llm_provider_access_key: !!hasValueByName.llm_provider_access_key,
         llm_provider_secret_key: !!hasValueByName.llm_provider_secret_key,
+      };
+      ['reasoning', 'retrieval', 'summary'].forEach((t) => {
+        secretsCfg[`llm_tier_api_key_${t}`] = !!hasValueByName[`llm_tier_api_key_${t}`];
+        secretsCfg[`llm_tier_access_key_${t}`] = !!hasValueByName[`llm_tier_access_key_${t}`];
+        secretsCfg[`llm_tier_secret_key_${t}`] = !!hasValueByName[`llm_tier_secret_key_${t}`];
       });
+      Object.keys(hasValueByName).forEach((k) => {
+        if (k.startsWith('llm_provider_api_key_') || k.startsWith('llm_provider_access_key_') || k.startsWith('llm_provider_secret_key_')) {
+          secretsCfg[k] = !!hasValueByName[k];
+        }
+      });
+      setSecretsConfigured(secretsCfg);
 
+      // Per-tier load. A tier's provider field is "Inherit" (empty in form
+      // state) when the saved llm_tier_provider_<tier> matches the global
+      // llm_provider — that's the legacy "provider mirrors global" write we
+      // emit when the user hasn't overridden the provider. A different saved
+      // provider means an explicit per-tier provider override; populate it.
+      const globalProvider = cfg.llm_provider || '';
+      const tierFor = (t) => {
+        const savedProvider = cfg[`llm_tier_provider_${t}`] || '';
+        // Inherit when empty or equal to global — so existing tenants that
+        // saved tier_provider = global_provider don't surface a stale override.
+        const isInherit = savedProvider === '' || savedProvider === globalProvider;
+        return {
+          model: cfg[`llm_tier_model_${t}`] || '',
+          fallbacks: cfg[`llm_tier_model_fallbacks_${t}`] || '',
+          provider: isInherit ? '' : savedProvider,
+          apiKey: '', // secret — always blank in form; secretsConfigured tracks "✓"
+          apiEndpoint: cfg[`llm_tier_api_endpoint_${t}`] || '',
+          apiVersion: cfg[`llm_tier_api_version_${t}`] || '',
+          apiType: cfg[`llm_tier_api_type_${t}`] || '',
+          region: cfg[`llm_tier_region_${t}`] || '',
+          accessKey: '',
+          secretKey: '',
+          // Auto-open the override pane on load when a non-global provider
+          // was saved — otherwise the user would think their setting vanished.
+          providerOverrideOpen: !isInherit,
+        };
+      };
       setTiers({
-        reasoning: {
-          model: cfg.llm_tier_model_reasoning || '',
-          fallbacks: cfg.llm_tier_model_fallbacks_reasoning || '',
-        },
-        retrieval: {
-          model: cfg.llm_tier_model_retrieval || '',
-          fallbacks: cfg.llm_tier_model_fallbacks_retrieval || '',
-        },
-        summary: {
-          model: cfg.llm_tier_model_summary || '',
-          fallbacks: cfg.llm_tier_model_fallbacks_summary || '',
-        },
+        reasoning: tierFor('reasoning'),
+        retrieval: tierFor('retrieval'),
+        summary: tierFor('summary'),
       });
 
       // Reconstruct agent rows by scanning for any llm_model_name_<agent> keys.
+      // Same inherit-when-matches-global semantics as tiers above.
       const recoveredAgents = [];
       Object.keys(cfg).forEach((key) => {
         if (key.startsWith('llm_model_name_') && key !== 'llm_model_name') {
@@ -409,10 +494,24 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
           if (agentKey === 'summary_agent') {
             return;
           }
+          const savedProvider = cfg[`llm_provider_${agentKey}`] || '';
+          const isInherit = savedProvider === '' || savedProvider === globalProvider;
           recoveredAgents.push({
             agent: agentKey,
             model: cfg[key] || '',
             fallbacks: cfg[`llm_model_fallbacks_${agentKey}`] || '',
+            provider: isInherit ? '' : savedProvider,
+            apiKey: '',
+            apiEndpoint: cfg[`llm_provider_api_endpoint_${agentKey}`] || '',
+            apiVersion: cfg[`llm_provider_api_version_${agentKey}`] || '',
+            apiType: cfg[`llm_provider_api_type_${agentKey}`] || '',
+            region: cfg[`llm_provider_region_${agentKey}`] || '',
+            accessKey: '',
+            secretKey: '',
+            collapsed: true, // default to collapsed on load; expand on user click
+            // Open the inner override pane when a saved override exists, so
+            // users see their setting immediately on expanding the card.
+            providerOverrideOpen: !isInherit,
           });
         }
       });
@@ -578,14 +677,78 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
   // Save re-enables — otherwise a "passed" status from a prior config could
   // carry over even after the user typed a new tier/agent model that was
   // never probed. Same invariant as setConnField for the global fields.
+  // Reset every credential field when the override provider changes — old
+  // values are for a different provider's auth scheme and would mislead the
+  // user (a stale Bedrock access_key sitting around after switching to
+  // GoogleAI). Save-side tombstoning still purges any DB row that was loaded.
+  const credResetForProvider = {
+    apiKey: '',
+    apiEndpoint: '',
+    apiVersion: '',
+    apiType: '',
+    region: '',
+    accessKey: '',
+    secretKey: '',
+  };
   const updateTier = (tier, field, value) => {
-    setTiers((prev) => ({ ...prev, [tier]: { ...prev[tier], [field]: value } }));
+    setTiers((prev) => ({
+      ...prev,
+      [tier]: {
+        ...prev[tier],
+        [field]: value,
+        ...(field === 'provider' ? credResetForProvider : {}),
+      },
+    }));
     setTestStatus('idle');
     setTestMessage('');
   };
 
   const updateAgentRow = (idx, field, value) => {
-    setAgentRows((prev) => prev.map((row, i) => (i === idx ? { ...row, [field]: value } : row)));
+    setAgentRows((prev) =>
+      prev.map((row, i) =>
+        i === idx
+          ? {
+              ...row,
+              [field]: value,
+              ...(field === 'provider' ? credResetForProvider : {}),
+            }
+          : row
+      )
+    );
+    setTestStatus('idle');
+    setTestMessage('');
+  };
+
+  // Revert handlers — close the override pane, clear the provider + creds so
+  // the row goes back to inheriting from global. Save-side tombstoning then
+  // clears any stale DB row.
+  const revertTierOverride = (tier) => {
+    setTiers((prev) => ({
+      ...prev,
+      [tier]: {
+        ...prev[tier],
+        provider: '',
+        ...credResetForProvider,
+        providerOverrideOpen: false,
+      },
+    }));
+    setTestStatus('idle');
+    setTestMessage('');
+  };
+
+  const revertAgentOverride = (idx) => {
+    setAgentRows((prev) =>
+      prev.map((row, i) =>
+        i === idx
+          ? {
+              ...row,
+              provider: '',
+              ...credResetForProvider,
+              providerOverrideOpen: false,
+            }
+          : row
+      )
+    );
     setTestStatus('idle');
     setTestMessage('');
   };
@@ -606,7 +769,24 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
     // testStatus eagerly so the footer status line flips to "Run Test
     // Connection before saving" immediately and the user isn't confused
     // by a stale "Connection verified" hint.
-    setAgentRows((prev) => [...prev, { agent: '', model: '', fallbacks: '' }]);
+    setAgentRows((prev) => [
+      ...prev,
+      {
+        agent: '',
+        model: '',
+        fallbacks: '',
+        provider: '',
+        apiKey: '',
+        apiEndpoint: '',
+        apiVersion: '',
+        apiType: '',
+        region: '',
+        accessKey: '',
+        secretKey: '',
+        collapsed: false, // newly added row starts expanded so the user can fill it in
+        providerOverrideOpen: false, // override pane is opt-in
+      },
+    ]);
     setTestStatus('idle');
     setTestMessage('');
   };
@@ -640,6 +820,28 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
   const credsReady =
     (!showsApiKey || hasSecret(apiKey, 'llm_provider_api_key')) &&
     (!showsBedrockKeys || (hasSecret(accessKey, 'llm_provider_access_key') && hasSecret(secretKey, 'llm_provider_secret_key')));
+
+  // credKeyFor builds the scope-qualified secret name (e.g.
+  // 'llm_tier_api_key_reasoning', 'llm_provider_api_key_aws_debug') so
+  // secretsConfigured lookups match the load-time seed.
+  const validateOverrideCreds = (row, credKeyFor) => {
+    if (!row.provider) {
+      return null;
+    }
+    const shape = providerFieldShape(row.provider);
+    if (shape.showsApiKey && !hasSecret(row.apiKey || '', credKeyFor('api_key'))) {
+      return 'API Key is required for the selected provider';
+    }
+    if (shape.showsBedrockKeys) {
+      if (!hasSecret(row.accessKey || '', credKeyFor('access_key'))) {
+        return 'AWS Access Key is required for Bedrock';
+      }
+      if (!hasSecret(row.secretKey || '', credKeyFor('secret_key'))) {
+        return 'AWS Secret Key is required for Bedrock';
+      }
+    }
+    return null;
+  };
 
   // validateModelName: shape check for any model field.
   //   - non-empty after trim (the "field is required" case is the caller's
@@ -689,6 +891,17 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
 
   // Per-field validation messages. Computed once per render so the helperText
   // / Save-gate can read them without recomputing.
+  //
+  // tierProviderModel and agentProviderModel guard the half-set case: setting
+  // a tier/agent provider override without a matching model would write
+  // llm_tier_provider_<tier> with no llm_tier_model_<tier>, which the backend
+  // resolver silently no-ops with a "half-set" Warn log. Easier to catch at
+  // form time than to diagnose a missing override at runtime.
+  //
+  // tierCreds and agentCreds gate Save when a row has a non-global provider
+  // override but is missing the credentials that provider requires. Without
+  // this gate the user could Save a Bedrock-tier override with no AWS keys
+  // and only discover the misconfig on the next runtime call's 401.
   const errors = {
     accounts: selectedAccountIds.length === 0 ? 'At least one account must be selected' : null,
     model: validateModelName(model),
@@ -703,9 +916,25 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
       retrieval: validateFallbacks(tiers.retrieval.fallbacks, tiers.retrieval.model || model),
       summary: validateFallbacks(tiers.summary.fallbacks, tiers.summary.model || model),
     },
+    tierProviderModel: {
+      reasoning: tiers.reasoning.provider && !tiers.reasoning.model.trim() ? 'Model is required when an override Provider is set' : null,
+      retrieval: tiers.retrieval.provider && !tiers.retrieval.model.trim() ? 'Model is required when an override Provider is set' : null,
+      summary: tiers.summary.provider && !tiers.summary.model.trim() ? 'Model is required when an override Provider is set' : null,
+    },
+    tierCreds: {
+      reasoning: validateOverrideCreds(tiers.reasoning, (c) => `llm_tier_${c}_reasoning`),
+      retrieval: validateOverrideCreds(tiers.retrieval, (c) => `llm_tier_${c}_retrieval`),
+      summary: validateOverrideCreds(tiers.summary, (c) => `llm_tier_${c}_summary`),
+    },
     agentRows: agentRows.map((row) => ({
       model: row.model ? validateModelName(row.model) : null,
       fallbacks: validateFallbacks(row.fallbacks, row.model || model),
+      providerModel: row.provider && !row.model.trim() ? 'Model is required when an override Provider is set' : null,
+      // Cred validation gates on provider, not agent name. When the user
+      // hasn't picked an agent yet, the secretsConfigured lookup misses on
+      // the empty suffix, so any required secret defaults to "not configured"
+      // — which is correct for a new row with no stored secret to inherit.
+      creds: validateOverrideCreds(row, (c) => `llm_provider_${c}_${row.agent || ''}`),
     })),
   };
   const hasAnyError =
@@ -714,7 +943,9 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
     !!errors.fallbacks ||
     Object.values(errors.tierModels).some(Boolean) ||
     Object.values(errors.tierFallbacks).some(Boolean) ||
-    errors.agentRows.some((r) => r.model || r.fallbacks);
+    Object.values(errors.tierProviderModel).some(Boolean) ||
+    Object.values(errors.tierCreds).some(Boolean) ||
+    errors.agentRows.some((r) => r.model || r.fallbacks || r.providerModel || r.creds);
 
   const formComplete = configName.trim() !== '' && provider !== '' && model.trim() !== '' && credsReady && !hasAnyError;
   // canTest is a less-strict gate — Save needs Test to have passed, but Test
@@ -776,30 +1007,54 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
     pushPlain(showsApiType, 'llm_provider_api_type', apiType);
     pushPlain(showsAdapter, 'llm_provider_adapter_id', adapterId);
     pushPlain(showsAdapter, 'llm_provider_require_adapter_id', requireAdapterId);
-    // Per-tier — write provider + model + fallbacks. Provider mirrors global
-    // because the resolver requires both provider and model to fire the tier
-    // layer; we don't ask the user for it.
+    // Per-tier — write provider + model + fallbacks, plus credentials when the
+    // tier overrides the provider. When the user picked "Inherit" (form
+    // provider is empty), we still write the tier_provider key as the global
+    // provider — the resolver requires both provider and model to fire the
+    // tier layer.
     TIER_KEYS.forEach((tier) => {
       const t = tiers[tier];
       if (t.model.trim() === '') {
         return;
       }
-      out.push({ name: `llm_tier_provider_${tier}`, value: provider });
+      const tierProvider = t.provider || provider;
+      out.push({ name: `llm_tier_provider_${tier}`, value: tierProvider });
       out.push({ name: `llm_tier_model_${tier}`, value: t.model.trim() });
       if (t.fallbacks.trim()) {
         out.push({ name: `llm_tier_model_fallbacks_${tier}`, value: t.fallbacks.trim() });
       }
+      // Inherited rows (empty t.provider) reuse global creds.
+      if (t.provider) {
+        const shape = providerFieldShape(t.provider);
+        pushSecret(shape.showsApiKey, `llm_tier_api_key_${tier}`, t.apiKey);
+        pushPlain(shape.showsApiEndpoint, `llm_tier_api_endpoint_${tier}`, t.apiEndpoint);
+        pushPlain(shape.showsApiVersion, `llm_tier_api_version_${tier}`, t.apiVersion);
+        pushPlain(shape.showsRegion, `llm_tier_region_${tier}`, t.region);
+        pushSecret(shape.showsBedrockKeys, `llm_tier_access_key_${tier}`, t.accessKey);
+        pushSecret(shape.showsBedrockKeys, `llm_tier_secret_key_${tier}`, t.secretKey);
+        pushPlain(shape.showsApiType, `llm_tier_api_type_${tier}`, t.apiType);
+      }
     });
-    // Per-agent — same reasoning: provider mirrors global so the resolver's
-    // env-agent / db-agent layer fires.
+    // Per-agent — same pattern as tiers.
     agentRows.forEach((row) => {
       if (!row.agent || row.model.trim() === '') {
         return;
       }
-      out.push({ name: `llm_provider_${row.agent}`, value: provider });
+      const agentProvider = row.provider || provider;
+      out.push({ name: `llm_provider_${row.agent}`, value: agentProvider });
       out.push({ name: `llm_model_name_${row.agent}`, value: row.model.trim() });
       if (row.fallbacks.trim()) {
         out.push({ name: `llm_model_fallbacks_${row.agent}`, value: row.fallbacks.trim() });
+      }
+      if (row.provider) {
+        const shape = providerFieldShape(row.provider);
+        pushSecret(shape.showsApiKey, `llm_provider_api_key_${row.agent}`, row.apiKey);
+        pushPlain(shape.showsApiEndpoint, `llm_provider_api_endpoint_${row.agent}`, row.apiEndpoint);
+        pushPlain(shape.showsApiVersion, `llm_provider_api_version_${row.agent}`, row.apiVersion);
+        pushPlain(shape.showsRegion, `llm_provider_region_${row.agent}`, row.region);
+        pushSecret(shape.showsBedrockKeys, `llm_provider_access_key_${row.agent}`, row.accessKey);
+        pushSecret(shape.showsBedrockKeys, `llm_provider_secret_key_${row.agent}`, row.secretKey);
+        pushPlain(shape.showsApiType, `llm_provider_api_type_${row.agent}`, row.apiType);
       }
     });
     // Emit explicit empty values for tier / agent override keys that were
@@ -1056,46 +1311,128 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
           Categories
         </Typography>
         <Typography variant='caption' sx={{ display: 'block', mb: 'var(--ds-space-3)', color: 'var(--ds-gray-500)' }}>
-          Per-category model overrides. Leave a row blank to inherit the global model above.
+          Per-category overrides. Leave Provider as <strong>Inherit</strong> to use the global setting above; pick a different provider to route this
+          category to a separate LLM.
         </Typography>
-        <Table size='small' sx={{ mb: 'var(--ds-space-4)' }}>
-          <TableHead>
-            <TableRow>
-              <TableCell sx={{ width: ds.space.mul(4, 9), fontWeight: 'var(--ds-font-weight-semibold)' }}>Category</TableCell>
-              <TableCell sx={{ fontWeight: 'var(--ds-font-weight-semibold)' }}>Model</TableCell>
-              <TableCell sx={{ fontWeight: 'var(--ds-font-weight-semibold)' }}>Fallbacks</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {TIER_KEYS.map((tierKey) => (
-              <TableRow key={tierKey}>
-                <TableCell>
-                  <Tooltip title={TIER_HINTS[tierKey]} placement='top'>
-                    <Box sx={{ fontWeight: 'var(--ds-font-weight-medium)' }}>{TIER_LABELS[tierKey]}</Box>
-                  </Tooltip>
-                </TableCell>
-                <TableCell>
+        <Stack spacing='var(--ds-space-3)' sx={{ mb: 'var(--ds-space-4)' }}>
+          {TIER_KEYS.map((tierKey) => {
+            const t = tiers[tierKey];
+            const overrideProvider = t.provider || '';
+            const shape = providerFieldShape(overrideProvider);
+            const tierExample = (PROVIDER_EXAMPLES[overrideProvider || provider] || {})[tierKey] || providerExample[tierKey];
+            // Auto-open the override pane whenever a cred or half-set error
+            // exists, so the user can SEE what's wrong even if they closed it.
+            const overridePaneOpen = t.providerOverrideOpen || !!errors.tierCreds[tierKey] || !!errors.tierProviderModel[tierKey];
+            return (
+              <Box
+                key={tierKey}
+                sx={{
+                  border: '1px solid',
+                  borderColor: 'var(--ds-gray-300)',
+                  borderRadius: 'var(--ds-radius-sm)',
+                  p: 'var(--ds-space-3)',
+                }}
+              >
+                <Tooltip title={TIER_HINTS[tierKey]} placement='top'>
+                  <Box sx={{ fontWeight: 'var(--ds-font-weight-semibold)', mb: 'var(--ds-space-2)' }}>{TIER_LABELS[tierKey]}</Box>
+                </Tooltip>
+                <Stack spacing='var(--ds-space-2)'>
                   <Input
+                    label='Model'
                     size='sm'
-                    value={tiers[tierKey].model}
-                    placeholder={model || `e.g. ${providerExample[tierKey]}`}
+                    value={t.model}
+                    placeholder={model || `e.g. ${tierExample}`}
                     onChange={(value) => updateTier(tierKey, 'model', value)}
-                    error={errors.tierModels[tierKey]}
+                    error={errors.tierModels[tierKey] || errors.tierProviderModel[tierKey]}
                   />
-                </TableCell>
-                <TableCell>
                   <Input
+                    label='Fallbacks'
                     size='sm'
-                    value={tiers[tierKey].fallbacks}
+                    value={t.fallbacks}
                     placeholder='comma-separated'
                     onChange={(value) => updateTier(tierKey, 'fallbacks', value)}
                     error={errors.tierFallbacks[tierKey]}
                   />
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+                  {!overridePaneOpen ? (
+                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--ds-space-2)' }}>
+                      <Typography variant='caption' sx={{ color: 'var(--ds-gray-500)' }}>
+                        Provider, credentials inherit from global ({provider || 'set global provider above'}).
+                      </Typography>
+                      <Button
+                        tone='ghost'
+                        size='sm'
+                        onClick={() => updateTier(tierKey, 'providerOverrideOpen', true)}
+                        data-testid={`tier-override-open-${tierKey}`}
+                      >
+                        + Override provider
+                      </Button>
+                    </Box>
+                  ) : (
+                    <>
+                      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mt: 'var(--ds-space-2)' }}>
+                        <Typography variant='caption' sx={{ color: 'var(--ds-gray-700)', fontWeight: 'var(--ds-font-weight-semibold)' }}>
+                          Override
+                        </Typography>
+                        <Button tone='ghost' size='sm' onClick={() => revertTierOverride(tierKey)} data-testid={`tier-override-revert-${tierKey}`}>
+                          × Revert to inherit
+                        </Button>
+                      </Box>
+                      <Select
+                        size='sm'
+                        label='Provider'
+                        value={t.provider || INHERIT_SENTINEL}
+                        onChange={(value) => updateTier(tierKey, 'provider', value === INHERIT_SENTINEL ? '' : value)}
+                        options={[
+                          { value: INHERIT_SENTINEL, label: provider ? `Inherit (${provider}, from global)` : 'Inherit (set global provider first)' },
+                          ...PROVIDERS.map((p) => ({ value: p, label: p })),
+                        ]}
+                      />
+                      {overrideProvider && errors.tierCreds[tierKey] && (
+                        <Box sx={{ color: 'var(--ds-red-600)', fontSize: 'var(--ds-text-caption)' }}>✗ {errors.tierCreds[tierKey]}</Box>
+                      )}
+                      {overrideProvider && shape.showsApiKey && (
+                        <SecretInput
+                          label='API Key'
+                          value={t.apiKey}
+                          onChange={(value) => updateTier(tierKey, 'apiKey', value)}
+                          isConfigured={secretsConfigured[`llm_tier_api_key_${tierKey}`]}
+                        />
+                      )}
+                      {overrideProvider && shape.showsApiEndpoint && (
+                        <Input label='API Endpoint' size='sm' value={t.apiEndpoint} onChange={(value) => updateTier(tierKey, 'apiEndpoint', value)} />
+                      )}
+                      {overrideProvider && shape.showsApiVersion && (
+                        <Input label='API Version' size='sm' value={t.apiVersion} onChange={(value) => updateTier(tierKey, 'apiVersion', value)} />
+                      )}
+                      {overrideProvider && shape.showsRegion && (
+                        <Input label='Region' size='sm' value={t.region} onChange={(value) => updateTier(tierKey, 'region', value)} />
+                      )}
+                      {overrideProvider && shape.showsBedrockKeys && (
+                        <>
+                          <SecretInput
+                            label='AWS Access Key'
+                            value={t.accessKey}
+                            onChange={(value) => updateTier(tierKey, 'accessKey', value)}
+                            isConfigured={secretsConfigured[`llm_tier_access_key_${tierKey}`]}
+                          />
+                          <SecretInput
+                            label='AWS Secret Key'
+                            value={t.secretKey}
+                            onChange={(value) => updateTier(tierKey, 'secretKey', value)}
+                            isConfigured={secretsConfigured[`llm_tier_secret_key_${tierKey}`]}
+                          />
+                        </>
+                      )}
+                      {shape.showsApiType && (
+                        <Input label='API Type' size='sm' value={t.apiType} onChange={(value) => updateTier(tierKey, 'apiType', value)} />
+                      )}
+                    </>
+                  )}
+                </Stack>
+              </Box>
+            );
+          })}
+        </Stack>
 
         <Divider />
 
@@ -1104,7 +1441,8 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
           Agent Overrides
         </Typography>
         <Typography variant='caption' sx={{ display: 'block', mb: 'var(--ds-space-3)', color: 'var(--ds-gray-500)' }}>
-          For specific agents that need a different model than their category default. Provider is inherited from the global setting above.
+          For specific agents that need a different model — or a different provider — than their category default. Agent overrides take precedence
+          over category settings.
         </Typography>
 
         {agentRows.length === 0 ? (
@@ -1123,64 +1461,218 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
             No agent overrides configured.
           </Box>
         ) : (
-          <Table size='small' sx={{ mb: 'var(--ds-space-4)' }}>
-            <TableHead>
-              <TableRow>
-                <TableCell sx={{ width: ds.space.mul(4, 14), fontWeight: 'var(--ds-font-weight-semibold)' }}>Agent</TableCell>
-                <TableCell sx={{ fontWeight: 'var(--ds-font-weight-semibold)' }}>Model</TableCell>
-                <TableCell sx={{ fontWeight: 'var(--ds-font-weight-semibold)' }}>Fallbacks</TableCell>
-                <TableCell sx={{ width: ds.space.mul(2, 6), fontWeight: 'var(--ds-font-weight-semibold)' }}></TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {agentRows.map((row, idx) => (
-                <TableRow key={`agent-row-${idx}`}>
-                  <TableCell>
-                    <Select
-                      size='sm'
-                      value={row.agent}
-                      onChange={(value) => updateAgentRow(idx, 'agent', value)}
-                      disabled={agentsLoading}
-                      placeholder={agentsLoading ? '(loading agents…)' : '(select agent)'}
-                      options={knownAgents.map((a) => ({
-                        value: a.key,
-                        label: a.label,
-                        disabled: a.key !== row.agent && usedAgents.has(a.key),
-                      }))}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <Input
-                      size='sm'
-                      value={row.model}
-                      placeholder={`e.g. ${providerExample.reasoning}`}
-                      onChange={(value) => updateAgentRow(idx, 'model', value)}
-                      error={errors.agentRows[idx]?.model}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <Input
-                      size='sm'
-                      value={row.fallbacks}
-                      placeholder='comma-separated'
-                      onChange={(value) => updateAgentRow(idx, 'fallbacks', value)}
-                      error={errors.agentRows[idx]?.fallbacks}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <Button
-                      tone='ghost'
-                      size='sm'
-                      icon={<DeleteOutlineIcon />}
-                      onClick={() => removeAgentRow(idx)}
-                      data-testid={`remove-agent-row-${idx}`}
-                      aria-label='Remove row'
-                    />
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+          <>
+            {(agentRows.length > 3 || agentFilter) && (
+              <Box sx={{ mb: 'var(--ds-space-3)' }}>
+                <Input size='sm' placeholder='Filter agents…' value={agentFilter} onChange={setAgentFilter} />
+              </Box>
+            )}
+            <Stack spacing='var(--ds-space-2)' sx={{ mb: 'var(--ds-space-4)' }}>
+              {agentRows.map((row, idx) => {
+                if (agentFilter && row.agent && !row.agent.toLowerCase().includes(agentFilter.toLowerCase())) {
+                  return null;
+                }
+                const overrideProvider = row.provider || '';
+                const shape = providerFieldShape(overrideProvider);
+                const providerLabel = row.provider || (provider ? `Inherit (${provider})` : 'Inherit');
+                const collapsed = row.collapsed && row.agent && row.model;
+                // Auto-open the override pane on any cred or half-set error so
+                // the user sees what's wrong even when they closed the section.
+                const agentOverridePaneOpen = row.providerOverrideOpen || !!errors.agentRows[idx]?.creds || !!errors.agentRows[idx]?.providerModel;
+                return (
+                  <Box
+                    key={`agent-row-${idx}`}
+                    sx={{
+                      border: '1px solid',
+                      borderColor: 'var(--ds-gray-300)',
+                      borderRadius: 'var(--ds-radius-sm)',
+                      p: 'var(--ds-space-3)',
+                    }}
+                  >
+                    {collapsed ? (
+                      <Box
+                        sx={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 'var(--ds-space-3)',
+                          cursor: 'pointer',
+                        }}
+                        onClick={() => updateAgentRow(idx, 'collapsed', false)}
+                        data-testid={`agent-row-expand-${idx}`}
+                      >
+                        <Box sx={{ fontWeight: 'var(--ds-font-weight-semibold)', flex: '0 0 auto' }}>{row.agent}</Box>
+                        <Box sx={{ color: 'var(--ds-gray-500)', fontSize: 'var(--ds-text-body)', flex: 1 }}>
+                          {providerLabel} · {row.model}
+                        </Box>
+                        <Button
+                          tone='ghost'
+                          size='sm'
+                          icon={<ExpandMoreIcon />}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            updateAgentRow(idx, 'collapsed', false);
+                          }}
+                          aria-label='Expand'
+                        />
+                        <Button
+                          tone='ghost'
+                          size='sm'
+                          icon={<DeleteOutlineIcon />}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeAgentRow(idx);
+                          }}
+                          data-testid={`remove-agent-row-${idx}`}
+                          aria-label='Remove row'
+                        />
+                      </Box>
+                    ) : (
+                      <Stack spacing='var(--ds-space-2)'>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)' }}>
+                          <Box sx={{ flex: 1 }}>
+                            <Select
+                              size='sm'
+                              label='Agent'
+                              value={row.agent}
+                              onChange={(value) => updateAgentRow(idx, 'agent', value)}
+                              disabled={agentsLoading}
+                              placeholder={agentsLoading ? '(loading agents…)' : '(select agent)'}
+                              options={knownAgents.map((a) => ({
+                                value: a.key,
+                                label: a.label,
+                                disabled: a.key !== row.agent && usedAgents.has(a.key),
+                              }))}
+                            />
+                          </Box>
+                          {row.agent && row.model && (
+                            <Button
+                              tone='ghost'
+                              size='sm'
+                              icon={<ExpandLessIcon />}
+                              onClick={() => updateAgentRow(idx, 'collapsed', true)}
+                              aria-label='Collapse'
+                            />
+                          )}
+                          <Button
+                            tone='ghost'
+                            size='sm'
+                            icon={<DeleteOutlineIcon />}
+                            onClick={() => removeAgentRow(idx)}
+                            data-testid={`remove-agent-row-${idx}`}
+                            aria-label='Remove row'
+                          />
+                        </Box>
+                        <Input
+                          label='Model'
+                          size='sm'
+                          value={row.model}
+                          placeholder={`e.g. ${providerExample.reasoning}`}
+                          onChange={(value) => updateAgentRow(idx, 'model', value)}
+                          error={errors.agentRows[idx]?.model || errors.agentRows[idx]?.providerModel}
+                        />
+                        <Input
+                          label='Fallbacks'
+                          size='sm'
+                          value={row.fallbacks}
+                          placeholder='comma-separated'
+                          onChange={(value) => updateAgentRow(idx, 'fallbacks', value)}
+                          error={errors.agentRows[idx]?.fallbacks}
+                        />
+                        {!agentOverridePaneOpen ? (
+                          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--ds-space-2)' }}>
+                            <Typography variant='caption' sx={{ color: 'var(--ds-gray-500)' }}>
+                              Provider, credentials inherit from global ({provider || 'set global provider above'}).
+                            </Typography>
+                            <Button
+                              tone='ghost'
+                              size='sm'
+                              onClick={() => updateAgentRow(idx, 'providerOverrideOpen', true)}
+                              data-testid={`agent-override-open-${idx}`}
+                            >
+                              + Override provider
+                            </Button>
+                          </Box>
+                        ) : (
+                          <>
+                            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mt: 'var(--ds-space-2)' }}>
+                              <Typography variant='caption' sx={{ color: 'var(--ds-gray-700)', fontWeight: 'var(--ds-font-weight-semibold)' }}>
+                                Override
+                              </Typography>
+                              <Button tone='ghost' size='sm' onClick={() => revertAgentOverride(idx)} data-testid={`agent-override-revert-${idx}`}>
+                                × Revert to inherit
+                              </Button>
+                            </Box>
+                            <Select
+                              size='sm'
+                              label='Provider'
+                              value={row.provider || INHERIT_SENTINEL}
+                              onChange={(value) => updateAgentRow(idx, 'provider', value === INHERIT_SENTINEL ? '' : value)}
+                              options={[
+                                {
+                                  value: INHERIT_SENTINEL,
+                                  label: provider ? `Inherit (${provider}, from global)` : 'Inherit (set global provider first)',
+                                },
+                                ...PROVIDERS.map((p) => ({ value: p, label: p })),
+                              ]}
+                            />
+                            {overrideProvider && errors.agentRows[idx]?.creds && (
+                              <Box sx={{ color: 'var(--ds-red-600)', fontSize: 'var(--ds-text-caption)' }}>✗ {errors.agentRows[idx].creds}</Box>
+                            )}
+                            {overrideProvider && shape.showsApiKey && (
+                              <SecretInput
+                                label='API Key'
+                                value={row.apiKey}
+                                onChange={(value) => updateAgentRow(idx, 'apiKey', value)}
+                                isConfigured={secretsConfigured[`llm_provider_api_key_${row.agent}`]}
+                              />
+                            )}
+                            {overrideProvider && shape.showsApiEndpoint && (
+                              <Input
+                                label='API Endpoint'
+                                size='sm'
+                                value={row.apiEndpoint}
+                                onChange={(value) => updateAgentRow(idx, 'apiEndpoint', value)}
+                              />
+                            )}
+                            {overrideProvider && shape.showsApiVersion && (
+                              <Input
+                                label='API Version'
+                                size='sm'
+                                value={row.apiVersion}
+                                onChange={(value) => updateAgentRow(idx, 'apiVersion', value)}
+                              />
+                            )}
+                            {overrideProvider && shape.showsRegion && (
+                              <Input label='Region' size='sm' value={row.region} onChange={(value) => updateAgentRow(idx, 'region', value)} />
+                            )}
+                            {overrideProvider && shape.showsBedrockKeys && (
+                              <>
+                                <SecretInput
+                                  label='AWS Access Key'
+                                  value={row.accessKey}
+                                  onChange={(value) => updateAgentRow(idx, 'accessKey', value)}
+                                  isConfigured={secretsConfigured[`llm_provider_access_key_${row.agent}`]}
+                                />
+                                <SecretInput
+                                  label='AWS Secret Key'
+                                  value={row.secretKey}
+                                  onChange={(value) => updateAgentRow(idx, 'secretKey', value)}
+                                  isConfigured={secretsConfigured[`llm_provider_secret_key_${row.agent}`]}
+                                />
+                              </>
+                            )}
+                            {overrideProvider && shape.showsApiType && (
+                              <Input label='API Type' size='sm' value={row.apiType} onChange={(value) => updateAgentRow(idx, 'apiType', value)} />
+                            )}
+                          </>
+                        )}
+                      </Stack>
+                    )}
+                  </Box>
+                );
+              })}
+            </Stack>
+          </>
         )}
 
         <Button id='add-agent-override-row-btn' tone='secondary' size='md' onClick={addAgentRow}>

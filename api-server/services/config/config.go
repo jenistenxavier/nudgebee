@@ -3,9 +3,20 @@ package config
 import (
 	"log/slog"
 	"os"
+	"slices"
+	"strings"
 
 	"github.com/spf13/viper"
 )
+
+// compromisedEncryptionKeys lists NUDGEBEE_ENCRYPTION_KEY values that were
+// previously published as samples in .env.example commits — they're now
+// public secrets and must not be used. Add to this list when rotating
+// out future leaked values; never remove entries.
+var compromisedEncryptionKeys = []string{
+	// Earlier .env.example default — ASCII "0" repeated 32 times.
+	"3030303030303030303030303030303030303030303030303030303030303030",
+}
 
 var Config appConfig
 
@@ -368,6 +379,33 @@ func init() {
 	err = viper.Unmarshal(&Config)
 	if err != nil {
 		slog.Error("Error unmarshalling config", "error", err)
+	}
+
+	// Two distinct startup checks on NUDGEBEE_ENCRYPTION_KEY:
+	//
+	//  1. __REPLACE__ placeholder → fatal. Indicates a fresh `cp .env.example .env`
+	//     where the operator never filled the placeholder in. Encryption would
+	//     fail anyway (the literal isn't valid hex), so refusing to boot just
+	//     surfaces the real problem with an actionable message.
+	//
+	//  2. Previously-published sample (compromisedEncryptionKeys) → loud
+	//     warning, NOT fatal. Existing deployments that adopted the sample
+	//     value already have data encrypted under it; rotating requires a
+	//     decrypt-then-reencrypt migration of every encrypted column.
+	//     Refusing to boot here would strand them with no path forward.
+	//     The warning is loud so operators see it in pod logs and alerts,
+	//     but the deploy keeps running while they plan the rotation.
+	if v := Config.NudgebeeEncryptionKey; v != "" {
+		if strings.HasPrefix(v, "__REPLACE__") {
+			slog.Error("FATAL: NUDGEBEE_ENCRYPTION_KEY is still the .env.example placeholder. " +
+				"Generate a fresh key (openssl rand -hex 32) and set it in .env before starting services-server.")
+			os.Exit(1)
+		}
+		if slices.Contains(compromisedEncryptionKeys, v) {
+			slog.Warn("SECURITY: NUDGEBEE_ENCRYPTION_KEY matches a previously-published sample value and must be considered compromised. " +
+				"Plan a key rotation: decrypt existing encrypted columns with the old key, generate a fresh key (openssl rand -hex 32), update api-server/services/.env and app/.env, then re-encrypt. " +
+				"This warning fires on every boot until the key is rotated.")
+		}
 	}
 
 	for _, fn := range postInitHooks {

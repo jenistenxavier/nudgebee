@@ -78,7 +78,7 @@ func TestMLAnomaly(t *testing.T) {
 		K8sNamespace: "nudgebee",
 		K8sKind:      "Deployment",
 	}
-	err := processSingleApplicationMlAsync(ctxt, template, tenantId, accountId, application)
+	err := processSingleApplicationMlAsync(ctxt, template, tenantId, accountId, application, 0)
 	if err != nil {
 		println(err)
 		t.SkipNow()

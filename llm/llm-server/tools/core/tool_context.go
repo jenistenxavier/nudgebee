@@ -19,6 +19,12 @@ const (
 var ErrUnableToFetchData = errors.New("error: unable to fetch data")
 var ErrUserNotAuthorized = errors.New("error: user is not authoirized to perform this action")
 
+// Lives in tools/core (not agents/core) to avoid a circular import.
+type TierModelPick struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
 // NBQueryConfig holds structured configuration for agent requests and tool contexts.
 // It replaces the previous map[string]any with compile-time type safety.
 // JSON tags match the original map keys to preserve backward compatibility with DB-stored configs.
@@ -52,6 +58,9 @@ type NBQueryConfig struct {
 	LlmProvider  string `json:"llm_provider,omitempty"`
 	LlmModelName string `json:"llm_model_name,omitempty"`
 
+	// Mutually exclusive with LlmProvider+LlmModelName above.
+	LlmTierModels map[string]TierModelPick `json:"llm_tier_models,omitempty"`
+
 	// Original user query — preserved across sub-agent boundaries so that
 	// config selection strategies can access natural-language hints (e.g. "dev-aws")
 	// that the planner may strip when rewriting the step query.
@@ -71,7 +80,7 @@ func (q NBQueryConfig) IsEmpty() bool {
 		q.Workload == "" && q.GitRepo == "" && q.AccountId == "" &&
 		q.WorkflowId == "" && q.ExecutionId == "" && len(q.WorkflowDefinition) == 0 && len(q.Labels) == 0 &&
 		q.CurrentCluster == "" && q.CurrentClusterId == "" &&
-		q.LlmProvider == "" && q.LlmModelName == "" && len(q.ToolConfigs) == 0 &&
+		q.LlmProvider == "" && q.LlmModelName == "" && len(q.LlmTierModels) == 0 && len(q.ToolConfigs) == 0 &&
 		len(q.ClientTools) == 0 && len(q.Capabilities) == 0 && len(q.ToolConfirmations) == 0 &&
 		len(q.ToolConfigMetadata) == 0
 }
@@ -120,6 +129,9 @@ func (q *NBQueryConfig) MergeFrom(src NBQueryConfig) {
 	}
 	if q.LlmModelName == "" {
 		q.LlmModelName = src.LlmModelName
+	}
+	if len(q.LlmTierModels) == 0 && len(src.LlmTierModels) > 0 {
+		q.LlmTierModels = src.LlmTierModels
 	}
 	if src.ToolConfigs != nil {
 		q.ToolConfigs = lo.Assign(src.ToolConfigs, q.ToolConfigs)

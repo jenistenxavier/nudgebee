@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"math/rand/v2"
+
 	"nudgebee/llm/common"
 	"nudgebee/llm/config"
 	"nudgebee/llm/security"
@@ -134,6 +135,16 @@ type LLMContextKey string
 const (
 	ContextKeyLlmProviderOverride LLMContextKey = "llm_provider_override"
 	ContextKeyLlmModelOverride    LLMContextKey = "llm_model_override"
+	// ContextKeyLlmTierModelOverrides carries per-category model picks for a
+	// single request (the "Per category" chat-UI mode). When set, a
+	// tier-tagged call resolves to the matching tier's (provider, model)
+	// instead of the global / db / conversation-blanket layer. Untagged
+	// calls in the same request fall through the rest of the chain as if
+	// no override was set — see the ResolveLLMConfig precedence notes.
+	//
+	// Value type: ConversationTierOverrides (passing the typed struct keeps
+	// callers from having to convert maps at the boundary).
+	ContextKeyLlmTierModelOverrides LLMContextKey = "llm_tier_model_overrides"
 	// ContextKeyDisableCaching disables provider-level prompt caching for the current
 	// request subtree. Set to true for AgentPlannerTypeCustom agents whose LLM calls
 	// embed dynamic content (query text, log data) directly in the system message,
@@ -988,10 +999,53 @@ func tryWithModel(rc *retryContext) (*llms.ContentResponse, error) {
 	completion, err := rc.llm.GenerateContent(ctx, messagesToSend, optionsToSend...)
 	if err == nil && (completion == nil || len(completion.Choices) == 0 || completion.Choices[0].Content == "") {
 		stopReason := ""
+		var toolCallCount int
+		var promptTokens, outputTokens, thinkingTokens int
+		var safetyRatings any
 		if completion != nil && len(completion.Choices) > 0 {
-			stopReason = completion.Choices[0].StopReason
+			c := completion.Choices[0]
+			stopReason = c.StopReason
+			toolCallCount = len(c.ToolCalls)
+			if c.GenerationInfo != nil {
+				// Each provider lays this out slightly differently; read the
+				// most common keys. Missing keys are harmless (default zero).
+				promptTokens = extractInt(c.GenerationInfo["PromptTokens"])
+				if promptTokens == 0 {
+					promptTokens = extractInt(c.GenerationInfo["input_tokens"])
+				}
+				outputTokens = extractInt(c.GenerationInfo["CompletionTokens"])
+				if outputTokens == 0 {
+					outputTokens = extractInt(c.GenerationInfo["output_tokens"])
+				}
+				thinkingTokens = extractInt(c.GenerationInfo["ThinkingTokens"])
+				safetyRatings = c.GenerationInfo["safety_ratings"] // Gemini SAFETY key
+				if safetyRatings == nil {
+					safetyRatings = c.GenerationInfo["SAFETY"]
+				}
+			}
 		}
-		rc.ctx.GetLogger().Warn("LLM returned empty content", "model", rc.currentModel, "stopReason", stopReason)
+		// Total input chars across messages — coarse proxy for "did we send a huge prompt".
+		// Cheaper to compute than tokens and useful for cross-checking against provider limits.
+		inputChars := 0
+		for _, m := range messagesToSend {
+			for _, p := range m.Parts {
+				if tp, ok := p.(llms.TextContent); ok {
+					inputChars += len(tp.Text)
+				}
+			}
+		}
+		rc.ctx.GetLogger().Warn("LLM returned empty content",
+			"model", rc.currentModel,
+			"provider", rc.currentProvider,
+			"stopReason", stopReason,
+			"toolCalls", toolCallCount,
+			"promptTokens", promptTokens,
+			"outputTokens", outputTokens,
+			"thinkingTokens", thinkingTokens,
+			"inputMessages", len(messagesToSend),
+			"inputChars", inputChars,
+			"safetyRatings", safetyRatings,
+		)
 		if strings.EqualFold(stopReason, "MALFORMED_FUNCTION_CALL") {
 			err = errors.New("llm returned empty content: MALFORMED_FUNCTION_CALL")
 			rc.hasMalformedFunctionCall = true // sticky: preserved across all retries
@@ -1694,14 +1748,21 @@ func handleTransientError(rc *retryContext, maxAttempts int) (*llms.ContentRespo
 			ctx.GetLogger().Info("Error type changed to quota error during retry, switching to Strategy 2",
 				"attempt", attempt)
 
-			// Check if conversation has explicit model configuration
+			// Check if conversation has explicit model configuration. Either
+			// mode (blanket or per-tier) counts as "explicit" for the purpose
+			// of skipping the global fallback chain — the user picked
+			// something specific and we shouldn't quietly substitute a
+			// fallback model from the account default.
 			conversationHasExplicitModel := false
 			if rc.conversationId != "" {
-				if p, m, err := GetConversationOverride(rc.conversationId); err == nil && p != "" && m != "" {
-					conversationHasExplicitModel = true
-					ctx.GetLogger().Info("Conversation has explicit model, skipping fallbacks in retry",
-						"provider", p,
-						"model", m)
+				if p, m, tierOverrides, err := GetConversationOverride(rc.conversationId); err == nil {
+					if (p != "" && m != "") || tierOverrides.HasAny() {
+						conversationHasExplicitModel = true
+						ctx.GetLogger().Info("Conversation has explicit model, skipping fallbacks in retry",
+							"provider", p,
+							"model", m,
+							"has_tier_overrides", tierOverrides.HasAny())
+					}
 				}
 			}
 
@@ -2190,6 +2251,37 @@ func isRetryableError(err error) bool {
 
 	// All our specific error types are retryable
 	return isTokenLimitError(err) || isQuotaError(err) || isTransientError(err) || isEmptyResponseError(err) || isCacheError(err) || isProgramError(err)
+}
+
+// classifyUserFacingLLMError maps an internal LLM error to a typed, HTTP-coded,
+// user-safe error (one of the ErrLLM* values) for the known failure modes,
+// using the same detectors that drive the retry/fallback logic. Returning the
+// typed error lets it propagate through the normal error path so the executor
+// surfaces its clean Message as the assistant reply with the right status code,
+// instead of a generic "internal error".
+//
+// Returns nil when the error doesn't match a known class, so callers fall back
+// to their existing generic handling (and never leak the raw provider error).
+func classifyUserFacingLLMError(err error) error {
+	// Order matters: the quota/throttle check MUST come before the token-limit
+	// check. AWS Bedrock surfaces 429 throttling as a wrapped "token limit
+	// error ... ThrottlingException: Too many tokens" string that matches both
+	// isQuotaError and isTokenLimitError. It is a capacity event, not a
+	// context-window overflow, so it must be classified as rate-limited —
+	// otherwise the user is wrongly told to shorten a request that was the
+	// right size.
+	switch {
+	case err == nil:
+		return nil
+	case isQuotaError(err):
+		return ErrLLMRateLimited
+	case isTokenLimitError(err):
+		return ErrLLMRequestTooLarge
+	case isTransientError(err):
+		return ErrLLMServiceUnavailable
+	default:
+		return nil
+	}
 }
 
 // syncModelWithContextOverrides returns the effective provider and model for an LLM call,

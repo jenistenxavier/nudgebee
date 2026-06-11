@@ -115,15 +115,23 @@ func handleConversationApis(r *gin.Engine, tracer trace.Tracer, meter metric.Met
 			"is_custom": false,
 		}
 
-		// If conversation provided, check if it has a custom model set
+		// If conversation provided, check if it has a custom model set.
+		// Blanket mode (provider+model) reported as is_custom=true with a
+		// scalar pick; per-tier mode reported as is_custom=true with a map
+		// of picks under "tier_overrides". Both modes are mutually exclusive
+		// at the conversation row level.
 		if request.ConversationId != "" {
-			convProvider, convModel, err := core.GetConversationOverride(request.ConversationId)
+			convProvider, convModel, tierOverrides, err := core.GetConversationOverride(request.ConversationId)
 			if err == nil && convProvider != "" && convModel != "" {
 				response["current"] = map[string]string{
 					"provider": convProvider,
 					"model":    convModel,
 				}
 				response["is_custom"] = true
+			} else if err == nil && tierOverrides.HasAny() {
+				response["tier_overrides"] = tierOverrides.Picks
+				response["is_custom"] = true
+				response["current"] = response["default"]
 			} else {
 				// No custom model, current = default
 				response["current"] = response["default"]

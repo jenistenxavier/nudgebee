@@ -264,9 +264,11 @@ const KubernetesSLOConfigs: React.FC<KubernetesSLOConfigsProps> = ({ accountId }
           actions={
             <>
               <DownloadButton id='k8s-slo-configs-download' onClick={async () => ({ tableId: 'table-k8s-slo-configs' })} />
-              <Button onClick={handleOpenSLODialog} id='add-slo-config-btn'>
-                Add SLO
-              </Button>
+              {hasWriteAccess(accountId) && (
+                <Button onClick={handleOpenSLODialog} id='add-slo-config-btn'>
+                  Add SLO
+                </Button>
+              )}
             </>
           }
         >

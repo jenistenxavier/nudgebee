@@ -444,6 +444,35 @@ describe('tryBypassGraphQL', () => {
     expect(result.body.errors?.[0].message).toMatch(/Role 'viewer' is not permitted/);
   });
 
+  it('reports a no-tenant-role error (not a misleading forbidden) when the session has no roles', async () => {
+    const fetchMock = jest.fn();
+    (global as { fetch: unknown }).fetch = fetchMock;
+
+    // A user switched to a tenant where they have no assignment: roles === [].
+    const noRoleJwt = { ...adminJwt, roles: [], isSuperAdmin: false } as JWT;
+    const result = await tryBypassGraphQL({
+      query: 'query R { recommendations_list { items { id } } }',
+      variables: undefined,
+      jwt: noRoleJwt,
+      traceparent: 'tp',
+      requestId: 'rid',
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.handled).toBe(true);
+    if (!result.handled) {
+      return;
+    }
+    expect(result.body.errors).toHaveLength(1);
+    expect(result.body.errors?.[0]).toMatchObject({
+      path: ['recommendations_list'],
+      extensions: { code: 'NO_TENANT_ROLE' },
+    });
+    // Must NOT falsely name tenant_admin_readonly (the fallback label).
+    expect(result.body.errors?.[0].message).not.toMatch(/tenant_admin_readonly/);
+    expect(result.body.errors?.[0].message).toMatch(/role assigned in the current tenant/);
+  });
+
   it('lets super_admin sessions bypass per-action role gates', async () => {
     const fetchMock = mockFetchOnce({ items: [] });
     const superJwt = { ...adminJwt, roles: ['some_role_not_allowed'], isSuperAdmin: true } as JWT;

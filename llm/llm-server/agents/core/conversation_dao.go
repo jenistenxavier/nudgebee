@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -42,17 +44,82 @@ const (
 var ErrConversationNotFound = errors.New("history: conversation not found")
 
 type Conversation struct {
-	TenantID    uuid.UUID           `json:"tenant_id,omitempty" db:"tenant_id"`
-	AccountID   uuid.UUID           `json:"account_id" db:"account_id"`
-	UserID      uuid.UUID           `json:"user_id" db:"user_id"`
-	SessionID   string              `json:"session_id" db:"session_id"`
-	ID          uuid.UUID           `json:"id" db:"id"`
-	Context     map[string]any      `json:"context,omitempty" db:"context"`
-	Status      ConversationStatus  `json:"status,omitempty" db:"status"`
-	Title       *string             `json:"title,omitempty" db:"title"`
-	Source      *ConversationSource `json:"source,omitempty" db:"source"`
-	LlmProvider *string             `json:"llm_provider,omitempty" db:"llm_provider"`
-	LlmModel    *string             `json:"llm_model,omitempty" db:"llm_model"`
+	TenantID         uuid.UUID                  `json:"tenant_id,omitempty" db:"tenant_id"`
+	AccountID        uuid.UUID                  `json:"account_id" db:"account_id"`
+	UserID           uuid.UUID                  `json:"user_id" db:"user_id"`
+	SessionID        string                     `json:"session_id" db:"session_id"`
+	ID               uuid.UUID                  `json:"id" db:"id"`
+	Context          map[string]any             `json:"context,omitempty" db:"context"`
+	Status           ConversationStatus         `json:"status,omitempty" db:"status"`
+	Title            *string                    `json:"title,omitempty" db:"title"`
+	Source           *ConversationSource        `json:"source,omitempty" db:"source"`
+	LlmProvider      *string                    `json:"llm_provider,omitempty" db:"llm_provider"`
+	LlmModel         *string                    `json:"llm_model,omitempty" db:"llm_model"`
+	LlmTierOverrides *ConversationTierOverrides `json:"llm_tier_overrides,omitempty" db:"llm_tier_overrides"`
+}
+
+type TierModelPick struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
+// Typed view of the llm_conversations.llm_tier_overrides jsonb column.
+// Map keys are ModelTier names; empty Picks → SQL NULL via Value below.
+type ConversationTierOverrides struct {
+	Picks map[string]TierModelPick `json:"picks,omitempty"`
+}
+
+func (c *ConversationTierOverrides) HasAny() bool {
+	if c == nil {
+		return false
+	}
+	for _, p := range c.Picks {
+		if p.Provider != "" && p.Model != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// Half-set picks (only provider OR only model) fall through to lower
+// precedence layers — never returned as present.
+func (c *ConversationTierOverrides) Get(tier string) (TierModelPick, bool) {
+	if c == nil {
+		return TierModelPick{}, false
+	}
+	p, ok := c.Picks[tier]
+	if !ok || p.Provider == "" || p.Model == "" {
+		return TierModelPick{}, false
+	}
+	return p, true
+}
+
+func (c ConversationTierOverrides) Value() (driver.Value, error) {
+	if len(c.Picks) == 0 {
+		return nil, nil
+	}
+	return json.Marshal(c)
+}
+
+func (c *ConversationTierOverrides) Scan(src any) error {
+	if src == nil {
+		c.Picks = nil
+		return nil
+	}
+	var raw []byte
+	switch v := src.(type) {
+	case []byte:
+		raw = v
+	case string:
+		raw = []byte(v)
+	default:
+		return fmt.Errorf("ConversationTierOverrides.Scan: unsupported source type %T", src)
+	}
+	if len(raw) == 0 {
+		c.Picks = nil
+		return nil
+	}
+	return json.Unmarshal(raw, c)
 }
 
 type ConversationMessage struct {
@@ -152,10 +219,12 @@ type IConversationDao interface {
 	GetConversationBySession(accountID, sessionID string) (Conversation, error)
 	UpdateConversationTitle(conversationId, title string) error
 	UpdateConversationModel(conversationId, provider, model string) error
+	UpdateConversationModelBlanket(conversationId, provider, model string) error
+	UpdateConversationTierOverrides(conversationId string, overrides ConversationTierOverrides) error
 	UpdateMessageAcknowledgement(messageId, accountId, ackMessage string) error
 	UpdateConversationContext(conversationId string, context map[string]any) error
 	GetConversation(conversationId string) (Conversation, error)
-	SaveConversation(id, sessionID, tenantId, accountID, userId, context, title string, status ConversationStatus, source ConversationSource, llmProvider, llmModel string) (uuid.UUID, error)
+	SaveConversation(id, sessionID, tenantId, accountID, userId, context, title string, status ConversationStatus, source ConversationSource, llmProvider, llmModel string, llmTierOverrides *ConversationTierOverrides) (uuid.UUID, error)
 	UpdateConversationStatus(conversationId string, status ConversationStatus) error
 	ListConversationMessages(status ConversationStatus, workerName string, conversationId string, deadWorker bool) ([]ConversationMessage, error)
 	SaveConversationMessage(id, conversationId, accountID, userId string, role MessageRole, messageType MessageType, message, response, agentName string, parentAgentId uuid.UUID, messageConfig any, messageContext string, llmProvider, llmModel string) (uuid.UUID, error)
@@ -694,22 +763,55 @@ func (chat *ConversationDao) UpdateConversationTitle(conversationId, title strin
 	return nil
 }
 
-// UpdateConversationModel updates the LLM model configuration for a conversation
-func (chat *ConversationDao) UpdateConversationModel(conversationId, provider, model string) error {
+// Clears llm_tier_overrides in the same UPDATE — blanket and tier modes are
+// mutually exclusive at the row level.
+func (chat *ConversationDao) UpdateConversationModelBlanket(conversationId, provider, model string) error {
 	if conversationId == "" {
 		return errors.New("history: conversationId is required")
 	}
 
-	query := `UPDATE llm_conversations SET llm_provider = $2, llm_model = $3, updated_at = now() WHERE id = $1`
+	query := `UPDATE llm_conversations
+	          SET llm_provider = $2, llm_model = $3,
+	              llm_tier_overrides = NULL,
+	              updated_at = now()
+	          WHERE id = $1`
 	_, err := chat.dbManager.Db.Exec(query, conversationId, provider, model)
 	if err != nil {
-		slog.Error("history: unable to update conversation model", "error", err)
-		return fmt.Errorf("history: unable to update conversation model: %w", err)
+		slog.Error("history: unable to update conversation model (blanket)", "error", err)
+		return fmt.Errorf("history: unable to update conversation model (blanket): %w", err)
 	}
 	return nil
 }
 
-func (chat *ConversationDao) SaveConversation(id, sessionID, tenantId, accountID, userId, context, title string, status ConversationStatus, source ConversationSource, llmProvider, llmModel string) (uuid.UUID, error) {
+// Clears llm_provider and llm_model in the same UPDATE — see
+// UpdateConversationModelBlanket for the mutual-exclusivity rule.
+func (chat *ConversationDao) UpdateConversationTierOverrides(conversationId string, overrides ConversationTierOverrides) error {
+	if conversationId == "" {
+		return errors.New("history: conversationId is required")
+	}
+
+	query := `UPDATE llm_conversations
+	          SET llm_provider = NULL, llm_model = NULL,
+	              llm_tier_overrides = $2,
+	              updated_at = now()
+	          WHERE id = $1`
+	_, err := chat.dbManager.Db.Exec(query, conversationId, overrides)
+	if err != nil {
+		slog.Error("history: unable to update conversation tier overrides", "error", err)
+		return fmt.Errorf("history: unable to update conversation tier overrides: %w", err)
+	}
+	return nil
+}
+
+// Deprecated: use UpdateConversationModelBlanket directly.
+func (chat *ConversationDao) UpdateConversationModel(conversationId, provider, model string) error {
+	return chat.UpdateConversationModelBlanket(conversationId, provider, model)
+}
+
+func (chat *ConversationDao) SaveConversation(id, sessionID, tenantId, accountID, userId, context, title string, status ConversationStatus, source ConversationSource, llmProvider, llmModel string, llmTierOverrides *ConversationTierOverrides) (uuid.UUID, error) {
+	if accountID == "" || tenantId == "" {
+		return uuid.Nil, errors.New("history: accountID and tenantId are required")
+	}
 	t0 := time.Now()
 	if id == "" {
 		id = common.GenerateUUID()
@@ -734,13 +836,18 @@ func (chat *ConversationDao) SaveConversation(id, sessionID, tenantId, accountID
 		Valid:  llmModel != "",
 	}
 
+	var tierOverridesArg any
+	if llmTierOverrides != nil {
+		tierOverridesArg = *llmTierOverrides
+	}
+
 	query := `
-    INSERT INTO llm_conversations (id, session_id, tenant_id, account_id, user_id, context, status, source, title, updated_at, llm_provider, llm_model) 
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11) 
-    ON CONFLICT (session_id, user_id, account_id) 
-    DO UPDATE SET context = EXCLUDED.context, status = EXCLUDED.status, updated_at = EXCLUDED.updated_at, llm_provider = EXCLUDED.llm_provider, llm_model = EXCLUDED.llm_model RETURNING llm_conversations.id;`
+    INSERT INTO llm_conversations (id, session_id, tenant_id, account_id, user_id, context, status, source, title, updated_at, llm_provider, llm_model, llm_tier_overrides)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11, $12)
+    ON CONFLICT (session_id, user_id, account_id)
+    DO UPDATE SET context = EXCLUDED.context, status = EXCLUDED.status, updated_at = EXCLUDED.updated_at, llm_provider = EXCLUDED.llm_provider, llm_model = EXCLUDED.llm_model, llm_tier_overrides = EXCLUDED.llm_tier_overrides RETURNING llm_conversations.id;`
 	var lastId uuid.UUID
-	err := chat.dbManager.Db.QueryRow(query, id, sessionID, tenantId, accountID, userIdSql, context, status, source, title, llmProviderSql, llmModelSql).Scan(&lastId)
+	err := chat.dbManager.Db.QueryRow(query, id, sessionID, tenantId, accountID, userIdSql, context, status, source, title, llmProviderSql, llmModelSql, tierOverridesArg).Scan(&lastId)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("history: failed to save conversation: %w", err)
 	}
@@ -1002,7 +1109,10 @@ func (chat *ConversationDao) GetConversationAgentParentAgentIdAndPreviousState(a
 }
 
 func (chat *ConversationDao) GetConversationBySession(accountID, sessionID string) (Conversation, error) {
-	query := `SELECT id, user_id, session_id, account_id, context::text, status, tenant_id::text, title, source, llm_provider, llm_model FROM llm_conversations 
+	if accountID == "" {
+		return Conversation{}, errors.New("history: accountID is required")
+	}
+	query := `SELECT id, user_id, session_id, account_id, context::text, status, tenant_id::text, title, source, llm_provider, llm_model, llm_tier_overrides FROM llm_conversations
 	WHERE session_id = $1 AND account_id = $2`
 	rows, err := chat.dbManager.Db.Queryx(query, sessionID, accountID)
 	if err != nil {
@@ -1022,7 +1132,8 @@ func (chat *ConversationDao) GetConversationBySession(accountID, sessionID strin
 	var cntxt sql.NullString
 	var llmProvider, llmModel *string
 	for rows.Next() {
-		if err := rows.Scan(&id, &userId, &sessionId, &accoundId, &cntxt, &status, &tenantId, &title, &source, &llmProvider, &llmModel); err != nil {
+		var tierOverrides ConversationTierOverrides
+		if err := rows.Scan(&id, &userId, &sessionId, &accoundId, &cntxt, &status, &tenantId, &title, &source, &llmProvider, &llmModel, &tierOverrides); err != nil {
 			return Conversation{}, fmt.Errorf("history: failed to scan conversation: %w", err)
 		}
 		var context map[string]any
@@ -1049,6 +1160,10 @@ func (chat *ConversationDao) GetConversationBySession(accountID, sessionID strin
 			LlmProvider: llmProvider,
 			LlmModel:    llmModel,
 		}
+		if tierOverrides.HasAny() {
+			to := tierOverrides
+			conversation.LlmTierOverrides = &to
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return Conversation{}, fmt.Errorf("history: failed to iterate over rows: %w", err)
@@ -1058,7 +1173,7 @@ func (chat *ConversationDao) GetConversationBySession(accountID, sessionID strin
 }
 
 func (chat *ConversationDao) GetConversation(conversationId string) (Conversation, error) {
-	query := `SELECT id::text, user_id, session_id, account_id, context::text, status, tenant_id::text, title, source, llm_provider, llm_model FROM llm_conversations WHERE id = $1`
+	query := `SELECT id::text, user_id, session_id, account_id, context::text, status, tenant_id::text, title, source, llm_provider, llm_model, llm_tier_overrides FROM llm_conversations WHERE id = $1`
 	rows, err := chat.dbManager.Db.Queryx(query, conversationId)
 	if err != nil {
 		return Conversation{}, fmt.Errorf("history: failed to load conversation: %w", err)
@@ -1076,7 +1191,8 @@ func (chat *ConversationDao) GetConversation(conversationId string) (Conversatio
 	var cntxt sql.NullString
 	var llmProvider, llmModel *string
 	for rows.Next() {
-		if err := rows.Scan(&id, &userId, &sessionId, &accoundId, &cntxt, &status, &tenantId, &title, &source, &llmProvider, &llmModel); err != nil {
+		var tierOverrides ConversationTierOverrides
+		if err := rows.Scan(&id, &userId, &sessionId, &accoundId, &cntxt, &status, &tenantId, &title, &source, &llmProvider, &llmModel, &tierOverrides); err != nil {
 			return Conversation{}, fmt.Errorf("history: failed to scan conversation: %w", err)
 		}
 		var context map[string]any
@@ -1103,6 +1219,10 @@ func (chat *ConversationDao) GetConversation(conversationId string) (Conversatio
 			Source:      source,
 			LlmProvider: llmProvider,
 			LlmModel:    llmModel,
+		}
+		if tierOverrides.HasAny() {
+			to := tierOverrides
+			conversation.LlmTierOverrides = &to
 		}
 	}
 

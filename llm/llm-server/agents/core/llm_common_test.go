@@ -186,3 +186,41 @@ func TestLargestTextMessageIndex(t *testing.T) {
 		assert.Equal(t, 1, idx)
 	})
 }
+
+func TestClassifyUserFacingLLMError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want error // nil means "no known class — fall back to generic"
+	}{
+		{"nil error", nil, nil},
+		{"quota exceeded", errors.New("googleai: quota exceeded for model"), ErrLLMRateLimited},
+		{"http 429", errors.New("provider returned status 429 Too Many Requests"), ErrLLMRateLimited},
+		{"rate limit", errors.New("rate limit reached"), ErrLLMRateLimited},
+		// Real prod error: Bedrock 429 throttling wrapped as a "token limit
+		// error". Must classify as rate-limited, not request-too-large, even
+		// though the string contains "token limit"/"too many tokens".
+		{"bedrock 429 throttle wrapped as token limit", errors.New("failed to handle token limit error after 1 iterations: operation error Bedrock Runtime: Converse, https response error StatusCode: 429, RequestID: abc, ThrottlingException: Too many tokens, please wait before trying again.\nfailed to get rate limit token, retry quota exceeded, 4 available, 5 requested"), ErrLLMRateLimited},
+		{"token limit", errors.New("token limit exceeded: context length too long"), ErrLLMRequestTooLarge},
+		{"genuine context overflow", errors.New("input is too long for the requested model"), ErrLLMRequestTooLarge},
+		{"transient timeout", errors.New("request timed out"), ErrLLMServiceUnavailable},
+		{"transient 503", errors.New("upstream returned 503"), ErrLLMServiceUnavailable},
+		{"unknown error", errors.New("some unexpected parse failure"), nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyUserFacingLLMError(tt.err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestUserFacingLLMErrors_CarryHTTPCodes locks in the standard HTTP status
+// codes so they aren't accidentally changed — upstream layers branch on them.
+func TestUserFacingLLMErrors_CarryHTTPCodes(t *testing.T) {
+	assert.Equal(t, 429, ErrLLMRateLimited.Code)
+	assert.Equal(t, 413, ErrLLMRequestTooLarge.Code)
+	assert.Equal(t, 503, ErrLLMServiceUnavailable.Code)
+	// Message must be user-safe (the Error() value is what reaches the UI).
+	assert.Contains(t, ErrLLMRateLimited.Error(), "capacity")
+}

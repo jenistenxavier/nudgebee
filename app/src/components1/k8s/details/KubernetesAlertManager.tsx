@@ -62,14 +62,15 @@ const KubernetesAlertManager: React.FC<KubernetesAlertManagerProps> = ({ account
   const [agentPlaybookOnEvents, setAgentPlaybookOnEvents] = useState<any[]>([]);
 
   const getMenuItems = (item: any) => {
-    const menus = hasWriteAccess(accountId)
-      ? [
-          {
-            label: item?.enabled ? 'Disable' : 'Enable',
-            id: 0,
-          },
-        ]
-      : [];
+    if (!hasWriteAccess(accountId)) {
+      return [];
+    }
+    const menus = [
+      {
+        label: item?.enabled ? 'Disable' : 'Enable',
+        id: 0,
+      },
+    ];
     if (item?.enabled) {
       menus.push({
         label: 'Edit',

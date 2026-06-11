@@ -83,6 +83,9 @@ const KNOWN_SHORTCUT_DURATIONS_MS = new Set([
 ]);
 const CURRENT_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
+// Distinct line colors for the multi-account trend chart, cycled by account index.
+const TREND_SERIES_COLORS = ['#2f7af0', '#f5b400', '#e5484d', '#16a34a', '#9333ea', '#0891b2', '#db2777', '#65a30d'];
+
 const DEFAULT_TABLE_COLUMNS = [
   {
     name: 'Severity',
@@ -90,7 +93,7 @@ const DEFAULT_TABLE_COLUMNS = [
     align: 'center',
     defaultVisible: true,
     info: "Severity is the original urgency level assigned by the source monitoring/alerting system, based on that tool's built-in rules or your configured thresholds",
-    infoPlacement: 'top-start',
+    infoPlacement: 'top',
   },
   {
     name: 'Application',
@@ -321,7 +324,7 @@ const KubernetesEventsTable = ({
         width: '9%',
         align: 'center',
         info: "Severity is the original urgency level assigned by the source monitoring/alerting system, based on that tool's built-in rules or your configured thresholds",
-        infoPlacement: 'top-start',
+        infoPlacement: 'top',
       },
       {
         name: 'Application',
@@ -427,7 +430,7 @@ const KubernetesEventsTable = ({
   const [isTicketCreateFormOpen, setIsTicketCreateFormOpen] = useState(false);
   const [ticketData, setTicketData] = useState({});
   const [showTrendChart, setShowTrendChart] = useState(enableTrendChart);
-  const [trendChartData, setTrendChartData] = useState({ data: [], labels: [] });
+  const [trendChartData, setTrendChartData] = useState({ data: [], labels: [], chartLabels: [], chartColors: [] });
   const [isTrendChartLoading, setIsTrendChartLoading] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState({});
   const [isClassifyModalOpen, setIsClassifyModalOpen] = useState(false);
@@ -1198,16 +1201,44 @@ const KubernetesEventsTable = ({
     k8sApi
       .getK8sEventGroupings(1000, 0, query)
       .then((res) => {
-        let data = [];
-        let labels = [];
+        const groupings = res?.data?.event_groupings || [];
 
-        res.data.event_groupings.forEach((item) => {
-          data.push(item.event_count);
-          labels.push(getDateString(item.created_at));
+        // Build a shared, time-sorted x-axis from every distinct bucket so each
+        // account's series lines up on the same dates.
+        const sortedBuckets = [...new Set(groupings.map((g) => g.created_at))].sort(
+          (a, b) => new Date(a || 0).getTime() - new Date(b || 0).getTime()
+        );
+        const bucketIndex = new Map(sortedBuckets.map((ts, i) => [ts, i]));
+        const labels = sortedBuckets.map((ts) => getDateString(ts));
+
+        // One series per account, aligned to the shared x-axis (missing buckets -> 0).
+        const seriesByAccount = new Map();
+        groupings.forEach((item) => {
+          if (!seriesByAccount.has(item.account_id)) {
+            seriesByAccount.set(
+              item.account_id,
+              Array.from({ length: sortedBuckets.length }, () => 0)
+            );
+          }
+          seriesByAccount.get(item.account_id)[bucketIndex.get(item.created_at)] = item.event_count;
         });
+
+        // Label each series with the account name (falling back to the id).
+        const data = [];
+        const chartLabels = [];
+        const chartColors = [];
+        seriesByAccount.forEach((series, accountId) => {
+          const account = accounts?.find((acc) => (acc?.id || acc?.value) === accountId);
+          chartLabels.push(account?.label || account?.account_name || accountId);
+          chartColors.push(TREND_SERIES_COLORS[data.length % TREND_SERIES_COLORS.length]);
+          data.push(series);
+        });
+
         setTrendChartData({
           data: data,
           labels: labels,
+          chartLabels: chartLabels,
+          chartColors: chartColors,
         });
       })
       .finally(() => {
@@ -1225,6 +1256,7 @@ const KubernetesEventsTable = ({
     showTrendChart,
     isTroubleshootPage,
     selectedAccountId,
+    accounts,
   ]);
 
   return (
@@ -1490,7 +1522,15 @@ const KubernetesEventsTable = ({
           )}
         </ListingLayout.Toolbar>
         <ListingLayout.Body>
-          {showTrendChart && <LineChart data={trendChartData.data} labels={trendChartData.labels} loading={isTrendChartLoading} />}
+          {showTrendChart && (
+            <LineChart
+              data={trendChartData.data}
+              labels={trendChartData.labels}
+              chartLabel={trendChartData.chartLabels}
+              colors={trendChartData.chartColors}
+              loading={isTrendChartLoading}
+            />
+          )}
           <KubernetesTable2
             id={kubernetesEventsTable}
             headers={currentHeader}

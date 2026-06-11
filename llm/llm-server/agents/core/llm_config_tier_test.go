@@ -245,11 +245,11 @@ func seedDBConfig(t *testing.T, accountId string, cfg map[string]string) {
 func seedConversationOverride(t *testing.T, conversationId, provider, model string) {
 	t.Helper()
 	conversationOverrideCacheMutex.Lock()
-	conversationOverrideCache[conversationId] = struct {
-		provider string
-		model    string
-		ts       time.Time
-	}{provider: provider, model: model, ts: time.Now()}
+	conversationOverrideCache[conversationId] = conversationOverrideEntry{
+		provider: provider,
+		model:    model,
+		ts:       time.Now(),
+	}
 	conversationOverrideCacheMutex.Unlock()
 	t.Cleanup(func() {
 		conversationOverrideCacheMutex.Lock()
@@ -877,4 +877,376 @@ func TestGetLLMFallbackModelName_DBGlobalBeatsEnvAgent(t *testing.T) {
 
 	got := getLLMFallbackModelName("acct-fb-dbg-envagent", "agentx", ModelTier(""), true)
 	assert.Equal(t, "db-global-fb", got, "DB-global fallback beats ENV-agent fallback")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tier-credential resolution (ENV-tier / DB-tier layers in getLLMApi*)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// resolutionWithTier returns an LLMConfigResolution stub with the given tier set.
+// Bypasses ResolveLLMConfig so the test can target getLLMApi* in isolation.
+func resolutionWithTier(tier ModelTier, dbConfig map[string]string) *LLMConfigResolution {
+	return &LLMConfigResolution{Tier: tier, dbConfig: dbConfig}
+}
+
+// getLLMApiKey: ENV-tier credential fires when tier ENV provider matches the
+// resolved provider.
+func TestGetLLMApiKey_TierEnvHit(t *testing.T) {
+	pinGlobalModel(t, "anthropic", "claude-opus-4-7")
+	setEnvKey(t, "llm_tier_provider_retrieval", "googleai")
+	setEnvKey(t, "llm_tier_api_key_retrieval", "key-env-tier-retrieval")
+
+	res := resolutionWithTier(ModelTierRetrieval, nil)
+	key := getLLMApiKey("", "googleai", "", false, res)
+	assert.Equal(t, "key-env-tier-retrieval", key,
+		"ENV-tier API key picked up when tier provider matches resolved provider")
+}
+
+// getLLMApiKey: ENV-tier credential is NOT used when tier ENV provider differs
+// from the resolved provider — prevents a Bedrock-tier key from being handed
+// to an Anthropic SDK call.
+func TestGetLLMApiKey_TierProviderMismatchSkipped(t *testing.T) {
+	pinGlobalModel(t, "googleai", "gemini-2.5-flash")
+	prevKey := config.Config.LlmProviderApiKey
+	config.Config.LlmProviderApiKey = "key-env-global"
+	t.Cleanup(func() { config.Config.LlmProviderApiKey = prevKey })
+
+	// Tier slot points at a different provider than the call's provider arg.
+	setEnvKey(t, "llm_tier_provider_retrieval", "anthropic")
+	setEnvKey(t, "llm_tier_api_key_retrieval", "key-tier-anthropic")
+
+	res := resolutionWithTier(ModelTierRetrieval, nil)
+	key := getLLMApiKey("", "googleai", "", false, res)
+	assert.Equal(t, "key-env-global", key,
+		"tier API key must not leak across providers — falls back to ENV-global")
+}
+
+// getLLMApiKey: DB-tier credential fires when tier DB provider matches.
+func TestGetLLMApiKey_TierDBHit(t *testing.T) {
+	pinGlobalModel(t, "anthropic", "claude-opus-4-7")
+	dbConfig := map[string]string{
+		"llm_provider":                "anthropic",
+		"llm_provider_api_key":        "key-db-global-anthropic",
+		"llm_tier_provider_retrieval": "googleai",
+		"llm_tier_api_key_retrieval":  "key-db-tier-googleai",
+	}
+	seedDBConfig(t, "acct-tier-db", dbConfig)
+
+	res := resolutionWithTier(ModelTierRetrieval, dbConfig)
+	key := getLLMApiKey("acct-tier-db", "googleai", "", false, res)
+	assert.Equal(t, "key-db-tier-googleai", key,
+		"DB-tier API key picked up when tier DB provider matches resolved provider")
+}
+
+// getLLMApiKey: DB-tier beats ENV-tier (DB always beats ENV at the same scope).
+func TestGetLLMApiKey_DBTierBeatsEnvTier(t *testing.T) {
+	pinGlobalModel(t, "anthropic", "claude-opus-4-7")
+	setEnvKey(t, "llm_tier_provider_retrieval", "googleai")
+	setEnvKey(t, "llm_tier_api_key_retrieval", "key-env-tier")
+	dbConfig := map[string]string{
+		"llm_tier_provider_retrieval": "googleai",
+		"llm_tier_api_key_retrieval":  "key-db-tier",
+	}
+	seedDBConfig(t, "acct-db-beats-env-tier", dbConfig)
+
+	res := resolutionWithTier(ModelTierRetrieval, dbConfig)
+	key := getLLMApiKey("acct-db-beats-env-tier", "googleai", "", false, res)
+	assert.Equal(t, "key-db-tier", key,
+		"DB-tier API key beats ENV-tier API key")
+}
+
+// getLLMApiKey: DB-agent beats DB-tier (more-specific layer wins, matching the
+// provider+model precedence rule).
+func TestGetLLMApiKey_DBAgentBeatsDBTier(t *testing.T) {
+	pinGlobalModel(t, "anthropic", "claude-opus-4-7")
+	dbConfig := map[string]string{
+		"llm_tier_provider_retrieval": "googleai",
+		"llm_tier_api_key_retrieval":  "key-db-tier",
+		"llm_provider_agentx":         "googleai",
+		"llm_provider_api_key_agentx": "key-db-agent",
+	}
+	seedDBConfig(t, "acct-agent-beats-tier", dbConfig)
+
+	res := resolutionWithTier(ModelTierRetrieval, dbConfig)
+	key := getLLMApiKey("acct-agent-beats-tier", "googleai", "agentx", true, res)
+	assert.Equal(t, "key-db-agent", key,
+		"DB-agent API key beats DB-tier API key")
+}
+
+// getLLMApiKey: an untagged call (empty tier) must never read tier slots even
+// if they're set — guards against the empty-tier code path accidentally
+// matching against the provider arg.
+func TestGetLLMApiKey_UntaggedSkipsTierLayers(t *testing.T) {
+	pinGlobalModel(t, "googleai", "gemini-x")
+	prevKey := config.Config.LlmProviderApiKey
+	config.Config.LlmProviderApiKey = "key-env-global"
+	t.Cleanup(func() { config.Config.LlmProviderApiKey = prevKey })
+
+	setEnvKey(t, "llm_tier_provider_retrieval", "googleai")
+	setEnvKey(t, "llm_tier_api_key_retrieval", "key-tier-should-not-fire")
+
+	res := resolutionWithTier(ModelTier(""), nil)
+	key := getLLMApiKey("", "googleai", "", false, res)
+	assert.Equal(t, "key-env-global", key,
+		"untagged call must skip tier layers")
+}
+
+// getLLMRegion: smoke test for the same tier path on a non-API-key resolver.
+func TestGetLLMRegion_TierEnvHit(t *testing.T) {
+	pinGlobalModel(t, "anthropic", "claude-opus-4-7")
+	setEnvKey(t, "llm_tier_provider_retrieval", "bedrock")
+	setEnvKey(t, "llm_tier_region_retrieval", "us-west-2")
+
+	res := resolutionWithTier(ModelTierRetrieval, nil)
+	region := getLLMRegion("", "bedrock", "", false, res)
+	assert.Equal(t, "us-west-2", region,
+		"ENV-tier region picked up when tier provider matches resolved provider")
+}
+
+// getLLMApiKey: ENV-tier credential beats ENV-global. Mirrors the
+// provider+model precedence rule at the cred level.
+func TestGetLLMApiKey_EnvTierBeatsEnvGlobal(t *testing.T) {
+	pinGlobalModel(t, "googleai", "gemini-x")
+	prevKey := config.Config.LlmProviderApiKey
+	config.Config.LlmProviderApiKey = "key-env-global"
+	t.Cleanup(func() { config.Config.LlmProviderApiKey = prevKey })
+
+	// Tier provider matches global so the env-tier branch fires and overrides.
+	setEnvKey(t, "llm_tier_provider_retrieval", "googleai")
+	setEnvKey(t, "llm_tier_api_key_retrieval", "key-env-tier")
+
+	res := resolutionWithTier(ModelTierRetrieval, nil)
+	key := getLLMApiKey("", "googleai", "", false, res)
+	assert.Equal(t, "key-env-tier", key, "ENV-tier API key beats ENV-global when tier provider matches")
+}
+
+// getLLMApiKey: DB-global beats ENV-tier. Cross-block precedence — the DB block
+// always sits above the ENV block at any specificity.
+func TestGetLLMApiKey_DBGlobalBeatsEnvTier(t *testing.T) {
+	pinGlobalModel(t, "googleai", "gemini-x")
+	setEnvKey(t, "llm_tier_provider_retrieval", "googleai")
+	setEnvKey(t, "llm_tier_api_key_retrieval", "key-env-tier")
+	dbConfig := map[string]string{
+		"llm_provider":         "googleai",
+		"llm_provider_api_key": "key-db-global",
+	}
+	seedDBConfig(t, "acct-db-global-beats-env-tier", dbConfig)
+
+	res := resolutionWithTier(ModelTierRetrieval, dbConfig)
+	key := getLLMApiKey("acct-db-global-beats-env-tier", "googleai", "", false, res)
+	assert.Equal(t, "key-db-global", key, "DB-global API key beats ENV-tier API key (cross-block precedence)")
+}
+
+// getLLMApiKey: DB-tier beats ENV-agent. The DB block sits above any ENV layer,
+// and DB-tier is specifically between DB-global and DB-agent.
+func TestGetLLMApiKey_DBTierBeatsEnvAgent(t *testing.T) {
+	pinGlobalModel(t, "googleai", "gemini-x")
+	setEnvKey(t, "llm_provider_agentx", "googleai")
+	setEnvKey(t, "llm_provider_api_key_agentx", "key-env-agent")
+	dbConfig := map[string]string{
+		"llm_tier_provider_retrieval": "googleai",
+		"llm_tier_api_key_retrieval":  "key-db-tier",
+	}
+	seedDBConfig(t, "acct-db-tier-beats-env-agent", dbConfig)
+
+	res := resolutionWithTier(ModelTierRetrieval, dbConfig)
+	key := getLLMApiKey("acct-db-tier-beats-env-agent", "googleai", "agentx", true, res)
+	assert.Equal(t, "key-db-tier", key, "DB-tier API key beats ENV-agent API key")
+}
+
+// getLLMApiKey: across-tier isolation — a retrieval-tier API key must not
+// leak into a summary-tier call when both tier slots are configured.
+func TestGetLLMApiKey_TierIsolation(t *testing.T) {
+	pinGlobalModel(t, "googleai", "gemini-x")
+	setEnvKey(t, "llm_tier_provider_retrieval", "googleai")
+	setEnvKey(t, "llm_tier_api_key_retrieval", "key-retrieval")
+	setEnvKey(t, "llm_tier_provider_summary", "googleai")
+	setEnvKey(t, "llm_tier_api_key_summary", "key-summary")
+
+	// Same call args, different tier — must pick the matching tier's key.
+	resR := resolutionWithTier(ModelTierRetrieval, nil)
+	resS := resolutionWithTier(ModelTierSummary, nil)
+	assert.Equal(t, "key-retrieval", getLLMApiKey("", "googleai", "", false, resR), "Retrieval tier picks retrieval key")
+	assert.Equal(t, "key-summary", getLLMApiKey("", "googleai", "", false, resS), "Summary tier picks summary key")
+}
+
+// getLLMAccessKey: smoke test that resolveLLMSecret's new tierKeyFormat
+// parameter wires through the AWS-credential resolvers correctly.
+func TestGetLLMAccessKey_TierDBHit(t *testing.T) {
+	pinGlobalModel(t, "anthropic", "claude-opus-4-7")
+	dbConfig := map[string]string{
+		"llm_tier_provider_retrieval":   "bedrock",
+		"llm_tier_access_key_retrieval": "AKIA-TIER-DB",
+	}
+	seedDBConfig(t, "acct-tier-access", dbConfig)
+
+	res := resolutionWithTier(ModelTierRetrieval, dbConfig)
+	key := getLLMAccessKey("acct-tier-access", "bedrock", "", false, res)
+	assert.Equal(t, "AKIA-TIER-DB", key,
+		"DB-tier AWS access key picked up via resolveLLMSecret tier path")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache-key creds fingerprint (llmClientCache + generateCacheKey)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// credsFingerprint isolates two cred sets that differ in any byte.
+func TestCredsFingerprint_DistinctInputsDistinctHashes(t *testing.T) {
+	a := credsFingerprint("key-A", "", "", "", "", "", "")
+	b := credsFingerprint("key-B", "", "", "", "", "", "")
+	c := credsFingerprint("key-A", "https://endpoint", "", "", "", "", "")
+	assert.NotEqual(t, a, b, "different api keys → different hashes")
+	assert.NotEqual(t, a, c, "endpoint difference alone changes the hash")
+
+	// Same inputs → same hash (deterministic).
+	a2 := credsFingerprint("key-A", "", "", "", "", "", "")
+	assert.Equal(t, a, a2, "deterministic for identical input")
+
+	// Length: 4 bytes truncated, hex-encoded → 8 chars.
+	assert.Len(t, a, 8, "fingerprint is 8 hex chars")
+}
+
+// resolveCredsFingerprint pulls live values from the resolvers — same (provider,
+// model, account) with different per-tier api keys produces different
+// fingerprints, which in turn produces different llmClientCache keys.
+func TestResolveCredsFingerprint_TierOverrideShiftsBucket(t *testing.T) {
+	pinGlobalModel(t, "googleai", "gemini-2.5-flash")
+	prevKey := config.Config.LlmProviderApiKey
+	config.Config.LlmProviderApiKey = "GLOBAL-KEY"
+	t.Cleanup(func() { config.Config.LlmProviderApiKey = prevKey })
+
+	// No tier override → fingerprint derived from global key.
+	fpGlobal := resolveCredsFingerprint("", "googleai", "", false, resolutionWithTier(ModelTier(""), nil))
+
+	// Reasoning-tier override resolves to a different api key.
+	setEnvKey(t, "llm_tier_provider_reasoning", "googleai")
+	setEnvKey(t, "llm_tier_api_key_reasoning", "REASONING-KEY")
+	fpReasoning := resolveCredsFingerprint("", "googleai", "", false, resolutionWithTier(ModelTierReasoning, nil))
+
+	assert.NotEqual(t, fpGlobal, fpReasoning,
+		"different resolved api key → different cache fingerprint → distinct llmClientCache bucket")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conversation per-tier override + context-tier override (Phase 3 + 4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// seedConversationOverrideTier pre-populates the override cache with a
+// per-tier picks block for the given conversation, so resolver tests don't
+// have to touch the DB.
+func seedConversationOverrideTier(t *testing.T, conversationId string, picks map[string]TierModelPick) {
+	t.Helper()
+	conversationOverrideCacheMutex.Lock()
+	conversationOverrideCache[conversationId] = conversationOverrideEntry{
+		tierOverrides: ConversationTierOverrides{Picks: picks},
+		ts:            time.Now(),
+	}
+	conversationOverrideCacheMutex.Unlock()
+	t.Cleanup(func() {
+		conversationOverrideCacheMutex.Lock()
+		delete(conversationOverrideCache, conversationId)
+		conversationOverrideCacheMutex.Unlock()
+	})
+}
+
+// Round-trip Value/Scan: an in-memory ConversationTierOverrides marshals to
+// bytes via Value() and unmarshals back via Scan() to the same Picks map.
+func TestConversationTierOverrides_ValueScanRoundTrip(t *testing.T) {
+	orig := ConversationTierOverrides{Picks: map[string]TierModelPick{
+		"reasoning": {Provider: "anthropic", Model: "claude-opus-4-7"},
+		"retrieval": {Provider: "googleai", Model: "gemini-2.5-flash"},
+	}}
+	v, err := orig.Value()
+	assert.NoError(t, err)
+	raw, ok := v.([]byte)
+	assert.True(t, ok, "Value should marshal to []byte when populated")
+
+	var got ConversationTierOverrides
+	assert.NoError(t, got.Scan(raw))
+	assert.Equal(t, orig.Picks, got.Picks, "round-trip preserves the picks map")
+
+	// Empty struct must Value() to nil (writes SQL NULL).
+	emptyV, err := ConversationTierOverrides{}.Value()
+	assert.NoError(t, err)
+	assert.Nil(t, emptyV, "empty Picks marshals to SQL NULL")
+
+	// Scan of nil clears Picks.
+	got.Picks = map[string]TierModelPick{"x": {Provider: "p", Model: "m"}}
+	assert.NoError(t, got.Scan(nil))
+	assert.Nil(t, got.Picks, "Scan(nil) clears Picks")
+}
+
+// Resolver: conversation-tier override wins for a tier-tagged call; an
+// untagged call in the same conversation falls through (does NOT silently
+// substitute a per-tier model). This matches the explicit UX choice
+// surfaced to the user as a Per-category warning in the chat composer.
+func TestResolveLLMConfig_ConversationTierOverride(t *testing.T) {
+	pinGlobalModel(t, "googleai", "gemini-2.5-flash")
+	convId := "conv-tier-override"
+	seedConversationOverrideTier(t, convId, map[string]TierModelPick{
+		"reasoning": {Provider: "anthropic", Model: "claude-opus-4-7"},
+	})
+
+	// Tagged call (Reasoning) → conversation-tier override wins.
+	ctx := newCtxWithKVs(ContextKeyModelTier, ModelTierReasoning)
+	res, err := ResolveLLMConfig(ctx, "", "", convId)
+	assert.NoError(t, err)
+	assert.Equal(t, "anthropic", res.Provider)
+	assert.Equal(t, "claude-opus-4-7", res.Model)
+	assert.Equal(t, "conversation-tier", res.Source)
+
+	// Untagged call (no tier) → conversation-tier layer skipped → falls
+	// through to the global default (gemini).
+	untaggedCtx := newCtxWithKVs()
+	res2, err := ResolveLLMConfig(untaggedCtx, "", "", convId)
+	assert.NoError(t, err)
+	assert.Equal(t, "googleai", res2.Provider)
+	assert.Equal(t, "gemini-2.5-flash", res2.Model)
+	assert.NotEqual(t, "conversation-tier", res2.Source)
+}
+
+// Resolver: context-tier override is the highest precedence — beats the
+// conversation-tier override for the same tier.
+func TestResolveLLMConfig_ContextTierOverrideBeatsConversationTier(t *testing.T) {
+	pinGlobalModel(t, "googleai", "gemini-2.5-flash")
+	convId := "conv-ctx-vs-conv-tier"
+	seedConversationOverrideTier(t, convId, map[string]TierModelPick{
+		"reasoning": {Provider: "anthropic", Model: "claude-opus-4-7"},
+	})
+
+	ctxOverride := ConversationTierOverrides{Picks: map[string]TierModelPick{
+		"reasoning": {Provider: "bedrock", Model: "meta.llama3-1-70b-instruct-v1:0"},
+	}}
+	ctx := newCtxWithKVs(
+		ContextKeyModelTier, ModelTierReasoning,
+		ContextKeyLlmTierModelOverrides, ctxOverride,
+	)
+	res, err := ResolveLLMConfig(ctx, "", "", convId)
+	assert.NoError(t, err)
+	assert.Equal(t, "bedrock", res.Provider, "context-tier override wins over conversation-tier")
+	assert.Equal(t, "meta.llama3-1-70b-instruct-v1:0", res.Model)
+	assert.Equal(t, "context-override-tier", res.Source)
+}
+
+// ConversationTierOverrides.Get: returns false for a missing tier or for a
+// half-set pick (provider or model empty). Resolver depends on this to fall
+// through rather than producing an invalid (empty-provider, model) result.
+func TestConversationTierOverrides_GetSkipsHalfSet(t *testing.T) {
+	c := ConversationTierOverrides{Picks: map[string]TierModelPick{
+		"reasoning": {Provider: "anthropic", Model: "claude-opus-4-7"},
+		"halfset_p": {Provider: "", Model: "model-x"},
+		"halfset_m": {Provider: "googleai", Model: ""},
+	}}
+	if _, ok := c.Get("reasoning"); !ok {
+		t.Fatalf("expected reasoning to be returned")
+	}
+	if _, ok := c.Get("halfset_p"); ok {
+		t.Fatalf("half-set (missing provider) must not be returned")
+	}
+	if _, ok := c.Get("halfset_m"); ok {
+		t.Fatalf("half-set (missing model) must not be returned")
+	}
+	if _, ok := c.Get("missing"); ok {
+		t.Fatalf("missing tier key must not be returned")
+	}
 }

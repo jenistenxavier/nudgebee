@@ -1582,6 +1582,14 @@ func (o *NBReActPlanner3) Plan(
 
 	if lastErr != nil && len(intermediateSteps) == 0 {
 		logger.Error("reactagent3: agent failed without making any tool calls", "error", lastErr)
+		// Surface a clear cause for known failure modes (429/quota, oversized
+		// request, transient outage) by throwing a typed, HTTP-coded error —
+		// the executor reports it as a failed turn with the clean message. Only
+		// fall back to the generic message for unclassified errors so we never
+		// leak raw provider internals.
+		if classified := classifyUserFacingLLMError(lastErr); classified != nil {
+			return nil, nil, classified
+		}
 		return nil, &NBAgentPlannerFinishAction{
 			Data:   "I was unable to process your request due to an internal error. Please try again or rephrase your question.",
 			Status: ConversationStatusFailed,

@@ -214,52 +214,96 @@ def calculate_container_savings(
 
 
 def archive_existing_krr_recommendations(
-    account_id: str, tenant_id: str, recommendations: List[RecommendationData]
+    account_id: str,
+    tenant_id: str,
+    recommendations: List[RecommendationData],
+    namespace_filter: Optional[str] = None,
+    resource_names_filter: Optional[List[str]] = None,
 ) -> None:
-    """Archive existing KRR recommendations for only the resources we're updating."""
+    """Archive stale KRR recommendations that no longer correspond to a live workload.
+
+    A scan reports recommendations only for workloads that still exist in the cluster.
+    A workload that has been deleted therefore simply disappears from the scan, so the
+    correct way to retire its recommendation is to archive the in-scope Open recs whose
+    account_object_id is NOT in the current scan results (then the caller re-inserts the
+    present ones as Open). Archiving the *scanned* set instead — the previous behaviour —
+    left deleted workloads orphaned as Open forever.
+
+    Scope rules ensure we only reconcile what the scan was exhaustive over:
+      - Full account run (no filters): reconcile across the whole account.
+      - Namespace-only run: reconcile within that namespace.
+      - resource_names run: the scan only covers specific requested resources, so absence
+        does NOT mean deletion — fall back to refreshing just the targeted resources.
+    """
+    if not tenant_id or not account_id:
+        raise ValueError("archive_existing_krr_recommendations: tenant_id and account_id are required")
+
     ctx_logger = get_contextual_logger(tenant_id, account_id)
 
     with tracer.start_as_current_span("archive_existing_recommendations") as span:
         try:
+            # Empty scan → skip. An empty result is far more likely a transient scan/metrics
+            # failure than "every workload in scope was deleted"; a NOT-IN archive with an
+            # empty keep-set would mass-archive every Open rec in scope. The rare genuinely-
+            # empty case self-heals on the next non-empty run.
             if not recommendations:
                 ctx_logger.info("No recommendations to process, skipping archiving")
                 return
 
             engine = DatabaseEngine.get_engine()
 
-            # Build list of account_object_ids that we're going to update
-            account_object_ids = list(set([f"{rec.namespace}/{rec.kind}/{rec.name}" for rec in recommendations]))
+            # account_object_ids present in the current scan — the workloads to keep Open.
+            # Bind as a single array param (= ANY) rather than dynamic :keep_N placeholders:
+            # keeps the SQL text static (one cached plan), avoids the parameter-count ceiling
+            # on large full-account scans, and matches the = ANY(:namespaces) pattern used
+            # elsewhere in this file.
+            kept_object_ids = list(set([f"{rec.namespace}/{rec.kind}/{rec.name}" for rec in recommendations]))
 
-            span.set_attribute("krr.target_resources", len(account_object_ids))
-            ctx_logger.info(f"Archiving existing recommendations for {len(account_object_ids)} resources")
+            params = {
+                "tenant_id": tenant_id,
+                "account_id": account_id,
+                "kept_object_ids": kept_object_ids,
+            }
 
-            if account_object_ids:
-                # Only archive recommendations for the specific resources we're updating
-                placeholders = ", ".join([":id_" + str(i) for i in range(len(account_object_ids))])
-                update_query = text(f"""
-                    UPDATE recommendation
-                    SET status = 'Archive'
-                    WHERE tenant_id = :tenant_id
-                    AND cloud_account_id = :account_id
-                    AND category = 'RightSizing'
-                    AND rule_name = 'pod_right_sizing'
-                    AND status NOT IN ('Closed', 'InProgress', 'Archive')
-                    AND account_object_id IN ({placeholders})
-                """)
+            if resource_names_filter:
+                # Non-exhaustive scan: only specific resources were requested, so a workload's
+                # absence from the scan tells us nothing about whether it still exists. Restrict
+                # to refreshing just the targeted resources (legacy archive-then-reinsert).
+                scope_clause = "AND account_object_id = ANY(:kept_object_ids)"
+                scope_label = "resource_names"
+            else:
+                # Exhaustive over its scope → archive anything in scope that vanished.
+                scope_clause = "AND NOT (account_object_id = ANY(:kept_object_ids))"
+                scope_label = "account"
+                if namespace_filter:
+                    scope_clause += " AND account_object_id LIKE :ns_prefix"
+                    params["ns_prefix"] = f"{namespace_filter}/%"
+                    scope_label = "namespace"
 
-                params = {"tenant_id": tenant_id, "account_id": account_id}
+            span.set_attribute("krr.kept_resources", len(kept_object_ids))
+            span.set_attribute("krr.archive_scope", scope_label)
 
-                # Add the account_object_ids to params
-                for i, obj_id in enumerate(account_object_ids):
-                    params[f"id_{i}"] = obj_id
+            update_query = text(f"""
+                UPDATE recommendation
+                SET status = 'Archive'
+                WHERE tenant_id = :tenant_id
+                AND cloud_account_id = :account_id
+                AND category = 'RightSizing'
+                AND rule_name = 'pod_right_sizing'
+                AND status NOT IN ('Closed', 'InProgress', 'Archive')
+                {scope_clause}
+            """)
 
-                with engine.connect() as conn:
-                    result = conn.execute(update_query, params)
-                    conn.commit()
+            with engine.connect() as conn:
+                result = conn.execute(update_query, params)
+                conn.commit()
 
-                    rows_updated = result.rowcount
-                    span.set_attribute("krr.archived_recommendations", rows_updated)
-                    ctx_logger.info(f"Archived {rows_updated} existing KRR recommendations for specific resources")
+                rows_updated = result.rowcount
+                span.set_attribute("krr.archived_recommendations", rows_updated)
+                ctx_logger.info(
+                    f"Archived {rows_updated} stale KRR recommendations "
+                    f"(scope={scope_label}, kept={len(kept_object_ids)})"
+                )
 
         except Exception as e:
             span.set_attribute("krr.archive_error", str(e))
@@ -550,9 +594,12 @@ def store_krr_recommendations_to_db(
             # Get existing resource mappings - same as collector-server
             resource_map = get_existing_resources(account_id, tenant_id, recommendations)
 
-            # Archive existing recommendations only for resources we're updating
-            # This should only happen when we're actually going to store new recommendations
-            archive_existing_krr_recommendations(account_id, tenant_id, recommendations)
+            # Reconcile: archive stale recs for workloads that vanished from this scan,
+            # scoped to what the scan was exhaustive over (account / namespace / specific
+            # resources). The insert below re-opens the workloads still present.
+            archive_existing_krr_recommendations(
+                account_id, tenant_id, recommendations, namespace_filter, resource_names_filter
+            )
 
             engine = DatabaseEngine.get_engine()
 

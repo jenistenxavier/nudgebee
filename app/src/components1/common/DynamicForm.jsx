@@ -39,9 +39,15 @@ const DynamicForm = ({ actionKey, onChange, errors = {}, initialValues = {}, act
     return current;
   };
 
-  // Helper function to set nested value in object using dot notation
+  // Helper function to set nested value in object using dot notation.
+  // Reject reserved property names (__proto__, constructor, prototype) anywhere
+  // in the path — without this guard, a field schema with path "__proto__.x"
+  // would write to Object's prototype, polluting every object in the page.
   const setNestedValue = (obj, path, value) => {
     const keys = path.split('.');
+    if (keys.some((k) => k === '__proto__' || k === 'constructor' || k === 'prototype')) {
+      return;
+    }
     let current = obj;
 
     for (let i = 0; i < keys.length - 1; i++) {

@@ -1,6 +1,6 @@
 import CustomButton from '@components1/common/NewCustomButton';
 import TextareaAutosize, { type TextareaAutosizeProps } from '@mui/material/TextareaAutosize';
-import { Avatar, Box, ClickAwayListener, Popper, styled, Typography } from '@mui/material';
+import { Avatar, Box, ButtonBase as MuiButtonBase, ClickAwayListener, Popper, styled, Typography } from '@mui/material';
 import type { Theme } from '@mui/material/styles';
 import React, { useEffect, useRef, useState } from 'react';
 import { ArrowRightWhiteIcon, CustomAgentBlueIcon } from '@assets';
@@ -12,6 +12,12 @@ import AttachFileIcon from '@mui/icons-material/AttachFile';
 import CloseIcon from '@mui/icons-material/Close';
 import SafeIcon from '@components1/common/SafeIcon';
 import { toast as snackbar } from '@components1/ds/Toast';
+import { ToggleGroup } from '@components1/ds/ToggleGroup';
+import { Input } from '@components1/ds/Input';
+import { Button } from '@components1/ds/Button';
+import CustomTooltip from '@components1/ds/Tooltip';
+import CheckIcon from '@mui/icons-material/Check';
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 
 const blue = {
   100: '#DAECFF',
@@ -106,6 +112,38 @@ interface ModelOption {
   source?: string;
 }
 
+// SKUs that may struggle with the planner step — fires an advisory hint
+// when picked for Reasoning or the blanket model. Heuristic, not a block.
+const LOWER_TIER_REGEX: Record<string, RegExp> = {
+  googleai: /flash|lite/i,
+  vertex: /flash|lite/i,
+  anthropic: /haiku/i,
+  openai: /-mini\b|gpt-3\.5/i,
+  azure: /-mini\b|gpt-3\.5/i,
+  bedrock: /haiku|llama3-8b|command-light/i,
+};
+
+const isLowerTierForReasoning = (provider?: string, model?: string): boolean => {
+  if (!provider || !model) return false;
+  const re = LOWER_TIER_REGEX[provider.toLowerCase()];
+  return !!re && re.test(model);
+};
+
+const PICKER_TIER_KEYS = ['reasoning', 'retrieval', 'summary'] as const;
+type PickerTierKey = (typeof PICKER_TIER_KEYS)[number];
+const PICKER_TIER_LABELS: Record<PickerTierKey, string> = {
+  reasoning: 'Reasoning',
+  retrieval: 'Retrieval',
+  summary: 'Summary',
+};
+type TierModelMap = Partial<Record<PickerTierKey, ModelOption>>;
+
+const pickerButtonLabel = (selectedModel?: ModelOption | null, selectedTierModels?: TierModelMap | null): string => {
+  if (selectedModel) return selectedModel.model;
+  if (selectedTierModels && Object.keys(selectedTierModels).length > 0) return 'By task';
+  return 'Model';
+};
+
 // Wire format expected by the ai_execute_investigation `images` field.
 export interface OutgoingImage {
   data: string; // base64, data-URI prefix stripped
@@ -150,9 +188,347 @@ interface AutoSuggestTextareaProps {
   defaultModel?: { provider: string; model: string };
   selectedModel?: ModelOption | null;
   onModelSelect?: (model: ModelOption | null) => void;
+  // Mutually exclusive with selectedModel (reducer enforces).
+  selectedTierModels?: TierModelMap | null;
+  onTierModelsSelect?: (picks: TierModelMap | null) => void;
   popupInitial?: boolean;
   imageSupport?: ImageSupport;
 }
+
+interface ModelPickerPopoverProps {
+  models: ModelOption[];
+  selectedModel?: ModelOption | null;
+  onModelSelect?: (model: ModelOption | null) => void;
+  selectedTierModels?: TierModelMap | null;
+  onTierModelsSelect?: (picks: TierModelMap | null) => void;
+  disabled?: boolean;
+}
+
+export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
+  models,
+  selectedModel,
+  onModelSelect,
+  selectedTierModels,
+  onTierModelsSelect,
+  disabled = false,
+}) => {
+  const [open, setOpen] = useState(false);
+  const anchorRef = useRef<HTMLDivElement | null>(null);
+  const [mode, setMode] = useState<'blanket' | 'tier'>('blanket');
+  const [stagedBlanket, setStagedBlanket] = useState<ModelOption | null>(null);
+  const [stagedTier, setStagedTier] = useState<TierModelMap>({});
+  const [activeTier, setActiveTier] = useState<PickerTierKey>('reasoning');
+  const [search, setSearch] = useState('');
+
+  const openPopover = () => {
+    if (disabled) return;
+    if (selectedTierModels && Object.keys(selectedTierModels).length > 0) {
+      setMode('tier');
+      setStagedBlanket(null);
+      setStagedTier({ ...selectedTierModels });
+    } else {
+      setMode('blanket');
+      setStagedBlanket(selectedModel ?? null);
+      setStagedTier({});
+    }
+    setActiveTier('reasoning');
+    setSearch('');
+    setOpen(true);
+  };
+
+  const handleApply = () => {
+    if (mode === 'blanket') {
+      onTierModelsSelect?.(null);
+      onModelSelect?.(stagedBlanket);
+    } else {
+      const cleaned: TierModelMap = {};
+      for (const t of PICKER_TIER_KEYS) {
+        const p = stagedTier[t];
+        if (p && p.provider && p.model) cleaned[t] = p;
+      }
+      onModelSelect?.(null);
+      onTierModelsSelect?.(Object.keys(cleaned).length > 0 ? cleaned : null);
+    }
+    setOpen(false);
+  };
+
+  const handleClear = () => {
+    onModelSelect?.(null);
+    onTierModelsSelect?.(null);
+    setOpen(false);
+  };
+
+  const filteredModels = search.trim()
+    ? models.filter((m) => {
+        const q = search.toLowerCase();
+        return m.model.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q);
+      })
+    : models;
+
+  const isRowSelected = (m: ModelOption): boolean => {
+    if (mode === 'blanket') {
+      return !!stagedBlanket && stagedBlanket.provider === m.provider && stagedBlanket.model === m.model;
+    }
+    const cur = stagedTier[activeTier];
+    return !!cur && cur.provider === m.provider && cur.model === m.model;
+  };
+
+  const handleRowPick = (m: ModelOption) => {
+    if (mode === 'blanket') {
+      setStagedBlanket(m);
+      return;
+    }
+    setStagedTier({ ...stagedTier, [activeTier]: m });
+  };
+
+  const handleClearTier = (t: PickerTierKey) => {
+    const next: TierModelMap = { ...stagedTier };
+    delete next[t];
+    setStagedTier(next);
+  };
+
+  return (
+    <>
+      <Box
+        ref={anchorRef}
+        data-testid='model-picker-trigger'
+        onClick={openPopover}
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--ds-space-1)',
+          cursor: disabled ? 'default' : 'pointer',
+          color: 'var(--ds-gray-600)',
+          border: '0.5px solid var(--ds-gray-300)',
+          borderRadius: 'var(--ds-radius-sm)',
+          padding: 'var(--ds-space-1) var(--ds-space-2)',
+          whiteSpace: 'nowrap',
+          flexShrink: 0,
+          '&:hover': disabled ? {} : { backgroundColor: 'var(--ds-gray-100)' },
+        }}
+      >
+        <Typography
+          sx={{
+            fontSize: 'var(--ds-text-caption)',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            maxWidth: ds.space.mul(0, 40),
+          }}
+        >
+          {pickerButtonLabel(selectedModel, selectedTierModels)}
+        </Typography>
+        <ArrowDropDownIcon sx={{ fontSize: 'var(--ds-text-title)' }} />
+      </Box>
+      {open && (
+        <Popper
+          open={open}
+          anchorEl={anchorRef.current}
+          placement='top-start'
+          modifiers={[
+            { name: 'flip', enabled: true, options: { fallbackPlacements: ['bottom-start'] } },
+            { name: 'preventOverflow', enabled: true, options: { padding: 8 } },
+          ]}
+          sx={{ zIndex: 9999 }}
+        >
+          <ClickAwayListener onClickAway={() => setOpen(false)}>
+            <Box
+              data-testid='model-picker-popover'
+              sx={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 'var(--ds-space-3)',
+                padding: 'var(--ds-space-4)',
+                border: 'var(--ds-popover-border, 1px solid var(--ds-gray-200))',
+                borderRadius: 'var(--ds-radius-md)',
+                backgroundColor: '#fff',
+                boxShadow: 'var(--ds-shadow-md)',
+                width: 380,
+              }}
+            >
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)' }}>
+                <Box sx={{ flex: 1 }}>
+                  <ToggleGroup
+                    size='sm'
+                    selection='single'
+                    value={mode}
+                    onChange={(v) => setMode(v as 'blanket' | 'tier')}
+                    ariaLabel='Model picker mode'
+                    options={[
+                      { value: 'blanket', label: 'All calls' },
+                      { value: 'tier', label: 'By task' },
+                    ]}
+                  />
+                </Box>
+                <CustomTooltip
+                  placement='top'
+                  PopperProps={{ sx: { zIndex: 10000 }, modifiers: [{ name: 'preventOverflow', options: { padding: 8 } }] }}
+                  title={
+                    mode === 'blanket'
+                      ? 'The selected model is used for every LLM call in this conversation — including background tasks (memory, titles, light summaries).'
+                      : 'By-task picks apply only to LLM calls tagged with that task. Untagged background calls (memory, titles, light summaries) keep the operator default.'
+                  }
+                >
+                  <InfoOutlinedIcon sx={{ fontSize: 16, color: 'var(--ds-gray-500)', cursor: 'help' }} />
+                </CustomTooltip>
+              </Box>
+
+              {mode === 'tier' && (
+                <ToggleGroup
+                  size='sm'
+                  selection='single'
+                  value={activeTier}
+                  onChange={(v) => setActiveTier(v as PickerTierKey)}
+                  ariaLabel='Active task'
+                  options={PICKER_TIER_KEYS.map((t) => ({ value: t, label: PICKER_TIER_LABELS[t] }))}
+                />
+              )}
+
+              <Input size='sm' type='text' placeholder='Search models…' value={search} onChange={(v) => setSearch(v)} aria-label='Search models' />
+
+              <Box
+                role='listbox'
+                aria-label={mode === 'blanket' ? 'Models' : `Models for ${PICKER_TIER_LABELS[activeTier]}`}
+                sx={{
+                  maxHeight: 108,
+                  overflowY: 'auto',
+                  border: '1px solid var(--ds-gray-200)',
+                  borderRadius: 'var(--ds-radius-sm)',
+                }}
+              >
+                {filteredModels.length === 0 && (
+                  <Box sx={{ padding: 'var(--ds-space-3)', textAlign: 'center', color: 'var(--ds-gray-500)', fontSize: 'var(--ds-text-caption)' }}>
+                    No models match
+                  </Box>
+                )}
+                {filteredModels.map((m, i) => {
+                  const selected = isRowSelected(m);
+                  return (
+                    <MuiButtonBase
+                      key={`${m.provider}-${m.model}-${i}`}
+                      role='option'
+                      aria-selected={selected}
+                      onClick={() => handleRowPick(m)}
+                      sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        width: '100%',
+                        textAlign: 'left',
+                        padding: 'var(--ds-overlay-item-padding-md, 8px var(--ds-space-3))',
+                        gap: 'var(--ds-space-2)',
+                        backgroundColor: selected ? 'var(--ds-overlay-item-selected-bg, var(--ds-blue-100))' : 'transparent',
+                        '&:hover': {
+                          backgroundColor: selected
+                            ? 'var(--ds-overlay-item-selected-bg, var(--ds-blue-100))'
+                            : 'var(--ds-overlay-item-hover-bg, var(--ds-gray-100))',
+                        },
+                      }}
+                    >
+                      <Typography
+                        sx={{
+                          fontSize: 'var(--ds-text-small)',
+                          fontWeight: selected ? 500 : 400,
+                          color: selected ? 'var(--ds-blue-600)' : 'var(--ds-gray-700)',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                        }}
+                      >
+                        {m.model}
+                      </Typography>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)', flexShrink: 0 }}>
+                        <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>{m.provider}</Typography>
+                        {selected && <CheckIcon sx={{ fontSize: 14, color: 'var(--ds-blue-600)' }} />}
+                      </Box>
+                    </MuiButtonBase>
+                  );
+                })}
+              </Box>
+
+              {mode === 'blanket' && stagedBlanket && isLowerTierForReasoning(stagedBlanket.provider, stagedBlanket.model) && (
+                <Typography
+                  sx={{
+                    fontSize: 'var(--ds-text-caption)',
+                    color: 'var(--ds-amber-700)',
+                    lineHeight: 1.3,
+                    mt: '4px',
+                  }}
+                >
+                  ⚠ Lighter models may struggle with multi-step planning. Consider a Pro model for All-calls mode.
+                </Typography>
+              )}
+
+              {mode === 'tier' && (
+                <Box
+                  sx={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px',
+                    padding: 'var(--ds-space-2) var(--ds-space-3)',
+                    backgroundColor: 'var(--ds-gray-100)',
+                    border: '1px solid var(--ds-gray-200)',
+                    borderRadius: 'var(--ds-radius-sm)',
+                  }}
+                >
+                  {PICKER_TIER_KEYS.map((t) => {
+                    const cur = stagedTier[t];
+                    const showWarn = t === 'reasoning' && cur && isLowerTierForReasoning(cur.provider, cur.model);
+                    return (
+                      <Box key={t} sx={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--ds-space-2)' }}>
+                          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-700)', fontWeight: 500 }}>
+                            {PICKER_TIER_LABELS[t]}
+                          </Typography>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)', minWidth: 0 }}>
+                            <Typography
+                              sx={{
+                                fontSize: 'var(--ds-text-small)',
+                                color: cur ? 'var(--ds-gray-700)' : 'var(--ds-gray-500)',
+                                whiteSpace: 'nowrap',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                              }}
+                            >
+                              {cur ? cur.model : 'Inherit default'}
+                            </Typography>
+                            {cur && (
+                              <MuiButtonBase
+                                aria-label={`Clear ${PICKER_TIER_LABELS[t]}`}
+                                onClick={() => handleClearTier(t)}
+                                sx={{ padding: '2px', borderRadius: '50%', '&:hover': { backgroundColor: 'var(--ds-gray-200)' } }}
+                              >
+                                <CloseIcon sx={{ fontSize: 12, color: 'var(--ds-gray-600)' }} />
+                              </MuiButtonBase>
+                            )}
+                          </Box>
+                        </Box>
+                        {showWarn && (
+                          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-amber-700)', lineHeight: 1.3 }}>
+                            ⚠ Lighter models may struggle with multi-step planning. Consider a Pro model for Reasoning.
+                          </Typography>
+                        )}
+                      </Box>
+                    );
+                  })}
+                </Box>
+              )}
+
+              <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--ds-space-2)', mt: 'var(--ds-space-1)' }}>
+                <Button size='sm' tone='secondary' onClick={handleClear}>
+                  Clear all
+                </Button>
+                <Button size='sm' onClick={handleApply}>
+                  Apply
+                </Button>
+              </Box>
+            </Box>
+          </ClickAwayListener>
+        </Popper>
+      )}
+    </>
+  );
+};
 
 const AutoSuggestTextarea: React.FC<AutoSuggestTextareaProps> = ({
   value,
@@ -173,6 +549,8 @@ const AutoSuggestTextarea: React.FC<AutoSuggestTextareaProps> = ({
   defaultModel: _defaultModel,
   selectedModel,
   onModelSelect,
+  selectedTierModels,
+  onTierModelsSelect,
   popupInitial = false,
   imageSupport,
 }) => {
@@ -185,10 +563,7 @@ const AutoSuggestTextarea: React.FC<AutoSuggestTextareaProps> = ({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [suggestionsTrigger, setSuggestionsTrigger] = useState<'at' | 'button' | 'call'>('at');
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
-  const [showModelDropdown, setShowModelDropdown] = useState(false);
-  const [modelAnchorEl, setModelAnchorEl] = useState<null | HTMLElement>(null);
   const agentButtonRef = useRef<HTMLDivElement | null>(null);
-  const modelButtonRef = useRef<HTMLDivElement | null>(null);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -625,109 +1000,21 @@ const AutoSuggestTextarea: React.FC<AutoSuggestTextareaProps> = ({
       </div>
       {chatScreen && (
         <Box sx={{ display: 'flex', alignItems: 'center', gap: '0px' }}>
-          {/* Model Selector for chat screen */}
+          {/* Model Selector for chat screen — popover supports both
+              "Blanket" (one model) and "Per category" (one model per tier)
+              modes; mutually exclusive at the hook level. */}
           {models && models.length > 0 && (
             <>
               <Box sx={{ width: '1px', height: ds.space[5], backgroundColor: 'var(--ds-brand-200)', mx: 'var(--ds-space-3)' }} />
-              <Box
-                ref={modelButtonRef}
-                sx={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  color: ds.gray[600],
-                  border: `0.5px solid ${ds.gray[300]}`,
-                  borderRadius: 'var(--ds-radius-sm)',
-                  padding: 'var(--ds-space-1) var(--ds-space-2)',
-                  gap: 'var(--ds-space-1)',
-                  cursor: 'pointer',
-                  fontSize: 'var(--ds-text-small)',
-                }}
-                onClick={() => {
-                  setShowModelDropdown(!showModelDropdown);
-                  setModelAnchorEl(modelButtonRef.current);
-                }}
-              >
-                <Typography
-                  sx={{
-                    fontSize: 'var(--ds-text-caption)',
-                    whiteSpace: 'nowrap',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    maxWidth: ds.space.mul(0, 40),
-                  }}
-                >
-                  {selectedModel ? selectedModel.model : 'Select Model'}
-                </Typography>
-                {selectedModel ? (
-                  <Box
-                    component='span'
-                    sx={{
-                      color: ds.gray[700],
-                      fontSize: 'var(--ds-text-body-lg)',
-                      fontWeight: 'bold',
-                      padding: 'var(--ds-space-1) var(--ds-space-1)',
-                      borderRadius: 'var(--ds-radius-sm)',
-                      '&:hover': {
-                        color: ds.blue[500],
-                        backgroundColor: 'var(--ds-gray-100)',
-                      },
-                    }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onModelSelect?.(null);
-                    }}
-                  >
-                    ✕
-                  </Box>
-                ) : (
-                  <ArrowDropDownIcon sx={{ fontSize: 'var(--ds-text-title)' }} />
-                )}
-              </Box>
+              <ModelPickerPopover
+                models={models}
+                selectedModel={selectedModel}
+                onModelSelect={onModelSelect}
+                selectedTierModels={selectedTierModels}
+                onTierModelsSelect={onTierModelsSelect}
+                disabled={disabled}
+              />
             </>
-          )}
-          {showModelDropdown && chatScreen && (
-            <Popper open={showModelDropdown} anchorEl={modelAnchorEl} placement='top-start' sx={{ zIndex: 9999 }}>
-              <ClickAwayListener onClickAway={() => setShowModelDropdown(false)}>
-                <Box
-                  sx={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 'var(--ds-space-1)',
-                    padding: 'var(--ds-space-2)',
-                    border: '1px solid var(--ds-blue-300)',
-                    borderRadius: 'var(--ds-radius-sm)',
-                    backgroundColor: 'var(--ds-background-100)',
-                    maxHeight: ds.space.mul(0, 100),
-                    overflowY: 'auto',
-                    minWidth: ds.space.mul(0, 75),
-                  }}
-                >
-                  {models.map((model, index) => (
-                    <Box
-                      key={`chat-${model.provider}-${model.model}-${index}`}
-                      sx={{
-                        display: 'flex',
-                        flexDirection: 'column',
-                        padding: 'var(--ds-space-1)',
-                        cursor: 'pointer',
-                        backgroundColor:
-                          selectedModel?.provider === model.provider && selectedModel?.model === model.model ? ds.blue[100] : 'transparent',
-                        '&:hover': { backgroundColor: 'var(--ds-blue-100)', borderRadius: 'var(--ds-radius-sm)' },
-                      }}
-                      onClick={() => {
-                        onModelSelect?.(model);
-                        setShowModelDropdown(false);
-                      }}
-                    >
-                      <Typography sx={{ fontSize: 'var(--ds-text-caption)', fontWeight: 'var(--ds-font-weight-medium)', color: ds.blue[500] }}>
-                        {model.model}
-                      </Typography>
-                      <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600] }}>{model.provider}</Typography>
-                    </Box>
-                  ))}
-                </Box>
-              </ClickAwayListener>
-            </Popper>
           )}
           <Box sx={{ width: '1px', height: ds.space[5], backgroundColor: 'var(--ds-brand-200)', mx: 'var(--ds-space-3)' }} />
           <CustomButton
@@ -912,109 +1199,18 @@ const AutoSuggestTextarea: React.FC<AutoSuggestTextareaProps> = ({
             )}
           </Box>
           <Box sx={{ width: '1px', height: ds.space.mul(0, 9), backgroundColor: grey[200], flexShrink: 0 }} />
-          {/* Model Selector */}
+          {/* Model Selector — popover variant for non-chat (popup) flow.
+              Same component as the chat-screen path; renders the same two
+              modes (Blanket / Per category) with mutual exclusivity. */}
           {models && models.length > 0 && (
-            <Box
-              ref={modelButtonRef}
-              sx={{
-                display: 'flex',
-                alignItems: 'center',
-                color: ds.gray[600],
-                border: `0.5px solid ${ds.gray[300]}`,
-                borderRadius: 'var(--ds-radius-sm)',
-                padding: 'var(--ds-space-1) var(--ds-space-2)',
-                gap: 'var(--ds-space-1)',
-                cursor: 'pointer',
-                whiteSpace: 'nowrap',
-                flexShrink: 0,
-              }}
-              onClick={() => {
-                setShowModelDropdown(!showModelDropdown);
-                setModelAnchorEl(modelButtonRef.current);
-              }}
-            >
-              {selectedModel ? (
-                <>
-                  <Typography
-                    sx={{
-                      fontSize: 'var(--ds-text-caption)',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      maxWidth: ds.space.mul(0, 40),
-                    }}
-                  >
-                    {selectedModel.model}
-                  </Typography>
-                  <Box
-                    component='span'
-                    sx={{
-                      color: ds.gray[700],
-                      fontSize: 'var(--ds-text-small)',
-                      fontWeight: 'bold',
-                      flexShrink: 0,
-                      lineHeight: 1,
-                      '&:hover': { color: ds.blue[500] },
-                    }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onModelSelect?.(null);
-                    }}
-                  >
-                    ✕
-                  </Box>
-                </>
-              ) : (
-                <>
-                  <Typography sx={{ fontSize: 'var(--ds-text-caption)' }}>Model</Typography>
-                  <ArrowDropDownIcon sx={{ fontSize: 'var(--ds-text-title)' }} />
-                </>
-              )}
-            </Box>
-          )}
-          {showModelDropdown && !chatScreen && (
-            <Popper open={showModelDropdown} anchorEl={modelAnchorEl} placement='top-start' sx={{ zIndex: 9999 }}>
-              <ClickAwayListener onClickAway={() => setShowModelDropdown(false)}>
-                <Box
-                  sx={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 'var(--ds-space-1)',
-                    padding: 'var(--ds-space-2)',
-                    border: '1px solid var(--ds-blue-300)',
-                    borderRadius: 'var(--ds-radius-sm)',
-                    backgroundColor: 'var(--ds-background-100)',
-                    maxHeight: ds.space.mul(0, 100),
-                    overflowY: 'auto',
-                    minWidth: ds.space.mul(0, 90),
-                  }}
-                >
-                  {models.map((model, index) => (
-                    <Box
-                      key={`${model.provider}-${model.model}-${index}`}
-                      sx={{
-                        display: 'flex',
-                        flexDirection: 'column',
-                        padding: 'var(--ds-space-2)',
-                        cursor: 'pointer',
-                        backgroundColor:
-                          selectedModel?.provider === model.provider && selectedModel?.model === model.model ? ds.blue[100] : 'transparent',
-                        '&:hover': { backgroundColor: 'var(--ds-blue-100)', borderRadius: 'var(--ds-radius-sm)' },
-                      }}
-                      onClick={() => {
-                        onModelSelect?.(model);
-                        setShowModelDropdown(false);
-                      }}
-                    >
-                      <Typography sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-medium)', color: ds.blue[500] }}>
-                        {model.model}
-                      </Typography>
-                      <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600] }}>{model.provider}</Typography>
-                    </Box>
-                  ))}
-                </Box>
-              </ClickAwayListener>
-            </Popper>
+            <ModelPickerPopover
+              models={models}
+              selectedModel={selectedModel}
+              onModelSelect={onModelSelect}
+              selectedTierModels={selectedTierModels}
+              onTierModelsSelect={onTierModelsSelect}
+              disabled={disabled}
+            />
           )}
           <Box sx={{ flex: 1 }} />
           {/* Submit / Stop button */}

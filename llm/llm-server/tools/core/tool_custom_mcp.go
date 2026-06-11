@@ -16,12 +16,55 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
+// isRestrictedIP returns true if the address falls inside a range we never want
+// outbound MCP traffic to reach (loopback, RFC1918, link-local, multicast, etc.).
+func isRestrictedIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
+}
+
+// pinnedSafeDialContext re-resolves the hostname at dial time and rejects any
+// restricted IP, then pins the TCP connection to the validated address. This
+// defeats DNS-rebinding attacks where a hostname returns a public IP during the
+// initial validateMCPURL check and a private IP at connect time.
+func pinnedSafeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	d := net.Dialer{Timeout: 30 * time.Second}
+	// If the host is already a literal IP, skip DNS and validate directly.
+	if ip := net.ParseIP(host); ip != nil {
+		if isRestrictedIP(ip) {
+			return nil, fmt.Errorf("blocked dial to restricted IP %s", ip.String())
+		}
+		return d.DialContext(ctx, network, addr)
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return nil, fmt.Errorf("unable to resolve host %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("host %q resolved to zero addresses", host)
+	}
+	for _, ip := range ips {
+		if isRestrictedIP(ip) {
+			return nil, fmt.Errorf("blocked dial to restricted IP %s", ip.String())
+		}
+	}
+	return d.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
+}
+
 // noRedirectMCPClient disables HTTP redirects so the MCP server can't redirect
-// the client to an internal/private URL after the initial validateMCPURL check.
+// the client to an internal/private URL after the initial validateMCPURL check,
+// and pins the TCP dial to a validated public IP to defeat DNS rebinding.
 // Any 3xx response is surfaced to the caller instead of followed.
 var noRedirectMCPClient = &http.Client{
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
+	},
+	Transport: &http.Transport{
+		DialContext: pinnedSafeDialContext,
 	},
 }
 
@@ -159,7 +202,7 @@ func validateMCPURL(rawURL string) error {
 		return fmt.Errorf("host %q resolved to zero addresses", host)
 	}
 	for _, ip := range ips {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		if isRestrictedIP(ip) {
 			return fmt.Errorf("URL resolves to a restricted IP address: %s", ip.String())
 		}
 	}

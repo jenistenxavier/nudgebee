@@ -12,6 +12,7 @@ import (
 	"nudgebee/llm/config"
 	"nudgebee/llm/tools/core"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -626,7 +627,10 @@ func (m CrawlExecuteTool) Call(nbRequestContext core.NbToolContext, input core.N
 	// redirects and loads subresources (iframes, images, fetch/XHR) — any of which could
 	// resolve to an internal IP. Intercept every request and validate it before letting the
 	// browser fetch it. Cache validation results per host (within this crawl) so we don't
-	// hammer the DNS resolver on pages with hundreds of subresources.
+	// hammer the DNS resolver on pages with hundreds of subresources. Playwright fires
+	// Route callbacks concurrently for parallel subresource loads, so the cache map must
+	// be guarded against concurrent read/write panics.
+	var hostCheckMu sync.Mutex
 	hostCheckCache := make(map[string]bool)
 	if routeErr := page.Route("**", func(route playwright.Route) {
 		reqURL := route.Request().URL()
@@ -636,7 +640,10 @@ func (m CrawlExecuteTool) Call(nbRequestContext core.NbToolContext, input core.N
 			return
 		}
 		host := u.Hostname()
-		if cached, seen := hostCheckCache[host]; seen {
+		hostCheckMu.Lock()
+		cached, seen := hostCheckCache[host]
+		hostCheckMu.Unlock()
+		if seen {
 			if cached {
 				_ = route.Continue()
 			} else {
@@ -646,12 +653,16 @@ func (m CrawlExecuteTool) Call(nbRequestContext core.NbToolContext, input core.N
 			return
 		}
 		if err := validateURL(reqURL); err != nil {
+			hostCheckMu.Lock()
 			hostCheckCache[host] = false
+			hostCheckMu.Unlock()
 			nbRequestContext.Ctx.GetLogger().Warn("crawl: blocked subresource", "url", reqURL, "error", err.Error())
 			_ = route.Abort("addressunreachable")
 			return
 		}
+		hostCheckMu.Lock()
 		hostCheckCache[host] = true
+		hostCheckMu.Unlock()
 		_ = route.Continue()
 	}); routeErr != nil {
 		nbRequestContext.Ctx.GetLogger().Error("crawl: unable to install SSRF route handler", "error", routeErr.Error())

@@ -48,10 +48,17 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 COPY uv.lock pyproject.toml ./
 
-# Install dependencies
+# Install dependencies from the pinned lock (uv.lock is a `uv pip compile`
+# output), then the project itself without re-resolving. Installing the exact
+# locked versions — instead of re-resolving pyproject's loose constraints via
+# `uv pip install -e .` — keeps the image reproducible and matches the tested
+# dependency set (e.g. langchain-community==0.4.1 for ragas 0.4.3; a looser
+# resolve pulled a langchain-community without `chat_models.vertexai`, breaking
+# the ragas controller import).
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
-    uv pip install -e . --system
+    uv pip install -r uv.lock --system && \
+    uv pip install -e . --no-deps --system
 
 
 # `production` image used for runtime

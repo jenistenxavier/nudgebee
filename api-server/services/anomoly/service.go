@@ -17,6 +17,9 @@ import (
 	"nudgebee/services/tenant"
 	"strings"
 	"time"
+
+	"github.com/jmoiron/sqlx"
+	"golang.org/x/sync/errgroup"
 )
 
 const dateTimeFormat = "2006-01-02 15:04:05"
@@ -160,6 +163,7 @@ func executeForAccountPairs(ctx *security.RequestContext, pairs []accountTenantP
 	}
 
 	var workItems []processingWorkItem
+	eligibleAccountIds := make([]string, 0, len(pairs))
 	slog.Info("anomaly: generating work items...", "accountCount", len(pairs))
 
 	for _, pair := range pairs {
@@ -173,6 +177,7 @@ func executeForAccountPairs(ctx *security.RequestContext, pairs []accountTenantP
 			continue
 		}
 
+		eligibleAccountIds = append(eligibleAccountIds, pair.AccountID)
 		for _, app := range apps {
 			for _, cfg := range allAnomalyConfigs {
 				workItems = append(workItems, processingWorkItem{
@@ -189,6 +194,10 @@ func executeForAccountPairs(ctx *security.RequestContext, pairs []accountTenantP
 		slog.Info("anomaly: no work items generated for processing.")
 		return nil
 	}
+
+	// Pre-fetch existing anomaly counts for all eligible accounts in a single query,
+	// instead of running a COUNT(*) per (app × anomaly_type) inside the loop.
+	existingAnomalyCounts := fetchExistingAnomalyCounts(eligibleAccountIds)
 
 	// Shuffle the workItems slice to distribute load
 	source := rand.NewSource(time.Now().UnixNano())
@@ -210,7 +219,11 @@ func executeForAccountPairs(ctx *security.RequestContext, pairs []accountTenantP
 		if item.AnomalyConfig.AnomalyProvider == "prometheus" {
 			processingErr = processSingleApplicationPrometheus(ctx, item.AnomalyConfig, item.TenantID, item.AccountID, item.Application)
 		} else {
-			processingErr = processSingleApplicationMlAsync(ctx, item.AnomalyConfig, item.TenantID, item.AccountID, item.Application)
+			var existingCount int
+			if typeCounts, ok := existingAnomalyCounts[item.AccountID]; ok {
+				existingCount = typeCounts[item.AnomalyConfig.AnomalyType]
+			}
+			processingErr = processSingleApplicationMlAsync(ctx, item.AnomalyConfig, item.TenantID, item.AccountID, item.Application, existingCount)
 		}
 
 		if processingErr != nil {
@@ -223,12 +236,75 @@ func executeForAccountPairs(ctx *security.RequestContext, pairs []accountTenantP
 	return nil
 }
 
+// fetchExistingAnomalyCounts returns a nested map[accountId][anomalyType] -> count of
+// existing rows in the `anomaly` table. A single grouped query replaces what used to be
+// one COUNT(*) per (app × anomalyType) inside the work-item loop.
+// Missing entries (no rows for an account/type) implicitly read back as 0.
+func fetchExistingAnomalyCounts(accountIds []string) map[string]map[AnomalyType]int {
+	result := make(map[string]map[AnomalyType]int, len(accountIds))
+
+	// Drop empty IDs defensively — an empty account_id in IN (...) would scan rows
+	// belonging to other tenants/accounts, which the surrounding code never intends.
+	nonEmptyAccountIds := make([]string, 0, len(accountIds))
+	for _, id := range accountIds {
+		if id != "" {
+			nonEmptyAccountIds = append(nonEmptyAccountIds, id)
+		}
+	}
+	if len(nonEmptyAccountIds) == 0 {
+		return result
+	}
+
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		slog.Error("anomaly: failed to get db manager for existing anomaly counts", "error", err)
+		return result
+	}
+
+	query, args, err := sqlx.In(`SELECT account_id, anomaly_type, COUNT(*) FROM anomaly WHERE account_id IN (?) GROUP BY account_id, anomaly_type`, nonEmptyAccountIds)
+	if err != nil {
+		slog.Error("anomaly: failed to build existing-anomaly-counts query", "error", err)
+		return result
+	}
+	query = dbms.Db.Rebind(query)
+
+	rows, err := dbms.Db.Queryx(query, args...)
+	if err != nil {
+		slog.Error("anomaly: failed to query existing anomaly counts", "error", err)
+		return result
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			slog.Error("anomaly: failed to close existing-anomaly-counts rows", "error", cerr)
+		}
+	}()
+
+	for rows.Next() {
+		var accountID string
+		var anomalyType AnomalyType
+		var count int
+		if err := rows.Scan(&accountID, &anomalyType, &count); err != nil {
+			slog.Error("anomaly: failed to scan existing anomaly count row", "error", err)
+			continue
+		}
+		if _, ok := result[accountID]; !ok {
+			result[accountID] = make(map[AnomalyType]int)
+		}
+		result[accountID][anomalyType] = count
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("anomaly: error iterating existing-anomaly-counts rows", "error", err)
+	}
+	return result
+}
+
 func processSingleApplicationMlAsync(
 	ctx *security.RequestContext,
 	anomalyConfig AnomalyTemplate,
 	tenantId string,
 	accountId string,
 	app application.Application, // Single application
+	existingAnomalyCount int, // pre-fetched count of existing anomalies for (accountId, anomalyType)
 ) error {
 	slog.Debug("anomaly: processing ML config for single application",
 		"accountId", accountId, "tenantId", tenantId, "app", app.Name, "namespace", app.K8sNamespace, "anomalyType", anomalyConfig.AnomalyType)
@@ -248,38 +324,6 @@ func processSingleApplicationMlAsync(
 	// Time range for anomaly detection
 	endTime := time.Now().UTC().Truncate(time.Hour)
 	startTime := endTime.AddDate(0, 0, -1*config.Config.NBAnomalyTrainingDays)
-
-	// Get database manager
-	dbms, err := database.GetDatabaseManager(database.Metastore)
-	if err != nil {
-		slog.Error("anomaly: failed to get db manager for ML processing", "error", err, "app", app.Name, "accountId", accountId)
-		return err
-	}
-
-	// Query the count of existing anomalies
-	rows, err := dbms.Query(`select count(*) from anomaly where account_id = $1 and anomaly_type = $2`, accountId, anomalyConfig.AnomalyType)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		err := rows.Close()
-		if err != nil {
-			slog.Error("anomaly: failed to close rows", "error", err)
-		}
-	}()
-
-	var existingAnomalyCount int
-	if rows.Next() {
-		err = rows.Scan(&existingAnomalyCount)
-		if err != nil {
-			slog.Error("anomaly: failed to scan existing anomaly count for ML", "error", err, "accountId", accountId)
-			return err
-		}
-	}
-	if err = rows.Err(); err != nil {
-		slog.Error("anomaly: error after scanning existing anomaly count for ML", "error", err, "accountId", accountId)
-		return err
-	}
 
 	// Set evaluation period minutes
 	var evaluationPeriodMinutes = config.Config.NBAnomalyEvaluationHours * 60
@@ -303,7 +347,7 @@ func processSingleApplicationMlAsync(
 	slog.Info("anomaly: publishing ML processing message for app",
 		"accountId", accountId, "tenantId", tenantId, "app", app.Name, "namespace", app.K8sNamespace, "type", anomalyConfig.AnomalyType)
 
-	err = common.MqPublish(config.Config.RabbitMqServicesExchange, config.Config.RabbitMqServicesAnomalyProcessingQueue, AnomalyProcessingMessage{
+	err := common.MqPublish(config.Config.RabbitMqServicesExchange, config.Config.RabbitMqServicesAnomalyProcessingQueue, AnomalyProcessingMessage{
 		TenantId:                tenantId,
 		AccountId:               accountId,
 		ApplicationName:         app.Name,
@@ -462,50 +506,57 @@ func processSingleApplicationPrometheus(
 		return nil
 	}
 
+	// Fan the per-period relay fetches out concurrently — each period is an independent
+	// network round-trip to the agent (no shared state), so running them in parallel
+	// cuts wall time from sum(latencies) to ~max(latencies) per app.
+	var g errgroup.Group
 	for _, period := range referencePeriods {
-		historicalDataStartTime := endTime.AddDate(0, 0, -period)
-		rHistStartTime := historicalDataStartTime.Format("2006-01-02T15:04:05.000000Z")
-		rHistEndTime := endTime.Format("2006-01-02T15:04:05.000000Z") // Using 'now' as end for historical window
+		period := period
+		g.Go(func() error {
+			historicalDataStartTime := endTime.AddDate(0, 0, -period)
+			rHistStartTime := historicalDataStartTime.Format("2006-01-02T15:04:05.000000Z")
+			rHistEndTime := endTime.Format("2006-01-02T15:04:05.000000Z") // Using 'now' as end for historical window
 
-		applicationsFilterForHist := map[string]any{
-			app.Name: map[string]any{"namespace": app.K8sNamespace},
-		}
-		historicalAppStatsResponses, err := queryRelayServer(accountId, rHistStartTime, rHistEndTime, promQuery, queryName, applicationsFilterForHist)
-		if err != nil {
-			slog.Error("anomaly: failed to query historical relay server data for app", "error", err, "accountId", accountId, "app", app.Name, "period", period)
-			continue // Skip this period, try next
-		}
+			applicationsFilterForHist := map[string]any{
+				app.Name: map[string]any{"namespace": app.K8sNamespace},
+			}
+			historicalAppStatsResponses, err := queryRelayServer(accountId, rHistStartTime, rHistEndTime, promQuery, queryName, applicationsFilterForHist)
+			if err != nil {
+				// Match prior behavior: skip this period on relay error, don't fail the whole app.
+				slog.Error("anomaly: failed to query historical relay server data for app", "error", err, "accountId", accountId, "app", app.Name, "period", period)
+				return nil
+			}
 
-		if len(historicalAppStatsResponses) == 0 {
-			slog.Info("anomaly: no historical data from relay for app", "accountId", accountId, "app", app.Name, "period", period, "queryName", queryName)
-			continue
-		}
-		historicalAppMetricValue, foundHist := historicalAppStatsResponses[0].OtherMetrics[queryName]
-		if !foundHist || historicalAppMetricValue == 0 {
-			slog.Info("anomaly: historical metric not found or is zero for app", "metric", queryName, "app", app.Name, "period", period)
-			continue
-		}
+			if len(historicalAppStatsResponses) == 0 {
+				slog.Info("anomaly: no historical data from relay for app", "accountId", accountId, "app", app.Name, "period", period, "queryName", queryName)
+				return nil
+			}
+			historicalAppMetricValue, foundHist := historicalAppStatsResponses[0].OtherMetrics[queryName]
+			if !foundHist || historicalAppMetricValue == 0 {
+				slog.Info("anomaly: historical metric not found or is zero for app", "metric", queryName, "app", app.Name, "period", period)
+				return nil
+			}
 
-		var calculatedChangePerc float64
-		if historicalAppMetricValue != 0 {
-			calculatedChangePerc = ((currentAppMetricValue - historicalAppMetricValue) / historicalAppMetricValue) * 100.0
-		}
+			calculatedChangePerc := ((currentAppMetricValue - historicalAppMetricValue) / historicalAppMetricValue) * 100.0
 
-		isAnomaly := false
-		switch anomalyCfg.ChangeOperator {
-		case "GT":
-			isAnomaly = currentAppMetricValue > historicalAppMetricValue && calculatedChangePerc > anomalyCfg.BufferPercenatge
-		case "LT":
-			isAnomaly = currentAppMetricValue < historicalAppMetricValue && (-calculatedChangePerc) > anomalyCfg.BufferPercenatge
-		case "GTE":
-			isAnomaly = currentAppMetricValue >= historicalAppMetricValue && calculatedChangePerc >= anomalyCfg.BufferPercenatge
-		case "LTE":
-			isAnomaly = currentAppMetricValue <= historicalAppMetricValue && (-calculatedChangePerc) >= anomalyCfg.BufferPercenatge
-		default:
-			slog.Warn("anomaly: unknown change operator", "operator", anomalyCfg.ChangeOperator, "app", app.Name)
-		}
+			isAnomaly := false
+			switch anomalyCfg.ChangeOperator {
+			case "GT":
+				isAnomaly = currentAppMetricValue > historicalAppMetricValue && calculatedChangePerc > anomalyCfg.BufferPercenatge
+			case "LT":
+				isAnomaly = currentAppMetricValue < historicalAppMetricValue && (-calculatedChangePerc) > anomalyCfg.BufferPercenatge
+			case "GTE":
+				isAnomaly = currentAppMetricValue >= historicalAppMetricValue && calculatedChangePerc >= anomalyCfg.BufferPercenatge
+			case "LTE":
+				isAnomaly = currentAppMetricValue <= historicalAppMetricValue && (-calculatedChangePerc) >= anomalyCfg.BufferPercenatge
+			default:
+				slog.Warn("anomaly: unknown change operator", "operator", anomalyCfg.ChangeOperator, "app", app.Name)
+			}
 
-		if isAnomaly {
+			if !isAnomaly {
+				return nil
+			}
+
 			slog.Info("anomaly: Prometheus-based anomaly detected",
 				"accountId", accountId, "app", app.Name, "namespace", app.K8sNamespace, "type", anomalyCfg.AnomalyType,
 				"current", currentAppMetricValue, "historical", historicalAppMetricValue, "period", period)
@@ -528,13 +579,14 @@ func processSingleApplicationPrometheus(
 				EvaluatedAt:  &evalTime,
 			}
 			if err := insertAnomaly([]Anomaly{anomalyToInsert}); err != nil {
-				slog.Error("anomaly: failed to insert prometheus-based anomaly", "error", err, "accountId", accountId, "app", app.Name)
-				return err // If insert fails, return error for this work item
+				slog.Error("anomaly: failed to insert prometheus-based anomaly", "error", err, "accountId", accountId, "app", app.Name, "period", period)
+				return err
 			}
-		}
+			return nil
+		})
 	}
 
-	return nil
+	return g.Wait()
 }
 
 func queryRelayServer(accountId string, rStartTime string, rEndTime string, query string, queryName string, applicationsFilter map[string]any) ([]relay.ApplicationStatsResponse, error) {
@@ -757,92 +809,124 @@ func GenerateAnomalyEvent(dbms *database.DatabaseManager, anomaly *Anomaly) erro
 }
 
 func collectEvidences(anomaly *Anomaly) ([]any, error) {
-	evidences := make([]any, 5)
 	// anomaly to map
 	anomalyMap, err := common.MarshalStructToMap(anomaly)
 	if err != nil {
 		slog.Error("anomaly: unable to convert struct to map", "error", err)
 		return nil, err
 	}
-	evidences = append(evidences, anomalyMap)
 
 	// start time is 30 min before the evaluated time
 	startTime := anomaly.EvaluatedAt.Add(-60 * time.Minute)
 	endTime := *anomaly.EvaluatedAt
 
-	// Step 2: Collect workload metrics (memory, cpu, latency, cpu_throttling)
-	for _, metricName := range []string{"memory", "cpu", "latency", "cpu_throttling"} {
-		ev, err := relay.WorkloadMetricsExecutor(
-			anomaly.AccountId,
-			anomaly.Name,
-			anomaly.Namespace,
-			metricName,
-			startTime,
-			endTime,
-		)
-		if err != nil {
-			slog.Error("anomaly: error getting workload ", "error", err, "metric", metricName, "workload", anomaly.Name, "namespace", anomaly.Namespace)
-			continue
-		}
-		res, err := relay.FormatEvidenceResponseFromAgent(fmt.Sprintf("%s Metric", strings.ToTitle(strings.ReplaceAll(metricName, "_", " "))), ev)
-		if err != nil {
-			slog.Error("anomaly: error formatting evidence response", "metric", metricName, "error", err)
-			continue
-		}
-		evidences = append(evidences, res)
+	// Each downstream call (4 workload metrics + service map + traces) is an
+	// independent relay HTTP round-trip. Fan them out via errgroup and write into
+	// fixed slots so the final order matches the previous sequential ordering.
+	// Concurrent writes to distinct slice indices are safe; no mutex needed.
+	metricNames := []string{"memory", "cpu", "latency", "cpu_throttling"}
+	slots := make([]any, 1+len(metricNames)+2) // anomaly + metrics + serviceMap + traces
+	slots[0] = anomalyMap
+	slotServiceMap := 1 + len(metricNames)
+	slotTraces := slotServiceMap + 1
+
+	var g errgroup.Group
+
+	// Workload metrics (memory, cpu, latency, cpu_throttling)
+	for i, metricName := range metricNames {
+		i, metricName := i, metricName
+		g.Go(func() error {
+			ev, err := relay.WorkloadMetricsExecutor(
+				anomaly.AccountId,
+				anomaly.Name,
+				anomaly.Namespace,
+				metricName,
+				startTime,
+				endTime,
+			)
+			if err != nil {
+				slog.Error("anomaly: error getting workload ", "error", err, "metric", metricName, "workload", anomaly.Name, "namespace", anomaly.Namespace)
+				return nil
+			}
+			res, err := relay.FormatEvidenceResponseFromAgent(fmt.Sprintf("%s Metric", strings.ToTitle(strings.ReplaceAll(metricName, "_", " "))), ev)
+			if err != nil {
+				slog.Error("anomaly: error formatting evidence response", "metric", metricName, "error", err)
+				return nil
+			}
+			slots[1+i] = res
+			return nil
+		})
 	}
 
-	// get service map
-	healthCheckParams := map[string]any{
-		"workload_filter": map[string]string{
-			"workload_name":      anomaly.Name,
-			"workload_namespace": anomaly.Namespace,
-		},
-		"r_start_time": startTime.UTC().Format("2006-01-02T15:04:05.000000Z"),
-		"r_end_time":   endTime.UTC().Format("2006-01-02T15:04:05.000000Z"),
-	}
-	evidence, err := relay.PodActionExecutor(anomaly.AccountId, anomaly.Name, anomaly.Namespace, relay.ServiceMapActionName, healthCheckParams)
-	if err == nil {
+	// Service map
+	g.Go(func() error {
+		healthCheckParams := map[string]any{
+			"workload_filter": map[string]string{
+				"workload_name":      anomaly.Name,
+				"workload_namespace": anomaly.Namespace,
+			},
+			"r_start_time": startTime.UTC().Format("2006-01-02T15:04:05.000000Z"),
+			"r_end_time":   endTime.UTC().Format("2006-01-02T15:04:05.000000Z"),
+		}
+		evidence, err := relay.PodActionExecutor(anomaly.AccountId, anomaly.Name, anomaly.Namespace, relay.ServiceMapActionName, healthCheckParams)
+		if err != nil {
+			slog.Error("anomaly: error getting service map at anomaly", "error", err)
+			return nil
+		}
 		res, err := relay.FormatEvidenceResponseFromAgent("Service Map", evidence)
 		if err != nil {
 			slog.Error("anomaly: error formatting service map at anomaly evidence", "error", err)
-		} else {
-			insight, err := common.CheckNeighboringWorkloadHealth(res, map[string]string{
-				"WorkloadName": anomaly.Name,
-				"Namespace":    anomaly.Namespace,
-			})
-			if err != nil {
-				slog.Error("anomaly: error checking neighboring workload health at anomaly", "error", err)
-			} else if len(insight) > 0 {
-				res["insight"] = insight
-			}
-			res["type"] = relay.ServiceMapActionName
-			res["start_time"] = startTime.UTC().Format("2006-01-02T15:04:05.000000Z")
-			res["end_time"] = endTime.UTC().Format("2006-01-02T15:04:05.000000Z")
-			res["workload_name"] = anomaly.Name
-			res["workload_namespace"] = anomaly.Namespace
-			evidences = append(evidences, res)
+			return nil
 		}
-	} else {
-		slog.Error("anomaly: error getting service map at anomaly", "error", err)
-	}
-
-	// get workload traces
-	evidence, err = relay.PodActionExecutor(anomaly.AccountId, anomaly.Name, anomaly.Namespace, relay.WorkloadTracesEnricherActionName, map[string]any{
-		"destination_workload_name":      anomaly.Name,
-		"destination_workload_namespace": anomaly.Namespace,
-		"duration_minutes":               60,
+		insight, err := common.CheckNeighboringWorkloadHealth(res, map[string]string{
+			"WorkloadName": anomaly.Name,
+			"Namespace":    anomaly.Namespace,
+		})
+		if err != nil {
+			slog.Error("anomaly: error checking neighboring workload health at anomaly", "error", err)
+		} else if len(insight) > 0 {
+			res["insight"] = insight
+		}
+		res["type"] = relay.ServiceMapActionName
+		res["start_time"] = startTime.UTC().Format("2006-01-02T15:04:05.000000Z")
+		res["end_time"] = endTime.UTC().Format("2006-01-02T15:04:05.000000Z")
+		res["workload_name"] = anomaly.Name
+		res["workload_namespace"] = anomaly.Namespace
+		slots[slotServiceMap] = res
+		return nil
 	})
-	if err == nil {
+
+	// Workload traces — only call whose relay-level failure aborts collectEvidences,
+	// matching the original sequential behavior.
+	g.Go(func() error {
+		evidence, err := relay.PodActionExecutor(anomaly.AccountId, anomaly.Name, anomaly.Namespace, relay.WorkloadTracesEnricherActionName, map[string]any{
+			"destination_workload_name":      anomaly.Name,
+			"destination_workload_namespace": anomaly.Namespace,
+			"duration_minutes":               60,
+		})
+		if err != nil {
+			slog.Error("anomaly: error getting workload traces at anomaly", "error", err)
+			return err
+		}
 		res, err := relay.FormatEvidenceResponseFromAgent("Workload Traces", evidence)
 		if err != nil {
 			slog.Error("anomaly: error formatting evidence response in anomaly at traces", "error", err)
-		} else {
-			evidences = append(evidences, res)
+			return nil
 		}
-	} else {
-		slog.Error("anomaly: error getting workload traces at anomaly", "error", err)
+		slots[slotTraces] = res
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
 		return nil, err
+	}
+
+	// Compact: drop slots that weren't filled (failed sub-calls).
+	evidences := make([]any, 0, len(slots))
+	for _, s := range slots {
+		if s != nil {
+			evidences = append(evidences, s)
+		}
 	}
 	return evidences, nil
 }

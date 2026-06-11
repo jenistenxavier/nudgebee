@@ -18,6 +18,7 @@ const CliCommandModal = ({ rec, onClose }: { rec: any; onClose: () => void }) =>
       additionalComponent={null}
       isSubmitRequired={false}
       isCancelRequired={false}
+      contentSx={{ padding: 0 }}
       dialogContent={
         <>
           <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[600], mb: 'var(--ds-space-2)' }}>
@@ -29,7 +30,7 @@ const CliCommandModal = ({ rec, onClose }: { rec: any; onClose: () => void }) =>
             sx={{
               backgroundColor: 'var(--ds-brand-600)',
               borderRadius: 'var(--ds-radius-lg)',
-              p: 'var(--ds-space-3) var(--ds-space-4)',
+              p: 'var(--ds-space-3) var(--ds-space-7) var(--ds-space-3) var(--ds-space-4)',
               fontFamily: 'monospace',
               fontSize: 'var(--ds-text-small)',
               color: 'var(--ds-brand-150)',

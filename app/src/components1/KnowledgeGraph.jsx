@@ -1340,13 +1340,6 @@ const ServiceMapContent = () => {
     }
   }, [pinnedNodeId, applyPinHighlight]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Re-apply pin after graph finishes loading (handles graph re-fetch case)
-  useEffect(() => {
-    if (!pinnedNodeId || isGraphLoading) return;
-    const timer = setTimeout(() => applyPinHighlight(pinnedNodeId), 60);
-    return () => clearTimeout(timer);
-  }, [pinnedNodeId, isGraphLoading, applyPinHighlight]);
-
   // Keep nodeDataMapRef in sync for search DOM manipulation (nodeId -> node.data)
   useEffect(() => {
     const map = new Map();
@@ -1411,11 +1404,18 @@ const ServiceMapContent = () => {
     [setNodes]
   );
 
-  // Clear search spotlight when graph re-fetches
+  // Reset transient view state (search spotlight, focus mode, click-to-pin highlight) whenever the
+  // graph re-fetches. The pin highlight dims the whole graph except the pinned node + its neighbors
+  // via the `kg-pin-active` class on the (stable) graph wrapper. If it survives a re-fetch, the new
+  // graph stays dimmed — and after navigating back the pinned node is just one node in a much larger
+  // graph, so almost everything renders faded (issue #31886). Clearing it here keeps the visual state
+  // consistent before and after navigation, the same way search/focus already reset.
   useEffect(() => {
     setSearchResetKey((k) => k + 1);
     setFocusedNodeId(null);
     originalPositionsRef.current = null;
+    clearPinHighlight();
+    setPinnedNodeId(null);
     // Node/edge classNames reset automatically when setNodes/setEdges replaces state with new rawData
   }, [rawData]); // eslint-disable-line react-hooks/exhaustive-deps
 

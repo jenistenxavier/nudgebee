@@ -10,6 +10,13 @@ jest.mock('@api1/ask-nudgebee', () => ({
     aiGenerateInvestigate: jest.fn(),
     getModelConfig: jest.fn(),
   },
+  // Hook constructs a fetcher per instance. Route fetcher.fetch() through the
+  // same `getLlmConversation` mock so tests can drive responses with the
+  // existing mockGetConversation.mockResolvedValue API.
+  createConversationFetcher: jest.fn(() => ({
+    fetch: jest.fn((args) => fetcherDelegate(args)),
+    reset: jest.fn(),
+  })),
 }));
 
 jest.mock('@api1/workflow', () => ({
@@ -19,8 +26,8 @@ jest.mock('@api1/workflow', () => ({
   },
 }));
 
-jest.mock('@components1/common/snackbarService', () => ({
-  snackbar: { success: jest.fn(), error: jest.fn() },
+jest.mock('@components1/ds/Toast', () => ({
+  toast: { success: jest.fn(), error: jest.fn() },
 }));
 
 jest.mock('src/utils/common', () => ({
@@ -45,7 +52,11 @@ jest.mock('@lib/auth', () => ({
 jest.mock('uuid', () => ({ v4: jest.fn(() => 'test-session-id') }));
 
 import apiAskNudgebee from '@api1/ask-nudgebee';
-import { snackbar } from '@components1/common/snackbarService';
+import { toast as snackbar } from '@components1/ds/Toast';
+
+// The mock's createConversationFetcher closes over this delegate so tests can
+// drive the fetcher's responses by calling mockGetConversation.mockResolvedValue.
+const fetcherDelegate = (args) => apiAskNudgebee.getLlmConversation(args);
 
 const mockListModels = apiAskNudgebee.listModels;
 const mockGetConversation = apiAskNudgebee.getLlmConversation;
@@ -187,6 +198,74 @@ describe('useLLMInvestigationControl', () => {
     expect(result.current.conversationTitle).toBe('Test Chat');
   });
 
+  // Reconciling optimistic question placeholders against server-confirmed
+  // questions. The placeholder's created_at is a client clock value while the
+  // confirmed question's created_at is a server clock value, so they must not
+  // be compared directly — a browser clock running ahead of the server used to
+  // leave the placeholder behind as a duplicate question (the suggestion-click
+  // bug). Reconciliation is by occurrence count per text, immune to clock skew.
+  describe('optimistic question reconciliation', () => {
+    const confirmedConversation = (message, createdAt) => ({
+      data: {
+        data: {
+          llm_conversations: [
+            {
+              id: 'conv-1',
+              title: 'Chat',
+              status: 'IN_PROGRESS',
+              llm_conversation_messages: [{ id: 'm-1', message, created_at: createdAt, user: { display_name: 'Alice' } }],
+            },
+          ],
+        },
+        errors: [],
+      },
+    });
+
+    it('removes the optimistic placeholder even when the server timestamp predates the client one', async () => {
+      // Server confirms the question one minute BEFORE the client-stamped
+      // optimistic placeholder (browser clock ahead of server).
+      mockGetConversation.mockResolvedValue(confirmedConversation('Show me logs', '2026-06-09T05:29:00.000Z'));
+      const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+
+      act(() => {
+        result.current.setMessages((prev) => [
+          ...prev,
+          { id: 'optimistic-1', text: 'Show me logs', type: 'question', isOptimistic: true, created_at: '2026-06-09T05:30:00.000Z' },
+        ]);
+      });
+
+      await act(async () => {
+        await result.current.fetchConversation('sess-1', null, 'poll', false);
+      });
+
+      const questions = result.current.messages.filter((m) => m.type === 'question' && m.text === 'Show me logs');
+      expect(questions).toHaveLength(1);
+      expect(result.current.messages.some((m) => m.isOptimistic)).toBe(false);
+    });
+
+    it('keeps the optimistic placeholder until its own confirmation arrives', async () => {
+      // Server has not yet persisted the new question — placeholder must remain.
+      mockGetConversation.mockResolvedValue({
+        data: { data: { llm_conversations: [{ id: 'conv-1', title: 'Chat', status: 'IN_PROGRESS', llm_conversation_messages: [] }] }, errors: [] },
+      });
+      const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+
+      act(() => {
+        result.current.setMessages((prev) => [
+          ...prev,
+          { id: 'optimistic-1', text: 'Pending question', type: 'question', isOptimistic: true, created_at: '2026-06-09T05:30:00.000Z' },
+        ]);
+      });
+
+      await act(async () => {
+        await result.current.fetchConversation('sess-1', null, 'poll', false);
+      });
+
+      const pending = result.current.messages.filter((m) => m.isOptimistic && m.text === 'Pending question');
+      expect(pending).toHaveLength(1);
+    });
+  });
+
   it('checkConversationExists returns { exists: false } when sessionId is empty', async () => {
     const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
     let res;
@@ -217,5 +296,41 @@ describe('useLLMInvestigationControl', () => {
     const model = { provider: 'anthropic', model: 'claude-3-5-sonnet' };
     act(() => result.current.setSelectedModel(model));
     expect(result.current.selectedModel).toEqual(model);
+  });
+
+  // Mutual-exclusivity: the wire format must never carry both blanket and
+  // tier picks at once. The reducer enforces this by clearing the other
+  // slot whenever one is written.
+  describe('blanket vs per-tier mutual exclusivity', () => {
+    it('setSelectedModel clears any previously-set tier picks', () => {
+      const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+      const tierPicks = {
+        reasoning: { provider: 'googleai', model: 'gemini-2.5-pro' },
+        retrieval: { provider: 'openai', model: 'gpt-4o-mini' },
+      };
+      act(() => result.current.setSelectedTierModels(tierPicks));
+      expect(result.current.selectedTierModels).toEqual(tierPicks);
+      expect(result.current.selectedModel).toBeNull();
+
+      const blanket = { provider: 'anthropic', model: 'claude-opus-4-7' };
+      act(() => result.current.setSelectedModel(blanket));
+
+      expect(result.current.selectedModel).toEqual(blanket);
+      expect(result.current.selectedTierModels).toBeNull();
+    });
+
+    it('setSelectedTierModels clears any previously-set blanket model', () => {
+      const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+      const blanket = { provider: 'anthropic', model: 'claude-opus-4-7' };
+      act(() => result.current.setSelectedModel(blanket));
+      expect(result.current.selectedModel).toEqual(blanket);
+      expect(result.current.selectedTierModels).toBeNull();
+
+      const tierPicks = { summary: { provider: 'openai', model: 'gpt-4o-mini' } };
+      act(() => result.current.setSelectedTierModels(tierPicks));
+
+      expect(result.current.selectedTierModels).toEqual(tierPicks);
+      expect(result.current.selectedModel).toBeNull();
+    });
   });
 });

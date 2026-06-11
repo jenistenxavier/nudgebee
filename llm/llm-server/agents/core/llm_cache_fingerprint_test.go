@@ -56,16 +56,16 @@ func TestCapabilityFingerprint(t *testing.T) {
 
 func TestGenerateCacheKeyWithCapabilityFingerprint(t *testing.T) {
 	t.Run("no_capabilities_unchanged_key", func(t *testing.T) {
-		key := generateCacheKey(CacheScopeAccount, "acc1", "", "k8s_debug", "gemini-2.5-flash")
-		assert.Equal(t, "account:acc1:k8s_debug:gemini-2.5-flash", key)
+		key := generateCacheKey(CacheScopeAccount, "acc1", "", "k8s_debug", "gemini-2.5-flash", "")
+		assert.Equal(t, "account:acc1:k8s_debug:gemini-2.5-flash:", key)
 	})
 
 	t.Run("fingerprinted_agent_name_produces_distinct_key", func(t *testing.T) {
 		fp := capabilityFingerprint(map[string]any{"allowed_tools": []string{"kubectl", "logs"}})
 		agentNameFP := "k8s_debug:" + fp
 
-		key := generateCacheKey(CacheScopeAccount, "acc1", "", agentNameFP, "gemini-2.5-flash")
-		baseKey := generateCacheKey(CacheScopeAccount, "acc1", "", "k8s_debug", "gemini-2.5-flash")
+		key := generateCacheKey(CacheScopeAccount, "acc1", "", agentNameFP, "gemini-2.5-flash", "")
+		baseKey := generateCacheKey(CacheScopeAccount, "acc1", "", "k8s_debug", "gemini-2.5-flash", "")
 		assert.NotEqual(t, key, baseKey)
 	})
 }

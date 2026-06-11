@@ -112,9 +112,35 @@ func (h *FileHandler) resolvePath(requestedPath, conversationID string) (string,
 
 	// Defense in depth against symlink-based traversal: filepath.Rel is purely lexical,
 	// so a symlink inside workspaceDir that points outside would bypass the check above.
-	// Resolve symlinks and re-check containment. Tolerate ENOENT for paths that don't yet
-	// exist (callers like file-create rely on resolving the parent only).
-	if resolved, evalErr := filepath.EvalSymlinks(fullPath); evalErr == nil {
+	// Resolve symlinks and re-check containment. For paths that don't yet exist (file-create),
+	// walk up to the closest existing ancestor and resolve its symlinks — otherwise a
+	// symlinked dir followed by any number of non-existent path components would bypass the
+	// check entirely (e.g. workspace/symlink_outside/missing_a/missing_b/file.txt).
+	resolved, evalErr := filepath.EvalSymlinks(fullPath)
+	if evalErr != nil && os.IsNotExist(evalErr) {
+		ancestor := fullPath
+		for {
+			parent := filepath.Dir(ancestor)
+			if parent == ancestor {
+				break
+			}
+			ancestor = parent
+			parentResolved, parentErr := filepath.EvalSymlinks(ancestor)
+			if parentErr == nil {
+				rel, relErr := filepath.Rel(ancestor, fullPath)
+				if relErr == nil {
+					resolved = filepath.Join(parentResolved, rel)
+					evalErr = nil
+				}
+				break
+			}
+			if !os.IsNotExist(parentErr) {
+				evalErr = parentErr
+				break
+			}
+		}
+	}
+	if evalErr == nil {
 		resolvedWorkspace, wsErr := filepath.EvalSymlinks(workspaceDir)
 		if wsErr != nil {
 			resolvedWorkspace = workspaceDir

@@ -45,14 +45,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       tenantId: '',
     };
 
-    const session = await getServerSession(req, res, authOptions);
-    if (session && session?.user) {
-      const jwtToken = await getToken({ req });
-      if (jwtToken) {
-        userDetails.userId = jwtToken?.sub as string;
-        userDetails.tenantId = (jwtToken?.tenant as any)?.id as string;
+    // Role info from the session JWT, used to gate Grafana for read-only users.
+    // Stays null on the bearer-token path (no NextAuth JWT) so that path is
+    // left unchanged.
+    let userRoles: string[] | null = null;
+    let userWriteAccountIds: string[] = [];
+
+    if (!token) {
+      const session = await getServerSession(req, res, authOptions);
+      if (session && session?.user) {
+        const jwtToken = await getToken({ req });
+        if (jwtToken) {
+          userDetails.userId = jwtToken?.sub as string;
+          userDetails.tenantId = (jwtToken?.tenant as any)?.id as string;
+          userRoles = (jwtToken?.roles as string[]) || [];
+          userWriteAccountIds = (jwtToken?.accountIds as string[]) || [];
+        }
+        token = (jwtToken?.idToken as string) || null;
       }
-      token = (jwtToken?.idToken as string) || null;
     }
 
     if (!token || !userDetails.userId || !userDetails.tenantId) {
@@ -61,6 +71,66 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         description: 'The user does not have an active session or is not authenticated',
       });
       return;
+    }
+
+    // Grafana embeds a full query/explore surface, so restrict it to users with
+    // write access on the target cluster — read-only roles are blocked. Mirrors
+    // hasWriteAccess() on the client (and the hidden Grafana tab). Enforced only
+    // when role info is available (session/cookie path); the bearer-token path
+    // is left unchanged.
+    if (userRoles !== null) {
+      const grafanaSegment = Array.isArray(grafana) ? grafana[0] : grafana;
+      const targetAccountId = typeof grafanaSegment === 'string' ? grafanaSegment.replace(/^gr-/, '') : '';
+      const canAccessGrafana =
+        userRoles.includes('tenant_admin') ||
+        (!userRoles.includes('tenant_admin_readonly') && !!targetAccountId && userWriteAccountIds.includes(targetAccountId));
+      if (!canAccessGrafana) {
+        res.status(403).json({
+          error: 'forbidden',
+          description: 'Read-only users do not have access to Grafana',
+        });
+        return;
+      }
+    }
+
+    // Grafana embeds a full query/explore surface, so restrict it to users with
+    // write access on the target cluster — read-only roles are blocked. Mirrors
+    // hasWriteAccess() on the client (and the hidden Grafana tab). Enforced only
+    // when role info is available (session/cookie path); the bearer-token path
+    // is left unchanged.
+    if (userRoles !== null) {
+      const grafanaSegment = Array.isArray(grafana) ? grafana[0] : grafana;
+      const targetAccountId = typeof grafanaSegment === 'string' ? grafanaSegment.replace(/^gr-/, '') : '';
+      const canAccessGrafana =
+        userRoles.includes('tenant_admin') ||
+        (!userRoles.includes('tenant_admin_readonly') && !!targetAccountId && userWriteAccountIds.includes(targetAccountId));
+      if (!canAccessGrafana) {
+        res.status(403).json({
+          error: 'forbidden',
+          description: 'Read-only users do not have access to Grafana',
+        });
+        return;
+      }
+    }
+
+    // Grafana embeds a full query/explore surface, so restrict it to users with
+    // write access on the target cluster — read-only roles are blocked. Mirrors
+    // hasWriteAccess() on the client (and the hidden Grafana tab). Enforced only
+    // when role info is available (session/cookie path); the bearer-token path
+    // is left unchanged.
+    if (userRoles !== null) {
+      const grafanaSegment = Array.isArray(grafana) ? grafana[0] : grafana;
+      const targetAccountId = typeof grafanaSegment === 'string' ? grafanaSegment.replace(/^gr-/, '') : '';
+      const canAccessGrafana =
+        userRoles.includes('tenant_admin') ||
+        (!userRoles.includes('tenant_admin_readonly') && !!targetAccountId && userWriteAccountIds.includes(targetAccountId));
+      if (!canAccessGrafana) {
+        res.status(403).json({
+          error: 'forbidden',
+          description: 'Read-only users do not have access to Grafana',
+        });
+        return;
+      }
     }
     const relayEndpoint = process.env.RELAY_SERVER_ENDPOINT ?? 'http://localhost:52832';
     const secretKey = process.env.RELAY_SERVER_SECRET_KEY ?? '';
@@ -78,8 +148,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       'X-NB-REQUEST-ID': crypto.randomUUID(),
     };
 
+    // Forward client x-* headers to the relay, but never let a client-supplied
+    // header overwrite the server-set identity/auth headers above.  Node.js
+    // lowercases req.headers keys; the Headers spec is case-insensitive, so a
+    // client sending "x-tenant-id" would collide with "X-TENANT-ID" at the
+    // HTTP layer and could spoof the authenticated identity on the relay.
+    const protectedHeaders = new Set(['x-secret-key', 'x-user-id', 'x-tenant-id', 'x-nb-request-id', 'x-nb-account-id']);
     for (const k of Object.keys(req.headers)) {
-      if (k.toLowerCase().startsWith('x-')) {
+      if (k.toLowerCase().startsWith('x-') && !protectedHeaders.has(k.toLowerCase())) {
         headers[k] = req.headers[k] as string;
       }
     }

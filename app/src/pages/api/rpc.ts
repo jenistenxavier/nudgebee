@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import crypto from 'crypto';
 import { context, propagation, trace, SpanStatusCode } from '@opentelemetry/api';
-import { authenticateRequest, buildSessionVariables, forwardAction } from '@lib/rpcGateway';
+import { authenticateRequest, buildSessionVariables, forwardAction, NO_TENANT_ROLE_MESSAGE } from '@lib/rpcGateway';
 
 // JSON-RPC 2.0 gateway. Thin protocol shell — auth, route lookup, envelope
 // construction and upstream forwarding live in @lib/rpcGateway, shared with
@@ -161,6 +161,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             return;
           case 'handler_unresolved':
             res.status(500).json(rpcError(rpcId, RPC_INTERNAL_ERROR, `Handler URL unresolved for ${method}`));
+            return;
+          case 'no_tenant_role':
+            res.status(403).json(rpcError(rpcId, RPC_FORBIDDEN, NO_TENANT_ROLE_MESSAGE, { code: 'NO_TENANT_ROLE' }));
             return;
           case 'forbidden':
             res.status(403).json(

@@ -435,3 +435,61 @@ func TestTools_GetCreatePagerDutyToolConfigs(t *testing.T) {
 	assert.Nil(t, err)
 
 }
+
+func TestResolveEventTitleFromLabels(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   string
+	}{
+		{
+			name:   "nil labels",
+			labels: nil,
+			want:   "",
+		},
+		{
+			name:   "no usable labels",
+			labels: map[string]string{"severity": "critical"},
+			want:   "",
+		},
+		{
+			name:   "alertname only",
+			labels: map[string]string{"alertname": "ApplicationAPIFailures"},
+			want:   "ApplicationAPIFailures",
+		},
+		{
+			// Regression: Grafana/Alertmanager firing text keys the summary as a plain
+			// "summary" label (annotation_summary is rarely populated). It must win over
+			// alertname so the title is the readable summary, not the alert rule id.
+			name: "plain summary label wins over alertname",
+			labels: map[string]string{
+				"alertname": "ApplicationAPIFailures",
+				"summary":   "High 5xx rate - POST /request",
+			},
+			want: "High 5xx rate - POST /request",
+		},
+		{
+			name: "annotation_summary wins over everything",
+			labels: map[string]string{
+				"alertname":          "ApplicationAPIFailures",
+				"summary":            "High 5xx rate - POST /request",
+				"annotation_summary": "Service degraded: 11% of requests failing",
+			},
+			want: "Service degraded: 11% of requests failing",
+		},
+		{
+			name: "empty summary falls through to alertname",
+			labels: map[string]string{
+				"alertname": "ApplicationAPIFailures",
+				"summary":   "",
+			},
+			want: "ApplicationAPIFailures",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, resolveEventTitleFromLabels(tt.labels))
+		})
+	}
+}

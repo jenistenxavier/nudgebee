@@ -20,6 +20,8 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -66,6 +68,14 @@ const llmModelFallbackFormat = "llm_model_fallbacks_%s"
 const llmTierProviderFormat = "llm_tier_provider_%s"
 const llmTierModelFormat = "llm_tier_model_%s"
 const llmTierModelFallbackFormat = "llm_tier_model_fallbacks_%s"
+const llmTierApiKeyFormat = "llm_tier_api_key_%s"
+const llmTierApiEndpointFormat = "llm_tier_api_endpoint_%s"
+const llmTierApiVersionFormat = "llm_tier_api_version_%s"
+const llmTierApiTypeFormat = "llm_tier_api_type_%s"
+const llmTierRegionFormat = "llm_tier_region_%s"
+const llmTierAccessKeyFormat = "llm_tier_access_key_%s"
+const llmTierSecretKeyFormat = "llm_tier_secret_key_%s"
+const llmTierSessionTokenFormat = "llm_tier_session_token_%s"
 
 // ModelTier is the optional category an LLM call opts into so ResolveLLMConfig
 // can pick a category-specific model. It is read from the request context
@@ -90,6 +100,26 @@ var (
 	llmClientCacheTTL   = 1 * time.Hour
 )
 
+// Bucket-isolates the SDK-client / cached-content caches so per-tier or
+// per-agent credential overrides on the same (provider, model, account)
+// don't reuse a client built with another tier's creds.
+func credsFingerprint(apiKey, apiEndpoint, apiVersion, region, accessKey, secretKey, sessionToken string) string {
+	h := sha256.Sum256([]byte(apiKey + "|" + apiEndpoint + "|" + apiVersion + "|" + region + "|" + accessKey + "|" + secretKey + "|" + sessionToken))
+	return hex.EncodeToString(h[:4])
+}
+
+func resolveCredsFingerprint(accountId, provider, agentName string, appendAgentName bool, resolution ...*LLMConfigResolution) string {
+	return credsFingerprint(
+		getLLMApiKey(accountId, provider, agentName, appendAgentName, resolution...),
+		getLLMApiEndpoint(accountId, provider, agentName, appendAgentName, resolution...),
+		getLLMApiVersion(accountId, provider, agentName, appendAgentName, resolution...),
+		getLLMRegion(accountId, provider, agentName, appendAgentName, resolution...),
+		getLLMAccessKey(accountId, provider, agentName, appendAgentName, resolution...),
+		getLLMSecretKey(accountId, provider, agentName, appendAgentName, resolution...),
+		getLLMSessionToken(accountId, provider, agentName, appendAgentName, resolution...),
+	)
+}
+
 func GetLLMModel(provider string, modelName string, agentName string, appendAgentName bool, accountId string, resolution ...*LLMConfigResolution) (llms.Model, error) {
 	slog.Debug("GetLLMModel called", "provider", provider, "modelName", modelName, "agentName", agentName, "appendAgentName", appendAgentName, "accountId", accountId)
 
@@ -98,8 +128,8 @@ func GetLLMModel(provider string, modelName string, agentName string, appendAgen
 		res = resolution[0]
 	}
 
-	// Optimization: Reuse LLM clients based on provider, model, and accountId
-	cacheKey := fmt.Sprintf("%s:%s:%s", provider, modelName, accountId)
+	credsFp := resolveCredsFingerprint(accountId, provider, agentName, appendAgentName, res)
+	cacheKey := fmt.Sprintf("%s:%s:%s:%s", provider, modelName, accountId, credsFp)
 	llmClientCacheMutex.RLock()
 	entry, found := llmClientCache[cacheKey]
 	llmClientCacheMutex.RUnlock()
@@ -239,29 +269,32 @@ func GetLLMProvider(ctx *security.RequestContext, accountId, agentName string, a
 	return res.Provider
 }
 
+type conversationOverrideEntry struct {
+	provider      string
+	model         string
+	tierOverrides ConversationTierOverrides
+	ts            time.Time
+}
+
 var (
-	conversationOverrideCache = make(map[string]struct {
-		provider string
-		model    string
-		ts       time.Time
-	})
+	conversationOverrideCache      = make(map[string]conversationOverrideEntry)
 	conversationOverrideCacheMutex sync.RWMutex
 	conversationOverrideCacheTTL   = 5 * time.Minute
 )
 
-// GetConversationOverride returns the model override for a conversation (if set)
-func GetConversationOverride(conversationId string) (string, string, error) {
+// Both zero ⇒ conversation has no override; fall through to lower layers.
+func GetConversationOverride(conversationId string) (string, string, ConversationTierOverrides, error) {
 	conversationOverrideCacheMutex.RLock()
 	entry, found := conversationOverrideCache[conversationId]
 	conversationOverrideCacheMutex.RUnlock()
 
 	if found && time.Since(entry.ts) < conversationOverrideCacheTTL {
-		return entry.provider, entry.model, nil
+		return entry.provider, entry.model, entry.tierOverrides, nil
 	}
 
 	conv, err := GetConversationDao().GetConversation(conversationId)
 	if err != nil {
-		return "", "", err
+		return "", "", ConversationTierOverrides{}, err
 	}
 
 	provider := ""
@@ -272,16 +305,21 @@ func GetConversationOverride(conversationId string) (string, string, error) {
 	if conv.LlmModel != nil {
 		model = *conv.LlmModel
 	}
+	var tierOverrides ConversationTierOverrides
+	if conv.LlmTierOverrides != nil {
+		tierOverrides = *conv.LlmTierOverrides
+	}
 
 	conversationOverrideCacheMutex.Lock()
-	conversationOverrideCache[conversationId] = struct {
-		provider string
-		model    string
-		ts       time.Time
-	}{provider: provider, model: model, ts: time.Now()}
+	conversationOverrideCache[conversationId] = conversationOverrideEntry{
+		provider:      provider,
+		model:         model,
+		tierOverrides: tierOverrides,
+		ts:            time.Now(),
+	}
 	conversationOverrideCacheMutex.Unlock()
 
-	return provider, model, nil
+	return provider, model, tierOverrides, nil
 }
 
 func InvalidateConversationOverrideCache(conversationId string) {
@@ -350,12 +388,45 @@ func getLLMFallbackModelName(accountId, agentName string, tier ModelTier, append
 	return modelName
 }
 
+// readENVTierCredential returns the ENV-tier value for the given credential key
+// format (e.g. llmTierApiKeyFormat), but only when the tier's own ENV provider
+// matches `provider`. That match guard prevents a Bedrock-tier API key from
+// leaking into an Anthropic call when the tier slot is configured but the
+// resolved provider came from a different (more-specific) layer.
+func readENVTierCredential(tier ModelTier, provider, envKeyFormat string) string {
+	if tier == "" {
+		return ""
+	}
+	tierProviderKey := fmt.Sprintf(llmTierProviderFormat, string(tier))
+	envTierProvider := config.Config.GetString(tierProviderKey, "")
+	if envTierProvider == "" || envTierProvider != provider {
+		return ""
+	}
+	return config.Config.GetString(fmt.Sprintf(envKeyFormat, string(tier)), "")
+}
+
+// readDBTierCredential is the DB-tier equivalent of readENVTierCredential.
+// Only fires when the tier's DB provider matches `provider`.
+func readDBTierCredential(tier ModelTier, provider, dbKeyFormat string, dbConfig map[string]string) string {
+	if tier == "" || dbConfig == nil {
+		return ""
+	}
+	tierProviderKey := fmt.Sprintf(llmTierProviderFormat, string(tier))
+	dbTierProvider, ok := dbConfig[tierProviderKey]
+	if !ok || dbTierProvider == "" || dbTierProvider != provider {
+		return ""
+	}
+	return dbConfig[fmt.Sprintf(dbKeyFormat, string(tier))]
+}
+
 func getLLMApiKey(accountId, provider, agentName string, appendAgentName bool, resolution ...*LLMConfigResolution) string {
 	slog.Debug("Getting LLM API key", "accountId", accountId, "provider", provider, "agentName", agentName, "appendAgentName", appendAgentName)
 
 	var dbConfig map[string]string
+	var tier ModelTier
 	if len(resolution) > 0 && resolution[0] != nil {
 		dbConfig = resolution[0].dbConfig
+		tier = resolution[0].Tier
 	}
 
 	// Layering: ENV layers first (least specific to most specific), then the
@@ -373,7 +444,14 @@ func getLLMApiKey(accountId, provider, agentName string, appendAgentName bool, r
 		slog.Debug("Using global ENV API key (provider matches)", "provider", provider, "hasKey", apiKey != "")
 	}
 
-	// L2 ENV-agent (check provider match against the agent's own ENV provider)
+	// L2 ENV-tier (only fires when the tier's ENV provider matches)
+	if v := readENVTierCredential(tier, provider, llmTierApiKeyFormat); v != "" {
+		apiKey = v
+		configSource = "ENV-tier-specific"
+		slog.Debug("Found API key from tier ENV config", "tier", string(tier), "hasKey", true)
+	}
+
+	// L3 ENV-agent (check provider match against the agent's own ENV provider)
 	if appendAgentName && agentName != "" {
 		providerKey := fmt.Sprintf(llmProviderFormat, agentName)
 		if envProviderVal := config.Config.GetString(providerKey, ""); envProviderVal != "" && envProviderVal == provider {
@@ -386,7 +464,7 @@ func getLLMApiKey(accountId, provider, agentName string, appendAgentName bool, r
 		}
 	}
 
-	// L3 DB-global (check provider match — overrides any ENV layer above)
+	// L4 DB-global (check provider match — overrides any ENV layer above)
 	if accountId != "" {
 		if dbConfig, err := getLLMIntegrationConfig(nil, accountId, dbConfig); err == nil && dbConfig != nil {
 			if val, ok := dbConfig["llm_provider"]; ok && val != "" && val == provider {
@@ -401,7 +479,14 @@ func getLLMApiKey(accountId, provider, agentName string, appendAgentName bool, r
 		}
 	}
 
-	// L4 DB-agent (highest priority — check provider match against DB-agent provider)
+	// L5 DB-tier (only fires when the tier's DB provider matches)
+	if v := readDBTierCredential(tier, provider, llmTierApiKeyFormat, dbConfig); v != "" {
+		apiKey = v
+		configSource = "DB-tier-specific"
+		slog.Debug("Found tier-specific API key from DB config", "tier", string(tier), "hasKey", true)
+	}
+
+	// L6 DB-agent (highest priority — check provider match against DB-agent provider)
 	if accountId != "" && appendAgentName && agentName != "" {
 		if dbConfig, err := getLLMIntegrationConfig(nil, accountId, dbConfig); err == nil && dbConfig != nil {
 			providerKey := fmt.Sprintf(llmProviderFormat, agentName)
@@ -433,8 +518,10 @@ func getLLMApiEndpoint(accountId, provider, agentName string, appendAgentName bo
 	slog.Debug("Getting LLM API endpoint", "accountId", accountId, "provider", provider, "agentName", agentName, "appendAgentName", appendAgentName)
 
 	var dbConfig map[string]string
+	var tier ModelTier
 	if len(resolution) > 0 && resolution[0] != nil {
 		dbConfig = resolution[0].dbConfig
+		tier = resolution[0].Tier
 	}
 
 	// Layering: ENV first (least specific to most specific), then DB on top.
@@ -452,7 +539,14 @@ func getLLMApiEndpoint(accountId, provider, agentName string, appendAgentName bo
 		slog.Debug("Using global ENV API endpoint (provider matches)", "provider", provider, "endpoint", apiEndpoint)
 	}
 
-	// L2 ENV-agent
+	// L2 ENV-tier (only fires when the tier's ENV provider matches)
+	if v := readENVTierCredential(tier, provider, llmTierApiEndpointFormat); v != "" {
+		apiEndpoint = v
+		configSource = "ENV-tier-specific"
+		slog.Debug("Found API endpoint from tier ENV config", "tier", string(tier), "endpoint", v)
+	}
+
+	// L3 ENV-agent
 	if appendAgentName && agentName != "" {
 		providerKey := fmt.Sprintf(llmProviderFormat, agentName)
 		if envProviderVal := config.Config.GetString(providerKey, ""); envProviderVal != "" && envProviderVal == provider {
@@ -465,7 +559,7 @@ func getLLMApiEndpoint(accountId, provider, agentName string, appendAgentName bo
 		}
 	}
 
-	// L3 DB-global
+	// L4 DB-global
 	if accountId != "" {
 		if dbConfig, err := getLLMIntegrationConfig(nil, accountId, dbConfig); err == nil && dbConfig != nil {
 			if val, ok := dbConfig["llm_provider"]; ok && val != "" && val == provider {
@@ -480,7 +574,14 @@ func getLLMApiEndpoint(accountId, provider, agentName string, appendAgentName bo
 		}
 	}
 
-	// L4 DB-agent (highest priority)
+	// L5 DB-tier (only fires when the tier's DB provider matches)
+	if v := readDBTierCredential(tier, provider, llmTierApiEndpointFormat, dbConfig); v != "" {
+		apiEndpoint = v
+		configSource = "DB-tier-specific"
+		slog.Debug("Found tier-specific API endpoint from DB config", "tier", string(tier), "endpoint", v)
+	}
+
+	// L6 DB-agent (highest priority)
 	if accountId != "" && appendAgentName && agentName != "" {
 		if dbConfig, err := getLLMIntegrationConfig(nil, accountId, dbConfig); err == nil && dbConfig != nil {
 			providerKey := fmt.Sprintf(llmProviderFormat, agentName)
@@ -505,8 +606,10 @@ func getLLMApiVersion(accountId, provider, agentName string, appendAgentName boo
 	slog.Debug("Getting LLM API version", "accountId", accountId, "provider", provider, "agentName", agentName, "appendAgentName", appendAgentName)
 
 	var dbConfig map[string]string
+	var tier ModelTier
 	if len(resolution) > 0 && resolution[0] != nil {
 		dbConfig = resolution[0].dbConfig
+		tier = resolution[0].Tier
 	}
 
 	// ENV first, then DB on top. DB always beats ENV — see package-level docstring.
@@ -519,7 +622,13 @@ func getLLMApiVersion(accountId, provider, agentName string, appendAgentName boo
 		slog.Debug("Using global ENV API version (provider matches)", "provider", provider, "version", apiVersion)
 	}
 
-	// L2 ENV-agent
+	// L2 ENV-tier (only fires when the tier's ENV provider matches)
+	if v := readENVTierCredential(tier, provider, llmTierApiVersionFormat); v != "" {
+		apiVersion = v
+		slog.Debug("Found API version from tier ENV config", "tier", string(tier), "version", v)
+	}
+
+	// L3 ENV-agent
 	if appendAgentName && agentName != "" {
 		providerKey := fmt.Sprintf(llmProviderFormat, agentName)
 		if envProviderVal := config.Config.GetString(providerKey, ""); envProviderVal != "" && envProviderVal == provider {
@@ -531,7 +640,7 @@ func getLLMApiVersion(accountId, provider, agentName string, appendAgentName boo
 		}
 	}
 
-	// L3 DB-global
+	// L4 DB-global
 	if accountId != "" {
 		if dbConfig, err := getLLMIntegrationConfig(nil, accountId, dbConfig); err == nil && dbConfig != nil {
 			if val, ok := dbConfig["llm_provider"]; ok && val != "" && val == provider {
@@ -545,7 +654,13 @@ func getLLMApiVersion(accountId, provider, agentName string, appendAgentName boo
 		}
 	}
 
-	// L4 DB-agent (highest priority)
+	// L5 DB-tier (only fires when the tier's DB provider matches)
+	if v := readDBTierCredential(tier, provider, llmTierApiVersionFormat, dbConfig); v != "" {
+		apiVersion = v
+		slog.Debug("Found tier-specific API version from DB config", "tier", string(tier), "version", v)
+	}
+
+	// L6 DB-agent (highest priority)
 	if accountId != "" && appendAgentName && agentName != "" {
 		if dbConfig, err := getLLMIntegrationConfig(nil, accountId, dbConfig); err == nil && dbConfig != nil {
 			providerKey := fmt.Sprintf(llmProviderFormat, agentName)
@@ -567,8 +682,10 @@ func getLLMApiType(accountId, provider, agentName string, appendAgentName bool, 
 	slog.Debug("Getting LLM API type", "accountId", accountId, "provider", provider, "agentName", agentName, "appendAgentName", appendAgentName)
 
 	var dbConfig map[string]string
+	var tier ModelTier
 	if len(resolution) > 0 && resolution[0] != nil {
 		dbConfig = resolution[0].dbConfig
+		tier = resolution[0].Tier
 	}
 
 	// ENV first, then DB on top. DB always beats ENV — see package-level docstring.
@@ -581,7 +698,13 @@ func getLLMApiType(accountId, provider, agentName string, appendAgentName bool, 
 		slog.Debug("Using global ENV API type (provider matches)", "provider", provider, "type", apiType)
 	}
 
-	// L2 ENV-agent
+	// L2 ENV-tier (only fires when the tier's ENV provider matches)
+	if v := readENVTierCredential(tier, provider, llmTierApiTypeFormat); v != "" {
+		apiType = v
+		slog.Debug("Found API type from tier ENV config", "tier", string(tier), "type", v)
+	}
+
+	// L3 ENV-agent
 	if appendAgentName && agentName != "" {
 		providerKey := fmt.Sprintf(llmProviderFormat, agentName)
 		if envProviderVal := config.Config.GetString(providerKey, ""); envProviderVal != "" && envProviderVal == provider {
@@ -593,7 +716,7 @@ func getLLMApiType(accountId, provider, agentName string, appendAgentName bool, 
 		}
 	}
 
-	// L3 DB-global
+	// L4 DB-global
 	if accountId != "" {
 		if dbConfig, err := getLLMIntegrationConfig(nil, accountId, dbConfig); err == nil && dbConfig != nil {
 			if val, ok := dbConfig["llm_provider"]; ok && val != "" && val == provider {
@@ -607,7 +730,13 @@ func getLLMApiType(accountId, provider, agentName string, appendAgentName bool, 
 		}
 	}
 
-	// L4 DB-agent (highest priority)
+	// L5 DB-tier (only fires when the tier's DB provider matches)
+	if v := readDBTierCredential(tier, provider, llmTierApiTypeFormat, dbConfig); v != "" {
+		apiType = v
+		slog.Debug("Found tier-specific API type from DB config", "tier", string(tier), "type", v)
+	}
+
+	// L6 DB-agent (highest priority)
 	if accountId != "" && appendAgentName && agentName != "" {
 		if dbConfig, err := getLLMIntegrationConfig(nil, accountId, dbConfig); err == nil && dbConfig != nil {
 			providerKey := fmt.Sprintf(llmProviderFormat, agentName)
@@ -629,8 +758,10 @@ func getLLMRegion(accountId, provider, agentName string, appendAgentName bool, r
 	slog.Debug("Getting LLM region", "accountId", accountId, "provider", provider, "agentName", agentName, "appendAgentName", appendAgentName)
 
 	var dbConfig map[string]string
+	var tier ModelTier
 	if len(resolution) > 0 && resolution[0] != nil {
 		dbConfig = resolution[0].dbConfig
+		tier = resolution[0].Tier
 	}
 
 	// ENV first, then DB on top. DB always beats ENV — see package-level docstring.
@@ -647,7 +778,14 @@ func getLLMRegion(accountId, provider, agentName string, appendAgentName bool, r
 		slog.Debug("Using global ENV region (provider matches)", "provider", provider, "region", region)
 	}
 
-	// L2 ENV-agent
+	// L2 ENV-tier (only fires when the tier's ENV provider matches)
+	if v := readENVTierCredential(tier, provider, llmTierRegionFormat); v != "" {
+		region = v
+		configSource = "ENV-tier-specific"
+		slog.Debug("Found region from tier ENV config", "tier", string(tier), "region", v)
+	}
+
+	// L3 ENV-agent
 	if appendAgentName && agentName != "" {
 		providerKey := fmt.Sprintf(llmProviderFormat, agentName)
 		if envProviderVal := config.Config.GetString(providerKey, ""); envProviderVal != "" && envProviderVal == provider {
@@ -660,7 +798,7 @@ func getLLMRegion(accountId, provider, agentName string, appendAgentName bool, r
 		}
 	}
 
-	// L3 DB-global
+	// L4 DB-global
 	if accountId != "" {
 		if dbConfig, err := getLLMIntegrationConfig(nil, accountId, dbConfig); err == nil && dbConfig != nil {
 			if val, ok := dbConfig["llm_provider"]; ok && val != "" && val == provider {
@@ -675,7 +813,14 @@ func getLLMRegion(accountId, provider, agentName string, appendAgentName bool, r
 		}
 	}
 
-	// L4 DB-agent (highest priority)
+	// L5 DB-tier (only fires when the tier's DB provider matches)
+	if v := readDBTierCredential(tier, provider, llmTierRegionFormat, dbConfig); v != "" {
+		region = v
+		configSource = "DB-tier-specific"
+		slog.Debug("Found tier-specific region from DB config", "tier", string(tier), "region", v)
+	}
+
+	// L6 DB-agent (highest priority)
 	if accountId != "" && appendAgentName && agentName != "" {
 		if dbConfig, err := getLLMIntegrationConfig(nil, accountId, dbConfig); err == nil && dbConfig != nil {
 			providerKey := fmt.Sprintf(llmProviderFormat, agentName)
@@ -704,10 +849,12 @@ func getLLMRegion(accountId, provider, agentName string, appendAgentName bool, r
 // config.Config.LlmProvider == provider). `globalKey` is the DB/global key (e.g.
 // "llm_provider_access_key"). `agentKeyFormat` is the fmt format for the
 // agent-scoped key (e.g. llmProviderAccessKeyFormat).
-func resolveLLMSecret(accountId, provider, agentName, envGlobal, globalKey, agentKeyFormat string, appendAgentName bool, resolution ...*LLMConfigResolution) string {
+func resolveLLMSecret(accountId, provider, agentName, envGlobal, globalKey, agentKeyFormat, tierKeyFormat string, appendAgentName bool, resolution ...*LLMConfigResolution) string {
 	var dbConfig map[string]string
+	var tier ModelTier
 	if len(resolution) > 0 && resolution[0] != nil {
 		dbConfig = resolution[0].dbConfig
+		tier = resolution[0].Tier
 	}
 
 	val := ""
@@ -717,7 +864,12 @@ func resolveLLMSecret(accountId, provider, agentName, envGlobal, globalKey, agen
 		val = envGlobal
 	}
 
-	// L2 ENV-agent
+	// L2 ENV-tier (only fires when the tier's ENV provider matches)
+	if v := readENVTierCredential(tier, provider, tierKeyFormat); v != "" {
+		val = v
+	}
+
+	// L3 ENV-agent
 	if appendAgentName && agentName != "" {
 		providerKey := fmt.Sprintf(llmProviderFormat, agentName)
 		if envProviderVal := config.Config.GetString(providerKey, ""); envProviderVal == provider {
@@ -728,7 +880,7 @@ func resolveLLMSecret(accountId, provider, agentName, envGlobal, globalKey, agen
 		}
 	}
 
-	// L3 DB-global
+	// L4 DB-global
 	if accountId != "" {
 		if dbCfg, err := getLLMIntegrationConfig(nil, accountId, dbConfig); err == nil && dbCfg != nil {
 			if providerVal, ok := dbCfg["llm_provider"]; ok && providerVal == provider {
@@ -739,7 +891,12 @@ func resolveLLMSecret(accountId, provider, agentName, envGlobal, globalKey, agen
 		}
 	}
 
-	// L4 DB-agent (highest priority)
+	// L5 DB-tier (only fires when the tier's DB provider matches)
+	if v := readDBTierCredential(tier, provider, tierKeyFormat, dbConfig); v != "" {
+		val = v
+	}
+
+	// L6 DB-agent (highest priority)
 	if accountId != "" && appendAgentName && agentName != "" {
 		if dbCfg, err := getLLMIntegrationConfig(nil, accountId, dbConfig); err == nil && dbCfg != nil {
 			providerKey := fmt.Sprintf(llmProviderFormat, agentName)
@@ -756,15 +913,15 @@ func resolveLLMSecret(accountId, provider, agentName, envGlobal, globalKey, agen
 }
 
 func getLLMAccessKey(accountId, provider, agentName string, appendAgentName bool, resolution ...*LLMConfigResolution) string {
-	return resolveLLMSecret(accountId, provider, agentName, config.Config.LlmProviderAccessKey, "llm_provider_access_key", llmProviderAccessKeyFormat, appendAgentName, resolution...)
+	return resolveLLMSecret(accountId, provider, agentName, config.Config.LlmProviderAccessKey, "llm_provider_access_key", llmProviderAccessKeyFormat, llmTierAccessKeyFormat, appendAgentName, resolution...)
 }
 
 func getLLMSecretKey(accountId, provider, agentName string, appendAgentName bool, resolution ...*LLMConfigResolution) string {
-	return resolveLLMSecret(accountId, provider, agentName, config.Config.LlmProviderSecretKey, "llm_provider_secret_key", llmProviderSecretKeyFormat, appendAgentName, resolution...)
+	return resolveLLMSecret(accountId, provider, agentName, config.Config.LlmProviderSecretKey, "llm_provider_secret_key", llmProviderSecretKeyFormat, llmTierSecretKeyFormat, appendAgentName, resolution...)
 }
 
 func getLLMSessionToken(accountId, provider, agentName string, appendAgentName bool, resolution ...*LLMConfigResolution) string {
-	return resolveLLMSecret(accountId, provider, agentName, config.Config.LlmProviderSessionToken, "llm_provider_session_token", llmProviderSessionTokenFormat, appendAgentName, resolution...)
+	return resolveLLMSecret(accountId, provider, agentName, config.Config.LlmProviderSessionToken, "llm_provider_session_token", llmProviderSessionTokenFormat, llmTierSessionTokenFormat, appendAgentName, resolution...)
 }
 
 func GetLlmModel(ctx *security.RequestContext, agentName string, accountId string, conversationId string, resolution ...*LLMConfigResolution) (llms.Model, error) {
@@ -1150,7 +1307,8 @@ type LLMConfigResolution struct {
 	Source       string            `json:"source"`        // Which layer is active
 	IsOverridden bool              `json:"is_overridden"` // True if conversation has explicit override
 	AgentName    string            `json:"agent_name,omitempty"`
-	Hierarchy    []LLMConfigLayer  `json:"hierarchy"` // Full resolution chain
+	Tier         ModelTier         `json:"tier,omitempty"` // Category the call opted into (empty when no tier was selected)
+	Hierarchy    []LLMConfigLayer  `json:"hierarchy"`      // Full resolution chain
 	dbConfig     map[string]string // unexported cache for optimized downstream lookups
 }
 
@@ -1238,6 +1396,7 @@ func ResolveLLMConfig(ctx *security.RequestContext, accountId, agentName string,
 
 	result := &LLMConfigResolution{
 		AgentName:    agentName,
+		Tier:         tier,
 		IsOverridden: false,
 		Hierarchy:    []LLMConfigLayer{},
 	}
@@ -1406,28 +1565,56 @@ func ResolveLLMConfig(ctx *security.RequestContext, accountId, agentName string,
 		}
 	}
 
-	// L7: Conversation-specific override (per-request user-explicit)
+	// L7: Conversation-specific override (per-request user-explicit). The
+	// conversation row can be in one of two mutually-exclusive modes:
+	//
+	//   - blanket  → llm_provider + llm_model set; applies to every call
+	//                regardless of tier-tagging (acts at the conversation
+	//                layer here, with `tier` ignored).
+	//   - per-tier → llm_tier_overrides set; applies ONLY when the call
+	//                opted into a tier whose key matches the override.
+	//                Untagged calls in the same conversation fall through
+	//                to the lower-precedence layers (no surprise blanket
+	//                substitute — that's a UX choice; the UI warns about
+	//                it when the user picks per-category mode).
 	if conversationId != "" {
-		if p, m, err := GetConversationOverride(conversationId); err == nil && p != "" && m != "" {
-			result.Hierarchy = append(result.Hierarchy, LLMConfigLayer{
-				Level:    "conversation",
-				Provider: p,
-				Model:    m,
-				Active:   false,
-			})
-			result.Provider = p
-			result.Model = m
-			result.Source = "conversation"
-			result.IsOverridden = true
-			slog.Debug("Found conversation override",
-				"conversationId", conversationId,
-				"provider", p,
-				"model", m)
+		if p, m, tierOverrides, err := GetConversationOverride(conversationId); err == nil {
+			// Blanket conversation override.
+			if p != "" && m != "" {
+				result.Hierarchy = append(result.Hierarchy, LLMConfigLayer{
+					Level: "conversation", Provider: p, Model: m, Active: false,
+				})
+				result.Provider = p
+				result.Model = m
+				result.Source = "conversation"
+				result.IsOverridden = true
+				slog.Debug("Found conversation blanket override",
+					"conversationId", conversationId, "provider", p, "model", m)
+			}
+			// Per-tier conversation override — only fires for tier-tagged calls.
+			if tier != "" {
+				if pick, ok := tierOverrides.Get(string(tier)); ok {
+					result.Hierarchy = append(result.Hierarchy, LLMConfigLayer{
+						Level: "conversation-tier", Provider: pick.Provider, Model: pick.Model, Active: false,
+					})
+					result.Provider = pick.Provider
+					result.Model = pick.Model
+					result.Source = "conversation-tier"
+					result.IsOverridden = true
+					slog.Debug("Found conversation per-tier override",
+						"conversationId", conversationId, "tier", string(tier),
+						"provider", pick.Provider, "model", pick.Model)
+				}
+			}
 		}
 	}
 
-	// Highest precedence: explicit per-request override. Both provider and
-	// model must be present; a half-set override is ignored.
+	// Highest precedence: explicit per-request overrides from ctx.
+	// (a) Single-model override (blanket): both provider and model must be
+	//     present; a half-set override is ignored. (b) Per-tier override: a
+	//     map applied only when the call is tier-tagged; the matching key's
+	//     pick wins. Both can coexist, but the per-tier override sits above
+	//     the single-model override for tagged calls.
 	if ctx != nil {
 		op, _ := ctx.GetContext().Value(ContextKeyLlmProviderOverride).(string)
 		om, _ := ctx.GetContext().Value(ContextKeyLlmModelOverride).(string)
@@ -1439,6 +1626,19 @@ func ResolveLLMConfig(ctx *security.RequestContext, accountId, agentName string,
 			result.Model = om
 			result.Source = "context-override"
 			result.IsOverridden = true
+		}
+		if tier != "" {
+			if v, ok := ctx.GetContext().Value(ContextKeyLlmTierModelOverrides).(ConversationTierOverrides); ok {
+				if pick, ok := v.Get(string(tier)); ok {
+					result.Hierarchy = append(result.Hierarchy, LLMConfigLayer{
+						Level: "context-override-tier", Provider: pick.Provider, Model: pick.Model, Active: false,
+					})
+					result.Provider = pick.Provider
+					result.Model = pick.Model
+					result.Source = "context-override-tier"
+					result.IsOverridden = true
+				}
+			}
 		}
 	}
 

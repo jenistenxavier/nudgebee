@@ -38,27 +38,96 @@ type relayActionRequest struct {
 	SessionVariables map[string]any      `json:"session_variables"`
 }
 
-// writeActions are relay action_names that mutate cluster state and require write permission.
-var writeActions = map[string]bool{
-	"delete_pod":               true,
-	"delete_workload":          true,
-	"create_workload":          true,
-	"replace_workload":         true,
-	"rollout_restart":          true,
-	"add_silence":              true,
-	"delete_silence":           true,
-	"pod_script_run_enricher":  true,
-	"pod_bash_enricher":        true,
-	"kubectl_command_executor": true,
-	"nubi_enricher":            true,
+// readActions is the allow-list of relay action_names that only read/observe
+// cluster or telemetry state and are therefore safe for read-only roles
+// (tenant_admin_readonly, account_admin_readonly).
+//
+// This is intentionally a READ allow-list, not a write deny-list: any
+// action_name NOT listed here requires write access (fail-closed). A
+// write/exec/job-creating relay action (replica_rightsizing, rightsize_pvc,
+// volume_delete, delete_pod, replace_workload, *_bash/_script/_kubectl exec,
+// image_scanner, pod_profiler, ...) must never default to read just because
+// someone forgot to enumerate it. tenant_admin and account_admin pass write
+// checks anyway, so this only bounds the read-only roles.
+//
+// Only add an action here once you are sure it performs no mutation, no
+// exec-in-pod, and creates no job on the cluster or external system.
+var readActions = map[string]bool{
+	// Live Kubernetes resource reads (PVC/PV/Services/etc. tabs).
+	"get_resource":      true,
+	"get_resource_yaml": true,
+	"get_silences":      true,
+
+	// Metrics / logs / traces / query reads.
+	"metrics":                         true,
+	"logs":                            true,
+	"gke_logs":                        true,
+	"cloud_logs":                      true,
+	"traces":                          true,
+	"traces_dependency_map":           true,
+	"db_query":                        true,
+	"query_data":                      true,
+	"query_es":                        true,
+	"query_es_indices":                true,
+	"query_esindex_field":             true,
+	"query_loki_labels":               true,
+	"query_grafana_loki_label_values": true,
+	"prometheus_enricher":             true,
+	"prometheus_labels":               true,
+	"prometheus_queries_enricher":     true,
+
+	// Service maps / stats / cloud reads.
+	"service_map":                 true,
+	"cloud_service_map":           true,
+	"knowledge_graph_service_map": true,
+	"application_stats":           true,
+	"cloud_resources":             true,
+	"cloud_performance_insights":  true,
+
+	// Read-only diagnostic enrichers (gather data, never mutate or exec).
+	"event_resource_events_enricher":      true,
+	"resource_events_enricher":            true,
+	"impacted_services_enricher":          true,
+	"job_events_enricher":                 true,
+	"job_info_enricher":                   true,
+	"job_pod_enricher":                    true,
+	"logs_enricher":                       true,
+	"node_allocatable_resources_enricher": true,
+	"node_running_pods_enricher":          true,
+	"node_status_enricher":                true,
+	"noisy_neighbours_enricher":           true,
+	"oom_killer_enricher":                 true,
+	"pod_metric_enricher":                 true,
+	"pod_node_metrics_enricher":           true,
+
+	// External observability/incident fetches (read details only).
+	"alert_rule_details":           true,
+	"chronosphere_query_traces":    true,
+	"datadog_error_tracking_issue": true,
+	"datadog_event_details":        true,
+	"datadog_incident":             true,
+	"datadog_metrics":              true,
+	"datadog_monitor":              true,
+	"datadog_traces":               true,
+	"newrelic_entity_details":      true,
+	"newrelic_incident_details":    true,
+	"newrelic_incidents":           true,
+	"newrelic_issue_details":       true,
+	"servicenow_incident":          true,
+	"servicenow_incident_enriched": true,
+	"solarwinds_alert_details":     true,
+	"splunk_alert_details":         true,
 }
 
-// requiredPermission returns the minimum access type needed for a given relay action_name.
+// requiredPermission returns the minimum access type needed for a given relay
+// action_name. Unknown action_names are treated as writes (fail-closed) so a
+// read-only role can never invoke a mutating relay action that simply hasn't
+// been enumerated.
 func requiredPermission(actionName string) security.SecurityAccessType {
-	if writeActions[actionName] {
-		return security.SecurityAccessTypeUpdate
+	if readActions[actionName] {
+		return security.SecurityAccessTypeRead
 	}
-	return security.SecurityAccessTypeRead
+	return security.SecurityAccessTypeUpdate
 }
 
 func validateRelayAction(action string) bool {

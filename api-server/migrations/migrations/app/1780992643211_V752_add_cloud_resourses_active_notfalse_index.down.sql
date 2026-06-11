@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS public.idx_cloud_resourses_active_notfalse_account_type;

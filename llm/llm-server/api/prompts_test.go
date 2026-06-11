@@ -29,52 +29,9 @@ func setupTestRouter() *gin.Engine {
 	return r
 }
 
-func TestAdminAuthMiddleware_ValidToken(t *testing.T) {
-	r := setupTestRouter()
-
-	// Set a test token
-	config.Config.LlmServerToken = "test-admin-token"
-	config.Config.LlmServerTokenHeader = "Authorization"
-
-	req, _ := http.NewRequest("GET", "/api/admin/prompts/config?name=test&category=agents", nil)
-	req.Header.Set("Authorization", "test-admin-token")
-
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	// Should not be 401
-	assert.NotEqual(t, 401, w.Code)
-}
-
-func TestAdminAuthMiddleware_InvalidToken(t *testing.T) {
-	r := setupTestRouter()
-
-	config.Config.LlmServerToken = "test-admin-token"
-	config.Config.LlmServerTokenHeader = "Authorization"
-
-	req, _ := http.NewRequest("GET", "/api/admin/prompts/config?name=test&category=agents", nil)
-	req.Header.Set("Authorization", "wrong-token")
-
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	assert.Equal(t, 401, w.Code)
-}
-
-func TestAdminAuthMiddleware_MissingToken(t *testing.T) {
-	r := setupTestRouter()
-
-	config.Config.LlmServerToken = "test-admin-token"
-	config.Config.LlmServerTokenHeader = "Authorization"
-
-	req, _ := http.NewRequest("GET", "/api/admin/prompts/config?name=test&category=agents", nil)
-	// No Authorization header
-
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	assert.Equal(t, 401, w.Code)
-}
+// Note: the previous per-group adminAuthMiddleware was deleted; auth for
+// admin endpoints is now enforced by the global gate in cmd/main.go. Tests
+// for that gate live alongside it (see cmd/auth_test.go).
 
 func TestGetPromptConfig_Success(t *testing.T) {
 	r := setupTestRouter()

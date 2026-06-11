@@ -1,0 +1,47 @@
+title = "Nudgebee gitleaks config"
+
+# Inherit gitleaks' built-in rule set; add repo-specific allowlists below.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist for known placeholders and non-secret paths"
+
+# Files that contain intentional placeholder/dev-sentinel values, plus generated
+# lockfiles and vendored deps. Widen conservatively — an over-broad allowlist
+# silently defeats the gate.
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)\.env\..*\.example$''',
+  '''node_modules/''',
+  '''(^|/)package-lock\.json$''',
+  '''(^|/)go\.sum$''',
+  # helm chart defaults ship placeholder creds (password: 'password', etc.)
+  '''deploy/kubernetes/.*/values\.yaml$''',
+  # Tests, fixtures, mock + sample data, and docs legitimately contain example /
+  # non-functional tokens. Excluding them keeps the gate signal-only; real source,
+  # config, and env files stay covered. Widen further only when a new run proves
+  # a finding is a genuine placeholder.
+  '''_test\.go$''',
+  '''(^|/)testdata/''',
+  '''(^|/)tests?/''',
+  '''(^|/)fixtures?/''',
+  '''(^|/)mock/''',
+  '''llm/benchmark/''',
+  '''llm/rag-server/data/''',
+  '''\.md$''',
+  # Chatwoot website token is a public, client-side widget identifier (shipped to
+  # the browser by design), not a secret.
+  '''app/src/ee/components/ChatwootWidget\.jsx$''',
+]
+
+# Placeholder / dev-sentinel strings that are not real secrets. A finding whose
+# matched secret hits one of these regexes is suppressed.
+regexes = [
+  '''__REPLACE__''',
+  '''dev-insecure-default-REPLACE-before-prod''',
+  '''postgrespassword''',
+  '''myadminsecretkey''',
+  '''test-secret''',
+  '''(?i)example|placeholder|changeme|your[-_]?(api[-_]?)?key''',
+]

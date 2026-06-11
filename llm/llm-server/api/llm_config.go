@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"nudgebee/llm/agents/core"
-	"nudgebee/llm/config"
 
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/metric"
@@ -36,8 +35,9 @@ type testConnectionResponse struct {
 
 // handleLLMConfigTestApis registers POST /v1/llm-config/test-connection.
 //
-// Authentication mirrors prompts.go: shared token in LlmServerTokenHeader.
-// This is an internal service-to-service endpoint — only api-server calls it.
+// Auth is enforced by the global authHandlerMiddleware in cmd/main.go (single
+// LLM_SERVER_TOKEN gate). This is an internal service-to-service endpoint —
+// only api-server calls it.
 //
 // We answer HTTP 200 in both success and "config rejected by the provider"
 // cases so the caller can render a clear inline error to the user; transport
@@ -50,7 +50,6 @@ type testConnectionResponse struct {
 // user-actionable message.
 func handleLLMConfigTestApis(r *gin.Engine, _ trace.Tracer, _ metric.Meter) {
 	group := r.Group("/v1/llm-config")
-	group.Use(adminAuthMiddleware())
 
 	group.POST("/test-connection", func(c *gin.Context) {
 		var req testConnectionRequest
@@ -62,7 +61,6 @@ func handleLLMConfigTestApis(r *gin.Engine, _ trace.Tracer, _ metric.Meter) {
 			c.JSON(http.StatusBadRequest, testConnectionResponse{Error: "config is required"})
 			return
 		}
-		_ = config.Config // keep import alive when LlmServerToken is empty in tests
 
 		results, err := core.TestLLMProviderConnectionAll(c.Request.Context(), req.Config)
 		if err != nil {

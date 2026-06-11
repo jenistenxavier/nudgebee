@@ -53,8 +53,8 @@ func TestCacheKeyIncludesModel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Generate cache keys using the actual function from llm_cache.go
-			key1 := generateCacheKey(CacheScopeConversation, tt.accountId, tt.conversationId, tt.agentId, tt.model1)
-			key2 := generateCacheKey(CacheScopeConversation, tt.accountId, tt.conversationId, tt.agentId, tt.model2)
+			key1 := generateCacheKey(CacheScopeConversation, tt.accountId, tt.conversationId, tt.agentId, tt.model1, "")
+			key2 := generateCacheKey(CacheScopeConversation, tt.accountId, tt.conversationId, tt.agentId, tt.model2, "")
 
 			if tt.shouldDiffer {
 				assert.NotEqual(t, key1, key2,
@@ -75,11 +75,13 @@ func TestCacheKeyFormat(t *testing.T) {
 	agentId := "test-agent"
 	model := "gemini-3-pro-preview"
 
-	key := generateCacheKey(CacheScopeConversation, accountId, conversationId, agentId, model)
+	key := generateCacheKey(CacheScopeConversation, accountId, conversationId, agentId, model, "")
 
-	// Verify key format: conv:account:conversation:agent:model
-	expected := "conv:test-account:test-conv:test-agent:gemini-3-pro-preview"
-	assert.Equal(t, expected, key, "Cache key should follow format: conv:account:conversation:agent:model")
+	// Verify key format: conv:account:conversation:agent:model:credsFp
+	// credsFp is the empty-string fingerprint here; production calls pass a
+	// short hash of the api key to isolate slots per Google project.
+	expected := "conv:test-account:test-conv:test-agent:gemini-3-pro-preview:"
+	assert.Equal(t, expected, key, "Cache key should follow format: conv:account:conversation:agent:model:credsFp")
 }
 
 // TestCacheTTLConfiguration verifies cache TTL configuration
@@ -98,14 +100,20 @@ func TestCacheTTLConfiguration(t *testing.T) {
 
 // TestCacheKeyScopeFormats verifies that different scopes produce different key formats
 func TestCacheKeyScopeFormats(t *testing.T) {
-	globalKey := generateCacheKey(CacheScopeGlobal, "acc", "conv", "agent", "model")
-	assert.Equal(t, "global:agent:model", globalKey, "Global scope key should only contain agent and model")
+	globalKey := generateCacheKey(CacheScopeGlobal, "acc", "conv", "agent", "model", "")
+	assert.Equal(t, "global:agent:model:", globalKey, "Global scope key should contain agent, model, credsFp")
 
-	accountKey := generateCacheKey(CacheScopeAccount, "acc", "conv", "agent", "model")
-	assert.Equal(t, "account:acc:agent:model", accountKey, "Account scope key should contain account, agent, and model")
+	accountKey := generateCacheKey(CacheScopeAccount, "acc", "conv", "agent", "model", "")
+	assert.Equal(t, "account:acc:agent:model:", accountKey, "Account scope key should contain account, agent, model, credsFp")
 
-	convKey := generateCacheKey(CacheScopeConversation, "acc", "conv", "agent", "model")
-	assert.Equal(t, "conv:acc:conv:agent:model", convKey, "Conversation scope key should contain all components")
+	convKey := generateCacheKey(CacheScopeConversation, "acc", "conv", "agent", "model", "")
+	assert.Equal(t, "conv:acc:conv:agent:model:", convKey, "Conversation scope key should contain all components + credsFp")
+
+	// Distinct credsFp values isolate slots — guard against the regression where
+	// two tiers using the same model under different api keys would share a slot.
+	keyA := generateCacheKey(CacheScopeConversation, "acc", "conv", "agent", "model", "abcd1234")
+	keyB := generateCacheKey(CacheScopeConversation, "acc", "conv", "agent", "model", "ffff0000")
+	assert.NotEqual(t, keyA, keyB, "different credsFp → different cache slot")
 }
 
 // TestIdentifyCacheableMessages verifies message splitting logic

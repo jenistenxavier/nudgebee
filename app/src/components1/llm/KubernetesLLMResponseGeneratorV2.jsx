@@ -223,6 +223,8 @@ const KubernetesLLMResponseGenerator = ({
     defaultModel,
     selectedModel,
     setSelectedModel,
+    selectedTierModels,
+    setSelectedTierModels,
     imageSupport,
   } = useLLMInvestigationControl(accountId);
 
@@ -1400,6 +1402,8 @@ const KubernetesLLMResponseGenerator = ({
                           defaultModel={defaultModel}
                           selectedModel={selectedModel}
                           onModelSelect={setSelectedModel}
+                          selectedTierModels={selectedTierModels}
+                          onTierModelsSelect={setSelectedTierModels}
                           imageSupport={imageSupport}
                           isFollowUp={popup}
                           buttonProperties={{
@@ -1667,6 +1671,7 @@ const KubernetesLLMResponseGenerator = ({
                     accountId={accountId}
                     conversationId={conversationIdAtDb}
                     selectedModel={selectedModel}
+                    selectedTierModels={selectedTierModels}
                     popup={popup}
                     onStop={handleStopInvestigation}
                   />

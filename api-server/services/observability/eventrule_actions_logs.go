@@ -112,6 +112,69 @@ func computeLogSummaryFromText(text string) map[string]any {
 	return computeLogSummary(logs)
 }
 
+// firstStringField returns the first key in obj that holds a non-empty value, coerced to a
+// string. Structured logs sometimes encode time/level/severity numerically (epoch timestamp
+// as float64, level as int); those are converted rather than silently dropped.
+func firstStringField(obj map[string]any, keys ...string) string {
+	for _, k := range keys {
+		switch v := obj[k].(type) {
+		case string:
+			if v != "" {
+				return v
+			}
+		case float64:
+			return strconv.FormatFloat(v, 'f', -1, 64)
+		case int:
+			return strconv.Itoa(v)
+		case int64:
+			return strconv.FormatInt(v, 10)
+		case json.Number:
+			return v.String()
+		}
+	}
+	return ""
+}
+
+// parseLogTextToOutputLogs converts raw newline-separated log text (e.g. kubectl / agent
+// logs_enricher stdout) into structured OutputLog entries.
+//
+// The relay fallback paths used to return this text as a type:"file" evidence, but a plain
+// text "file" renders to nothing in the UI log card (which expects the structured
+// {data:[{timestamp,message,severity,labels}]} shape) and is mis-handled by the log-analysis
+// pipeline (which treats type:"file" as base64+gzip). Returning structured OutputLog entries
+// instead makes the same captured logs render in the card AND feed the analyzer.
+//
+// JSON log lines (the common structured-logging case) have their timestamp/level/message
+// fields lifted out via the usual key aliases; non-JSON lines become a plain message with a
+// best-effort level guess. The full parsed object is retained under Labels for drill-down.
+func parseLogTextToOutputLogs(text string) []OutputLog {
+	lines := strings.Split(text, "\n")
+	entries := make([]OutputLog, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		entry := OutputLog{Message: line}
+		var obj map[string]any
+		if strings.HasPrefix(line, "{") && json.Unmarshal([]byte(line), &obj) == nil {
+			entry.Labels = obj
+			entry.Timestamp = firstStringField(obj, "time", "timestamp", "ts", "@timestamp")
+			if msg := firstStringField(obj, "msg", "message", "body", "log"); msg != "" {
+				entry.Message = msg
+			}
+			entry.Severity = strings.ToUpper(firstStringField(obj, "level", "severity", "severity_text", "lvl"))
+		}
+		if entry.Severity == "" {
+			if lvl := logparser.GuessLevel(entry.Message); lvl != logparser.LevelUnknown {
+				entry.Severity = strings.ToUpper(lvl.String())
+			}
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
 type RegexLabelExtractor struct {
 	Pattern   string `json:"pattern"`
 	LabelName string `json:"label_name"`
@@ -1366,18 +1429,25 @@ func (a *observabilityLogAction) fetchLogsViaLogsEnricher(ctx playbooks.Playbook
 		return nil, errors.New("relay: unable to extract log data from response")
 	}
 	filename, _ := relayResponse["filename"].(string)
-	typeVal, _ := relayResponse["type"].(string)
 	insight := playbooks.InsightFromRelayResponse(relayResponse)
 	if summary := computeLogSummaryFromText(data); summary != nil {
 		additionalInfo["log_summary"] = summary
 	}
-	return playbooks.PlaybookActionResponseFile{
-		AdditionalInfo: additionalInfo,
-		Data:           data,
-		Filename:       filename,
-		Type:           typeVal,
-		Insight:        insight,
-	}, nil
+	if filename != "" {
+		additionalInfo["filename"] = filename
+	}
+	metadata := map[string]any{
+		"query-result-version": "1.0",
+		"query": map[string]any{
+			"workload_name": workloadName,
+			"namespace":     namespace,
+			"source":        "logs_enricher",
+		},
+	}
+	// Return structured log entries (not a raw-text file) so the evidence renders in the UI
+	// log card and is consumed by the log-analysis pipeline. See parseLogTextToOutputLogs.
+	return playbooks.NewPlaybookActionResponseJson(
+		map[string]any{"data": parseLogTextToOutputLogs(data)}, additionalInfo, insight, metadata), nil
 }
 
 // fetchLogsViaKubectl uses kubectl logs <kind>/<name> via kubectl_command_executor
@@ -1416,13 +1486,19 @@ func (a *observabilityLogAction) fetchLogsViaKubectl(ctx playbooks.PlaybookActio
 	if summary := computeLogSummaryFromText(stdout); summary != nil {
 		additionalInfo["log_summary"] = summary
 	}
-	return playbooks.PlaybookActionResponseFile{
-		AdditionalInfo: additionalInfo,
-		Data:           stdout,
-		Filename:       fmt.Sprintf("%s-%s.log", workloadName, namespace),
-		Type:           "text/plain",
-		Insight:        insight,
-	}, nil
+	additionalInfo["filename"] = fmt.Sprintf("%s-%s.log", workloadName, namespace)
+	metadata := map[string]any{
+		"query-result-version": "1.0",
+		"query": map[string]any{
+			"workload_name": workloadName,
+			"namespace":     namespace,
+			"source":        "kubectl",
+		},
+	}
+	// Return structured log entries (not a raw-text file) so the evidence renders in the UI
+	// log card and is consumed by the log-analysis pipeline. See parseLogTextToOutputLogs.
+	return playbooks.NewPlaybookActionResponseJson(
+		map[string]any{"data": parseLogTextToOutputLogs(stdout)}, additionalInfo, insight, metadata), nil
 }
 
 // extractKubectlOutput unwraps the kubectl_command_executor response to recover stdout/stderr.

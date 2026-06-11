@@ -80,6 +80,20 @@ func isResumableAgentStatus(status AgentExecutionStatus) bool {
 		strings.EqualFold(string(status), string(AgentExecutionStatusWaitingForClientTool))
 }
 
+// isTrueSibling reports whether `sib` is a same-level sibling of `primary`
+// (they share a parent), as opposed to an ancestor/descendant that merely
+// shares the same followup_message_id via lateral dedup.
+//
+// The bound-sibling resume loop must only resume TRUE siblings. When a child's
+// tool-confirmation followup is bound up to its parent, both rows carry the
+// same followup_message_id — but resuming the parent through that loop discards
+// its final answer and clears its saved state, which then strands the
+// conversation (COMPLETED while the generation message stays IN_PROGRESS). The
+// parent is resumed correctly by bubbleUpIfSiblingsDone instead.
+func isTrueSibling(primary, sib ConversationAgent) bool {
+	return sib.ID != primary.ID && sib.ParentAgentID == primary.ParentAgentID
+}
+
 // HandleFollowupAndResumeV2 is the single entry point for processing a followup
 // response submission when FollowupResumeV2Enabled is true.
 //
@@ -205,6 +219,18 @@ func HandleFollowupAndResumeV2(ctx *security.RequestContext, req NBAgentRequest)
 			for _, sib := range boundSiblings {
 				if sib.ID.String() == req.AgentId {
 					continue // already resumed above
+				}
+				if !isTrueSibling(agent, sib) {
+					// Different level (e.g. the parent, whose child's
+					// tool-confirmation followup was bound up to it). Resuming it
+					// here would discard its answer and clear its state, stranding
+					// the conversation. bubbleUpIfSiblingsDone resumes it properly.
+					logger.Info("resume_v2: skipping non-sibling bound agent",
+						"bound_agent_id", sib.ID.String(),
+						"bound_parent_agent_id", sib.ParentAgentID.String(),
+						"primary_agent_id", req.AgentId,
+						"primary_parent_agent_id", agent.ParentAgentID.String())
+					continue
 				}
 				if !isResumableAgentStatus(sib.Status) {
 					continue // sibling not in a waiting state — skip
@@ -380,10 +406,28 @@ func bubbleUpIfSiblingsDone(ctx *security.RequestContext, req NBAgentRequest, ch
 	// All siblings done. Resume parent.
 	_, parentState := dao.GetConversationAgentParentAgentIdAndPreviousState(parentAgentID)
 	if parentState == "" {
-		logger.Info("resume_v2: parent has no saved state, cannot resume — marking complete",
+		// The parent already completed out-of-band and its state was cleared, so
+		// it cannot be re-run — but its final answer is on the agent row. Surface
+		// THAT to the generation message; otherwise the conversation goes
+		// COMPLETED while the message stays IN_PROGRESS/empty (the #28141 class
+		// of bug). Falls back to the child's response if the parent row has none.
+		logger.Info("resume_v2: parent has no saved state; finalizing from saved agent response",
 			"parent_agent_id", parentAgentID)
+		// Start from childResp and mutate only Response/Status so the other
+		// fields (AgentName, ConversationId, SessionId, etc.) are preserved —
+		// replacing the whole struct would blank AgentName and can disrupt
+		// downstream notification filtering. Status is set to Completed
+		// unconditionally (hoisted above the lookup) so the message status can
+		// never drift from the conversation status set just below.
+		finalResp := childResp
+		finalResp.Status = ConversationStatusCompleted
+		if parents, lookupErr := dao.ListConversationAgents("", parentAgentID); lookupErr == nil &&
+			len(parents) > 0 && parents[0].Response != nil && *parents[0].Response != "" {
+			finalResp.Response = []string{*parents[0].Response}
+		}
+		persistFinalMessage(ctx, req.MessageId, finalResp)
 		_ = dao.UpdateConversationStatus(req.ConversationId, ConversationStatusCompleted)
-		return childResp, nil
+		return finalResp, nil
 	}
 
 	parentName, nameErr := dao.GetAgentNameFromAgentId(parentAgentID)

@@ -77,7 +77,7 @@ func (c *Consumer) ProcessMessage(data []byte) error {
 
 	// 2. Execute Workflows
 	for _, rule := range matches {
-		reqCtx := security.NewRequestContextForTenantAccountAdmin(rule.TenantID, "system-event-consumer", []string{rule.AccountID})
+		reqCtx := security.NewRequestContextForTenantAccountAdmin(rule.TenantID, "00000000-0000-0000-0000-000000000000", []string{rule.AccountID})
 
 		// Wrap the event payload in an "event" key so it's accessible as a single object in the workflow inputs.
 		inputs := map[string]any{

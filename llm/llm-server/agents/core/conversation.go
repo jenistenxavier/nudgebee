@@ -688,6 +688,27 @@ func markConversationActive(ctx *security.RequestContext, conversationId string,
 	}
 }
 
+// Tier wins when both are supplied; DAO failures are logged, not propagated
+// (sticky-config write is best-effort and must not abort the chat turn).
+func applyConversationModelConfig(ctx *security.RequestContext, dao IConversationDao, conversationId, llmProvider, llmModel string, llmTierOverrides ConversationTierOverrides) {
+	switch {
+	case llmTierOverrides.HasAny():
+		if uerr := dao.UpdateConversationTierOverrides(conversationId, llmTierOverrides); uerr != nil {
+			ctx.GetLogger().Warn("conversation: failed to update per-tier model configuration", "error", uerr)
+			return
+		}
+		InvalidateConversationOverrideCache(conversationId)
+		ctx.GetLogger().Info("conversation: updated sticky per-tier model configuration", "tier_count", len(llmTierOverrides.Picks))
+	case llmProvider != "" && llmModel != "":
+		if uerr := dao.UpdateConversationModelBlanket(conversationId, llmProvider, llmModel); uerr != nil {
+			ctx.GetLogger().Warn("conversation: failed to update sticky model configuration", "error", uerr)
+			return
+		}
+		InvalidateConversationOverrideCache(conversationId)
+		ctx.GetLogger().Info("conversation: updated sticky blanket model configuration", "provider", llmProvider, "model", llmModel)
+	}
+}
+
 func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequest, agent NBAgent, sessionId string, source ConversationSource) (NBAgentResponse, error) {
 	err := common.ValidateStruct(request)
 	if err != nil {
@@ -700,7 +721,6 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 	ctx.GetLogger().Info("conversation: processing request", "query", lo.Substring(request.Query, 0, 50), "agent_id", request.AgentId, "message_id", request.MessageId, "query_config", request.QueryConfig, "conversation_context", request.ConversationContext)
 	t0 := time.Now()
 
-	// Extract LLM config from request if present
 	llmProvider := ""
 	llmModel := ""
 	if request.QueryConfig.LlmProvider != "" {
@@ -710,6 +730,21 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 	if request.QueryConfig.LlmModelName != "" {
 		ctx.GetLogger().Info("conversation: overriding llm model from request config", "model", request.QueryConfig.LlmModelName)
 		llmModel = request.QueryConfig.LlmModelName
+	}
+
+	// Drop half-set entries; convert wire shape → DAO/resolver struct.
+	var llmTierOverrides ConversationTierOverrides
+	for tier, p := range request.QueryConfig.LlmTierModels {
+		if p.Provider == "" || p.Model == "" {
+			continue
+		}
+		if llmTierOverrides.Picks == nil {
+			llmTierOverrides.Picks = make(map[string]TierModelPick)
+		}
+		llmTierOverrides.Picks[tier] = TierModelPick{Provider: p.Provider, Model: p.Model}
+	}
+	if llmTierOverrides.HasAny() {
+		ctx.GetLogger().Info("conversation: overriding per-tier models from request config", "tier_count", len(llmTierOverrides.Picks))
 	}
 
 	newConversation := false
@@ -722,17 +757,7 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 		}
 
 		if conversation.ID != uuid.Nil {
-			// Update conversation model if new config provided
-			if llmProvider != "" && llmModel != "" {
-				err = GetConversationDao().UpdateConversationModel(request.ConversationId, llmProvider, llmModel)
-				if err != nil {
-					ctx.GetLogger().Warn("conversation: failed to update sticky model configuration", "error", err)
-				} else {
-					// Invalidate cache so new model is picked up immediately
-					InvalidateConversationOverrideCache(request.ConversationId)
-					ctx.GetLogger().Info("conversation: updated sticky model configuration", "provider", llmProvider, "model", llmModel)
-				}
-			}
+			applyConversationModelConfig(ctx, GetConversationDao(), request.ConversationId, llmProvider, llmModel, llmTierOverrides)
 
 			if conversation.AccountID.String() != request.AccountId {
 				return NBAgentResponse{}, errors.New("conversation: user does not have access to this conversation")
@@ -824,7 +849,14 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 			} else {
 				title = DefaultConversationTitle
 			}
-			id, err := GetConversationDao().SaveConversation(request.ConversationId, sessionId, tenantId, request.AccountId, request.UserId, "", title, ConversationStatusInProgress, source, llmProvider, llmModel)
+			var saveTierOverrides *ConversationTierOverrides
+			if llmTierOverrides.HasAny() {
+				to := llmTierOverrides
+				saveTierOverrides = &to
+				llmProvider = ""
+				llmModel = ""
+			}
+			id, err := GetConversationDao().SaveConversation(request.ConversationId, sessionId, tenantId, request.AccountId, request.UserId, "", title, ConversationStatusInProgress, source, llmProvider, llmModel, saveTierOverrides)
 			if err != nil {
 				ctx.GetLogger().Error("conversation: unable to save conversation to DB", "error", err)
 				return NBAgentResponse{}, err
@@ -876,13 +908,17 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 	// conversation.Status loaded earlier and would bail out before we could
 	// restore the terminal row — leaving the DB stuck at IN_PROGRESS forever.
 
-	// Create a copy of the context with additional information
+	// Stamp per-request overrides so ResolveLLMConfig's context layers pick
+	// them up on every downstream LLM call.
 	parentContext := ctx.GetContext()
 	if request.QueryConfig.LlmProvider != "" {
 		parentContext = context.WithValue(parentContext, ContextKeyLlmProviderOverride, request.QueryConfig.LlmProvider)
 	}
 	if request.QueryConfig.LlmModelName != "" {
 		parentContext = context.WithValue(parentContext, ContextKeyLlmModelOverride, request.QueryConfig.LlmModelName)
+	}
+	if llmTierOverrides.HasAny() {
+		parentContext = context.WithValue(parentContext, ContextKeyLlmTierModelOverrides, llmTierOverrides)
 	}
 
 	ctx = security.NewRequestContext(

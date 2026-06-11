@@ -1,6 +1,48 @@
 // instrumentation.ts
 
+// Warn (but don't refuse to boot) when the any-email/any-password dummy creds
+// provider is enabled AND BASE_URL is non-loopback. The combo is safe for
+// laptop dev (BASE_URL=http://localhost:3000) but turns any network-reachable
+// deploy into "first person to hit the signin URL becomes tenant_admin."
+//
+// Why warn-only and not fatal: some operators run internal-only deploys on
+// public-looking hostnames (e.g. dev.example.internal reachable only via VPN)
+// where the dummy-creds provider is intentional for bootstrap testing.
+// Refusing to boot would strand them; the loud warning ensures the misconfig
+// is visible if it's accidental. Mirrors the H1 (compromised encryption key)
+// warning pattern in api-server's config.go.
+function isLoopbackBaseURL(base: string | undefined): boolean {
+  if (!base) return true; // empty BASE_URL — defer to other startup checks
+  let host = '';
+  try {
+    host = new URL(base).hostname;
+  } catch {
+    // Unparseable — fail-closed (treat as not-loopback, so we warn).
+    return false;
+  }
+  if (host === 'localhost') return true;
+  if (host === '::1') return true;
+  if (host.startsWith('127.')) return true; // 127.0.0.0/8
+  return false;
+}
+
+function warnIfDummyCredsUnsafe(): void {
+  if (process.env.NEXTAUTH_DUMMY_CREDS_ENABLED !== 'true') return;
+  const base = process.env.BASE_URL;
+  if (isLoopbackBaseURL(base)) return;
+  console.warn(
+    'SECURITY: NEXTAUTH_DUMMY_CREDS_ENABLED=true is set with non-loopback ' +
+      `BASE_URL=${base || '<unset>'}. The dummy-creds provider grants tenant_admin to any email with the shared password — ` +
+      'restrict network access to BASE_URL (e.g. VPN-only ingress), or set NEXTAUTH_DUMMY_CREDS_ENABLED=false. ' +
+      'This warning fires on every boot until resolved.'
+  );
+}
+
 export async function register() {
+  if (process.env.NEXT_RUNTIME === 'nodejs') {
+    warnIfDummyCredsUnsafe();
+  }
+
   // Register the server-side GraphQL gateway on globalThis so queryGraphQL()
   // in HttpService.ts can invoke it without statically importing rpcGateway
   // (which would pull fs/bcrypt/yaml into the browser bundle and break the

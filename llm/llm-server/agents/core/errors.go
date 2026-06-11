@@ -3,6 +3,36 @@ package core
 import (
 	"errors"
 	"fmt"
+	"net/http"
+
+	"nudgebee/llm/common"
+)
+
+// User-facing LLM failure errors. Their messages are safe to surface directly
+// to the end user (no provider internals, model names, or request IDs — see the
+// "Fail Securely" product guideline) and they carry standard HTTP status codes
+// so upstream layers can branch on the cause. When one of these is returned
+// from a planner it propagates through the normal error path: the executor
+// records it as a failed turn and surfaces err.Error() (the Message) as the
+// assistant's reply (see executor_planner.go and api/chains.go).
+var (
+	// ErrLLMRateLimited maps to provider 429 / quota-exhaustion responses.
+	ErrLLMRateLimited = common.Error{
+		Code:    http.StatusTooManyRequests,
+		Message: "The AI service is currently at capacity (rate limit or quota exceeded). Please wait a moment and try again.",
+	}
+	// ErrLLMRequestTooLarge maps to context-window / token-limit overflow on the
+	// initial request (before any tool ran).
+	ErrLLMRequestTooLarge = common.Error{
+		Code:    http.StatusRequestEntityTooLarge,
+		Message: "Your request is too large for the AI model to process. Please shorten your question or reduce the amount of selected context, then try again.",
+	}
+	// ErrLLMServiceUnavailable maps to transient network / timeout / 5xx failures
+	// that survived the retry and fallback budget.
+	ErrLLMServiceUnavailable = common.Error{
+		Code:    http.StatusServiceUnavailable,
+		Message: "The AI service is temporarily unavailable due to a network or timeout issue. Please try again in a few moments.",
+	}
 )
 
 var errLlmUnableToGenerate = errors.New("error: agent unable to process request")

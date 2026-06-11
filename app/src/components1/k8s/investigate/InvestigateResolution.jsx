@@ -5,7 +5,7 @@ import apiRecommendations from '@api1/recommendation';
 import yaml from 'js-yaml';
 import CustomTable from '@common-new/tables/CustomTable2';
 import PropTypes from 'prop-types';
-import CustomButton from '@components1/common/NewCustomButton';
+import { Button } from '@components1/ds/Button';
 import { snackbar } from '@components1/common/snackbarService';
 import { parseHttpResponseBodyMessage, safeJSONParse } from 'src/utils/common';
 import { ds } from '@utils/colors';
@@ -40,22 +40,48 @@ const InvestigateResolution = ({ row, handleClose, updateInvestigateSuccessSnack
   const aggregationKey = row?.aggregation_key;
 
   const getNestedValue = (obj, path) => {
-    return path.split(/(?<!\[[^\]]*)\./).reduce((acc, part) => {
-      if (!acc) {
+    const parts = path.split(/(?<!\[[^\]]*)\./);
+    let acc = obj;
+    for (let i = 0; i < parts.length; i++) {
+      if (acc == null || typeof acc !== 'object') {
         return '';
       }
-      let arrayMatch = part.match(/^(.+?)\[(\d+)\]$/);
+      const part = parts[i];
+      const arrayMatch = part.match(/^(.+?)\[(\d+)\]$/);
       if (arrayMatch) {
         const [, key, index] = arrayMatch;
-        return acc[key] ? acc[key][Number(index)] : '';
+        acc = acc[key] ? acc[key][Number(index)] : '';
+        continue;
       }
-      let bracketMatch = part.match(/^(.+?)\['(.+)'\]$/);
+      const bracketMatch = part.match(/^(.+?)\['(.+)'\]$/);
       if (bracketMatch) {
         const [, key, innerKey] = bracketMatch;
-        return acc[key] ? acc[key][innerKey] : '';
+        acc = acc[key] ? acc[key][innerKey] : '';
+        continue;
       }
-      return acc[part];
-    }, obj);
+      if (part in acc) {
+        acc = acc[part];
+        continue;
+      }
+      // k8s annotation/label keys contain dots & slashes (e.g.
+      // `kubectl.kubernetes.io/restartedAt`) and get over-split by the `.` split
+      // above. Greedily rejoin the longest remaining run of parts that exists as a
+      // single literal key.
+      let matched = false;
+      for (let j = parts.length; j > i + 1; j--) {
+        const joined = parts.slice(i, j).join('.');
+        if (joined in acc) {
+          acc = acc[joined];
+          i = j - 1;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) {
+        return '';
+      }
+    }
+    return acc ?? '';
   };
 
   const renderConditionalFields = () => {
@@ -349,8 +375,12 @@ const InvestigateResolution = ({ row, handleClose, updateInvestigateSuccessSnack
           },
         }}
       >
-        <CustomButton text={'Cancel'} size='Medium' onClick={handleClose} variant='secondary' />
-        <CustomButton text={'Submit'} size='Medium' onClick={handleSubmit} loading={loading} />
+        <Button tone='secondary' size='md' onClick={handleClose}>
+          Cancel
+        </Button>
+        <Button size='md' onClick={handleSubmit} loading={loading}>
+          Submit
+        </Button>
       </Box>
     </>
   );

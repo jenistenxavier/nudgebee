@@ -100,7 +100,7 @@ func (p *RecommendationPoller) poll(ctx context.Context) {
 		}
 
 		for _, rule := range matches {
-			reqCtx := security.NewRequestContextForTenantAccountAdmin(rule.TenantID, "recommendation-poller", []string{rule.AccountID})
+			reqCtx := security.NewRequestContextForTenantAccountAdmin(rule.TenantID, "00000000-0000-0000-0000-000000000000", []string{rule.AccountID})
 			inputs := map[string]any{
 				"event": event,
 			}

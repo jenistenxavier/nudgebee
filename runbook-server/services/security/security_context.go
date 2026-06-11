@@ -45,17 +45,14 @@ const (
 )
 
 type SecurityContext struct {
-	tenantId                            string
-	accountIds                          []string
-	userId                              string
-	roles                               []string
-	accountAdminIds                     []string
-	accountReadOnlyAdminIds             []string
-	k8sUser                             map[string]string
-	k8sGroup                            map[string][]string
-	k8sNamespaceAdminAccountIds         []string
-	k8sNamespaceReadOnlyAdminAccountIds []string
-	k8sNamespaces                       map[string][]string
+	tenantId        string
+	accountIds      []string
+	userId          string
+	roles           []string
+	scopedEntityIds map[string][]string
+	k8sUser         map[string]string
+	k8sGroup        map[string][]string
+	k8sNamespaces   map[string][]string
 	// isServerInternal marks contexts constructed by NewSecurityContextForSuperAdmin
 	// for synthetic server-side calls. Set only inside this package — never
 	// derived from a user's role string — so a user assigned a stray role
@@ -64,34 +61,28 @@ type SecurityContext struct {
 }
 
 type scPub struct {
-	TenantId                            string
-	AccountIds                          []string
-	UserId                              string
-	Roles                               []string
-	AccountAdminIds                     []string
-	AccountReadOnlyAdminIds             []string
-	K8sUser                             map[string]string
-	K8sGroup                            map[string][]string
-	K8sNamespaceAdminAccountIds         []string
-	K8sNamespaceReadOnlyAdminAccountIds []string
-	K8sNamespaces                       map[string][]string
-	IsServerInternal                    bool
+	TenantId         string
+	AccountIds       []string
+	UserId           string
+	Roles            []string
+	ScopedEntityIds  map[string][]string
+	K8sUser          map[string]string
+	K8sGroup         map[string][]string
+	K8sNamespaces    map[string][]string
+	IsServerInternal bool
 }
 
 func (sc *SecurityContext) MarshalJSON() ([]byte, error) {
 	data := scPub{
-		TenantId:                            sc.tenantId,
-		AccountIds:                          sc.accountIds,
-		UserId:                              sc.userId,
-		Roles:                               sc.roles,
-		AccountAdminIds:                     sc.accountAdminIds,
-		AccountReadOnlyAdminIds:             sc.accountReadOnlyAdminIds,
-		K8sUser:                             sc.k8sUser,
-		K8sGroup:                            sc.k8sGroup,
-		K8sNamespaceAdminAccountIds:         sc.k8sNamespaceAdminAccountIds,
-		K8sNamespaceReadOnlyAdminAccountIds: sc.k8sNamespaceReadOnlyAdminAccountIds,
-		K8sNamespaces:                       sc.k8sNamespaces,
-		IsServerInternal:                    sc.isServerInternal,
+		TenantId:         sc.tenantId,
+		AccountIds:       sc.accountIds,
+		UserId:           sc.userId,
+		Roles:            sc.roles,
+		ScopedEntityIds:  sc.scopedEntityIds,
+		K8sUser:          sc.k8sUser,
+		K8sGroup:         sc.k8sGroup,
+		K8sNamespaces:    sc.k8sNamespaces,
+		IsServerInternal: sc.isServerInternal,
 	}
 
 	j, err := common.MarshalJson(data)
@@ -111,12 +102,9 @@ func (sc *SecurityContext) UnmarshalJSON(data []byte) error {
 	sc.accountIds = scPub1.AccountIds
 	sc.userId = scPub1.UserId
 	sc.roles = scPub1.Roles
-	sc.accountAdminIds = scPub1.AccountAdminIds
-	sc.accountReadOnlyAdminIds = scPub1.AccountReadOnlyAdminIds
+	sc.scopedEntityIds = scPub1.ScopedEntityIds
 	sc.k8sUser = scPub1.K8sUser
 	sc.k8sGroup = scPub1.K8sGroup
-	sc.k8sNamespaceAdminAccountIds = scPub1.K8sNamespaceAdminAccountIds
-	sc.k8sNamespaceReadOnlyAdminAccountIds = scPub1.K8sNamespaceReadOnlyAdminAccountIds
 	sc.k8sNamespaces = scPub1.K8sNamespaces
 	sc.isServerInternal = scPub1.IsServerInternal
 
@@ -162,6 +150,12 @@ func (sc *SecurityContext) IsTenantReadAdmin() bool {
 	return slices.Contains(sc.roles, AUTH_TENANT_READ_ADMIN_ROLE)
 }
 
+// HasScopedRole reports whether the user holds `role` scoped to `entityId`
+// (an account id or a "k8s_namespace" account id, depending on the role).
+func (sc *SecurityContext) HasScopedRole(role string, entityId string) bool {
+	return slices.Contains(sc.roles, role) && slices.Contains(sc.scopedEntityIds[role], entityId)
+}
+
 func (sc *SecurityContext) HasAccountAccess(accountId string, access SecurityAccessType) bool {
 	if sc.IsSuperAdmin() {
 		return true
@@ -180,19 +174,19 @@ func (sc *SecurityContext) HasAccountAccess(accountId string, access SecurityAcc
 	if sc.IsTenantReadAdmin() {
 		return access == SecurityAccessTypeRead
 	}
-	if slices.Contains(sc.roles, AUTH_ACCOUNT_ADMIN_ROLE) && slices.Contains(sc.accountAdminIds, accountId) {
+	if sc.HasScopedRole(AUTH_ACCOUNT_ADMIN_ROLE, accountId) {
 		return true
 	}
 
-	if slices.Contains(sc.roles, AUTH_ACCOUNT_READ_ADMIN_ROLE) && slices.Contains(sc.accountReadOnlyAdminIds, accountId) {
+	if sc.HasScopedRole(AUTH_ACCOUNT_READ_ADMIN_ROLE, accountId) {
 		return access == SecurityAccessTypeRead
 	}
 
-	if slices.Contains(sc.roles, AUTH_K8S_NAMESPACE_ADMIN_ROLE) && slices.Contains(sc.k8sNamespaceAdminAccountIds, accountId) {
+	if sc.HasScopedRole(AUTH_K8S_NAMESPACE_ADMIN_ROLE, accountId) {
 		return true
 	}
 
-	if slices.Contains(sc.roles, AUTH_K8S_NAMESPACE_READ_ADMIN_ROLE) && slices.Contains(sc.k8sNamespaceReadOnlyAdminAccountIds, accountId) {
+	if sc.HasScopedRole(AUTH_K8S_NAMESPACE_READ_ADMIN_ROLE, accountId) {
 		return access == SecurityAccessTypeRead
 	}
 
@@ -226,23 +220,32 @@ func (sc *SecurityContext) ListAccountIds() []string {
 		return sc.accountIds
 	}
 
-	if slices.Contains(sc.roles, AUTH_ACCOUNT_ADMIN_ROLE) {
-		return sc.accountAdminIds
+	// A user can hold several scoped roles at once (e.g. account_admin on
+	// one account and account_admin_readonly on another). Return the union
+	// of every scoped role's accounts, not just the first match — otherwise
+	// the lower-priority roles' accounts become invisible. Write-vs-read
+	// enforcement stays in HasAccountAccess, which checks the specific
+	// scoped role per account.
+	accountIds := []string{}
+	seen := map[string]bool{}
+	for _, role := range []string{
+		AUTH_ACCOUNT_ADMIN_ROLE,
+		AUTH_ACCOUNT_READ_ADMIN_ROLE,
+		AUTH_K8S_NAMESPACE_ADMIN_ROLE,
+		AUTH_K8S_NAMESPACE_READ_ADMIN_ROLE,
+	} {
+		if !slices.Contains(sc.roles, role) {
+			continue
+		}
+		for _, accountId := range sc.scopedEntityIds[role] {
+			if !seen[accountId] {
+				seen[accountId] = true
+				accountIds = append(accountIds, accountId)
+			}
+		}
 	}
 
-	if slices.Contains(sc.roles, AUTH_ACCOUNT_READ_ADMIN_ROLE) {
-		return sc.accountReadOnlyAdminIds
-	}
-
-	if slices.Contains(sc.roles, AUTH_K8S_NAMESPACE_ADMIN_ROLE) {
-		return sc.k8sNamespaceAdminAccountIds
-	}
-
-	if slices.Contains(sc.roles, AUTH_K8S_NAMESPACE_READ_ADMIN_ROLE) {
-		return sc.k8sNamespaceReadOnlyAdminAccountIds
-	}
-
-	return []string{}
+	return accountIds
 }
 
 func (sc *SecurityContext) GetK8sUserAndGroup(accountId string) (string, []string) {
@@ -325,13 +328,12 @@ func GetAccountIdsForTenant(tenantId string) ([]string, error) {
 // assigned a stray role name in user_role can't impersonate this context.
 func NewSecurityContextForSuperAdmin() *SecurityContext {
 	return &SecurityContext{
-		tenantId:                "",
-		userId:                  "",
-		roles:                   []string{},
-		accountIds:              []string{},
-		accountAdminIds:         []string{},
-		accountReadOnlyAdminIds: []string{},
-		isServerInternal:        true,
+		tenantId:         "",
+		userId:           "",
+		roles:            []string{},
+		accountIds:       []string{},
+		scopedEntityIds:  map[string][]string{},
+		isServerInternal: true,
 	}
 }
 
@@ -341,7 +343,7 @@ func NewSecurityContextForTenantAdmin(tenantId string) *SecurityContext {
 		slog.Error("security: failed to get account IDs for tenant", "tenantId", tenantId, "error", err)
 		return nil
 	}
-	return &SecurityContext{tenantId: tenantId, roles: []string{"tenant_admin"}, accountIds: accountIds, accountAdminIds: []string{}, accountReadOnlyAdminIds: []string{}}
+	return &SecurityContext{tenantId: tenantId, roles: []string{"tenant_admin"}, accountIds: accountIds, scopedEntityIds: map[string][]string{}}
 }
 
 func NewSecurityContextForTenantAccountAdmin(tenantId, userId string, accountIds []string) *SecurityContext {
@@ -353,7 +355,7 @@ func NewSecurityContextForTenantAccountAdmin(tenantId, userId string, accountIds
 		}
 		accountIds = accountIds1
 	}
-	return &SecurityContext{tenantId: tenantId, userId: userId, roles: []string{"tenant_admin"}, accountIds: accountIds, accountAdminIds: accountIds, accountReadOnlyAdminIds: accountIds}
+	return &SecurityContext{tenantId: tenantId, userId: userId, roles: []string{"tenant_admin"}, accountIds: accountIds, scopedEntityIds: map[string][]string{}}
 }
 
 func loadSecurityContextFromServicesServer(tenantId string, userId string) (*SecurityContext, error) {

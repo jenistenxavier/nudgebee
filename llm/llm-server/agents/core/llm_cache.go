@@ -203,8 +203,12 @@ func (p *GoogleAICacheProvider) ApplyCache(ctx context.Context, req *CacheReques
 		agentName = req.AgentName + ":" + fp
 	}
 
-	// Generate cache key based on scope
-	cacheKey := generateCacheKey(req.Scope, req.AccountId, req.ConversationId, agentName, req.Model)
+	// Generate cache key based on scope, including a short hash of the api key
+	// so two requests with the same (account, conv, agent, model) but different
+	// Google projects (=different api keys) get distinct slots. Without this a
+	// reused local-cache hit would reference a CachedContent owned by another
+	// project and 403 at use time.
+	cacheKey := generateCacheKey(req.Scope, req.AccountId, req.ConversationId, agentName, req.Model, credsFingerprint(req.ApiKey, "", "", "", "", "", ""))
 
 	slog.Info("Google AI cache: Starting cache check",
 		"conversationId", req.ConversationId,
@@ -640,7 +644,7 @@ func (p *GoogleAICacheProvider) InvalidateCache(ctx context.Context, req *CacheR
 	if fp := capabilityFingerprint(req.Capabilities); fp != "" {
 		agentName = req.AgentName + ":" + fp
 	}
-	cacheKey := generateCacheKey(req.Scope, req.AccountId, req.ConversationId, agentName, req.Model)
+	cacheKey := generateCacheKey(req.Scope, req.AccountId, req.ConversationId, agentName, req.Model, credsFingerprint(req.ApiKey, "", "", "", "", "", ""))
 
 	var cacheInfo CacheInfo
 	exists := false
@@ -783,14 +787,22 @@ func (p *AnthropicCacheProvider) InvalidateCache(ctx context.Context, req *Cache
 
 // ========== Helper Functions ==========
 
-func generateCacheKey(scope CacheScope, accountId, conversationId, agentName, model string) string {
+// generateCacheKey produces the namespace+conversation/account/global-scoped
+// key under which a Google AI CachedContent slot is recorded. The credsFp
+// suffix isolates slots by the api key (Google project) that owns them — two
+// calls with the same (account, conv, agent, model) but different api keys
+// would otherwise share a single local key, and the second call would attempt
+// to reuse a slot owned by the first call's project and get 403 from the
+// CachedContent API. credsFp should be the short hash of the api key (or
+// empty when the provider has no slot-cache semantics).
+func generateCacheKey(scope CacheScope, accountId, conversationId, agentName, model, credsFp string) string {
 	switch scope {
 	case CacheScopeGlobal:
-		return fmt.Sprintf("global:%s:%s", agentName, model)
+		return fmt.Sprintf("global:%s:%s:%s", agentName, model, credsFp)
 	case CacheScopeAccount:
-		return fmt.Sprintf("account:%s:%s:%s", accountId, agentName, model)
+		return fmt.Sprintf("account:%s:%s:%s:%s", accountId, agentName, model, credsFp)
 	default:
-		return fmt.Sprintf("conv:%s:%s:%s:%s", accountId, conversationId, agentName, model)
+		return fmt.Sprintf("conv:%s:%s:%s:%s:%s", accountId, conversationId, agentName, model, credsFp)
 	}
 }
 

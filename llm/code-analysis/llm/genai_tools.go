@@ -40,11 +40,30 @@ type ToolDefinition struct {
 // reuse across analyses.
 type GenAISession struct {
 	responses []*genai.Content
+	// sigByCall maps a function call's identity (name + canonical args) to the
+	// thought_signature gemini returned for it. It is an identity-keyed backstop
+	// to the positional splice: it re-attaches signatures onto reconstructed
+	// functionCall parts that the splice did not cover (parallel-call grouping,
+	// order drift, synthesized calls). Gemini 3 hard-rejects any functionCall in
+	// the replayed history whose part is missing its signature.
+	sigByCall map[string][]byte
 }
 
 // NewGenAISession returns a fresh recording session for one analysis.
 func NewGenAISession() *GenAISession {
-	return &GenAISession{}
+	return &GenAISession{sigByCall: map[string][]byte{}}
+}
+
+// callSigKey is the stable identity of a function call used to key its recorded
+// thought_signature. Go marshals map keys in sorted order, so the same call
+// reconstructed from langchaingo (which round-trips Args through JSON) produces
+// the same key — as long as its Args were not truncated by window compaction.
+func callSigKey(fc *genai.FunctionCall) string {
+	if fc == nil {
+		return ""
+	}
+	args, _ := json.Marshal(fc.Args)
+	return fc.Name + "\x00" + string(args)
 }
 
 // recordIfFC appends content if it contains a FunctionCall part. Text- or
@@ -56,6 +75,42 @@ func (s *GenAISession) recordIfFC(content *genai.Content) {
 		return
 	}
 	s.responses = append(s.responses, content)
+	if s.sigByCall == nil {
+		s.sigByCall = map[string][]byte{}
+	}
+	for _, p := range content.Parts {
+		if p.FunctionCall != nil && len(p.ThoughtSignature) > 0 {
+			s.sigByCall[callSigKey(p.FunctionCall)] = p.ThoughtSignature
+		}
+	}
+}
+
+// reattachSignatures fills in the thought_signature on any functionCall part in
+// history that is still missing one, looking it up by call identity. It runs
+// after spliceModelResponses as a backstop: the splice restores signatures by
+// replacing whole FC-containing model contents positionally, but positional
+// alignment can drift (parallel-call grouping, synthesized submit calls), which
+// would leave a reconstructed functionCall part without its signature and make
+// Gemini 3 reject the entire request. Recorded-original parts already carry a
+// signature, so they are left untouched; only signatureless reconstructed parts
+// are mutated, and those are never shared with the recordings.
+func (s *GenAISession) reattachSignatures(history []*genai.Content) []*genai.Content {
+	if s == nil || len(s.sigByCall) == 0 {
+		return history
+	}
+	for _, content := range history {
+		if content == nil || content.Role != "model" {
+			continue
+		}
+		for _, p := range content.Parts {
+			if p.FunctionCall != nil && len(p.ThoughtSignature) == 0 {
+				if sig, ok := s.sigByCall[callSigKey(p.FunctionCall)]; ok {
+					p.ThoughtSignature = sig
+				}
+			}
+		}
+	}
+	return history
 }
 
 // spliceModelResponses replaces reconstructed FC-containing model contents
@@ -77,6 +132,35 @@ func (s *GenAISession) spliceModelResponses(history []*genai.Content) []*genai.C
 		result = append(result, content)
 	}
 	return result
+}
+
+// numRecordedFCTurns reports how many FC-containing model responses have been
+// recorded this session. Used only for diagnostics (recordings vs. history
+// alignment).
+func (s *GenAISession) numRecordedFCTurns() int {
+	if s == nil {
+		return 0
+	}
+	return len(s.responses)
+}
+
+// unsignedFunctionCalls returns "name@<position>" for every model functionCall
+// part in history whose thought_signature is missing. Position is 1-based over
+// all contents to match the index Gemini reports in its 400 error. A non-empty
+// result predicts a Gemini 3 "missing thought_signature" rejection.
+func unsignedFunctionCalls(history []*genai.Content) []string {
+	var out []string
+	for i, content := range history {
+		if content == nil || content.Role != "model" {
+			continue
+		}
+		for _, p := range content.Parts {
+			if p.FunctionCall != nil && len(p.ThoughtSignature) == 0 {
+				out = append(out, fmt.Sprintf("%s@%d", p.FunctionCall.Name, i+1))
+			}
+		}
+	}
+	return out
 }
 
 // GenerateContentWithTools calls the LLM with native function calling support.
@@ -159,12 +243,40 @@ func (c *Client) generateContentWithGenAI(
 	// per-analysis session. Replace reconstructed "model" Content with the
 	// originals to preserve ThoughtSignature.
 	history = session.spliceModelResponses(history)
+	// Backstop: fill any functionCall part the positional splice left without a
+	// signature, keyed by call identity. Gemini 3 rejects the whole request if any
+	// functionCall in the replayed history is missing its thought_signature.
+	history = session.reattachSignatures(history)
+
+	// Early-warning diagnostic: any functionCall part still lacking a signature
+	// after splice+reattach is what triggers Gemini 3's "missing thought_signature"
+	// 400. Log it (with the offending call names/positions) so the failure mode is
+	// diagnosable from logs alone instead of requiring a live repro.
+	if c.logger != nil {
+		if unsigned := unsignedFunctionCalls(history); len(unsigned) > 0 {
+			c.logger.Log(common.EventPlanningProgress, "functionCall parts missing thought_signature before send", map[string]any{
+				"provider":          c.config.LLM.Provider,
+				"model":             c.config.LLM.Model,
+				"unsigned_calls":    unsigned,
+				"recorded_fc_turns": session.numRecordedFCTurns(),
+				"history_len":       len(history),
+			})
+		}
+	}
 
 	// Build config
 	temp := float32(0.1)
 	genaiConfig := &genai.GenerateContentConfig{
 		MaxOutputTokens: 16384,
 		Temperature:     &temp,
+		// Include thoughts so Gemini 3 returns thought_signatures on functionCall
+		// parts. Without this they are not emitted, and replaying tool-call history
+		// then fails with "Function call is missing a thought_signature". Older
+		// thinking models that don't support thoughts ignore this (the SDK only
+		// returns thoughts "if the model supports thought and thoughts are
+		// available"), and convertGenAIResponse drops thought text so the planner's
+		// answer parsing is unaffected.
+		ThinkingConfig: &genai.ThinkingConfig{IncludeThoughts: true},
 		SafetySettings: []*genai.SafetySetting{
 			{Category: genai.HarmCategoryDangerousContent, Threshold: genai.HarmBlockThresholdBlockNone},
 			{Category: genai.HarmCategoryHarassment, Threshold: genai.HarmBlockThresholdBlockNone},
@@ -532,7 +644,10 @@ func convertGenAIResponse(resp *genai.GenerateContentResponse) *llms.ContentResp
 
 		if candidate.Content != nil {
 			for _, part := range candidate.Content.Parts {
-				if part.Text != "" {
+				// Skip thought parts: with ThinkingConfig.IncludeThoughts enabled the
+				// model returns its reasoning as Thought parts, which must not be
+				// folded into the planner's parsed answer/thought text.
+				if part.Text != "" && !part.Thought {
 					buf.WriteString(part.Text)
 				}
 				if part.FunctionCall != nil {

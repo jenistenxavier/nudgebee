@@ -14,6 +14,11 @@ export async function findTenantByDomain(domain: string): Promise<{ tenantId: st
     return { tenantId: '', tenantAttrs: [] };
   }
 
+  // Domain comparison is case-insensitive — callers extract the domain via
+  // email.split('@')[1] (e.g. "Alice@Company.com" → "Company.com"), but
+  // tenant_attrs.allowed_domains may have been entered with arbitrary casing.
+  // RFC 1035 says DNS labels are case-insensitive; treat both sides the same.
+  const needle = domain.toLowerCase();
   const allowedDomainsArr = tenantAttrs.filter((f: any) => f.name === 'allowed_domains');
 
   for (const allowedDomains of allowedDomainsArr) {
@@ -23,7 +28,7 @@ export async function findTenantByDomain(domain: string): Promise<{ tenantId: st
 
     try {
       const allowedDomainsList = JSON.parse(allowedDomains.value);
-      if (Array.isArray(allowedDomainsList) && allowedDomainsList.includes(domain)) {
+      if (Array.isArray(allowedDomainsList) && allowedDomainsList.some((d: unknown) => typeof d === 'string' && d.toLowerCase() === needle)) {
         return { tenantId: allowedDomains.tenant_id, tenantAttrs };
       }
     } catch (e) {

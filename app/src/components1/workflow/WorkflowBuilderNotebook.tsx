@@ -3212,7 +3212,7 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
           );
         }}
         accountId={accountId}
-        showStateStrip
+        showStateStrip={canEdit && currentMode !== 'executions'}
         hasUnsavedChanges={hasUnsavedChanges}
         draftAheadOfLive={draftAheadOfLive}
         liveVersionNumber={workflowData?.live_version_number}

@@ -6,33 +6,12 @@ import (
 	"time"
 
 	"nudgebee/llm/agents/core"
-	"nudgebee/llm/config"
 	"nudgebee/llm/prompts"
 
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
-
-// adminAuthMiddleware validates admin token from request header
-func adminAuthMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		token := c.GetHeader(config.Config.LlmServerTokenHeader)
-		if token == "" {
-			c.JSON(401, gin.H{"error": "Missing authentication token"})
-			c.Abort()
-			return
-		}
-
-		if token != config.Config.LlmServerToken {
-			c.JSON(401, gin.H{"error": "Invalid authentication token"})
-			c.Abort()
-			return
-		}
-
-		c.Next()
-	}
-}
 
 // getUserFromContext extracts user identifier from context for audit
 func getUserFromContext(c *gin.Context) string {
@@ -42,10 +21,13 @@ func getUserFromContext(c *gin.Context) string {
 	return "admin"
 }
 
-// handlePromptsApis registers all prompt management endpoints
+// handlePromptsApis registers all prompt management endpoints.
+//
+// Auth is enforced by the global authHandlerMiddleware wired in cmd/main.go:
+// if LLM_SERVER_TOKEN is configured, every request must carry a matching
+// header; if unset, the gate is a no-op. No per-group middleware needed.
 func handlePromptsApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter) {
 	adminGroup := r.Group("/api/admin/prompts")
-	adminGroup.Use(adminAuthMiddleware())
 
 	// Experiment endpoints
 	adminGroup.POST("/experiments", createExperiment)
@@ -67,7 +49,6 @@ func handlePromptsApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter) {
 	// Image attachment management lives under its own /api/admin/attachments
 	// namespace so attachment endpoints don't share an RBAC scope with prompts.
 	attachmentsGroup := r.Group("/api/admin/attachments")
-	attachmentsGroup.Use(adminAuthMiddleware())
 	attachmentsGroup.POST("/purge", purgeExpiredAttachments)
 }
 

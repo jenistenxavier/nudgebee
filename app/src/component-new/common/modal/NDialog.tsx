@@ -22,6 +22,8 @@ interface NDialogProps {
   /** Tone of the submit button. Use 'danger' for destructive confirmations (delete/disable). Defaults to 'primary'. */
   submitTone?: ButtonTone;
   sx?: React.CSSProperties;
+  /** Override the dialog content padding/styles inline. e.g. `{ padding: 0 }` for edge-to-edge content. */
+  contentSx?: React.CSSProperties;
   backdropClickClose?: boolean;
   width?: 'xs' | 'sm' | 'md' | 'lg' | 'xl';
 }
@@ -41,6 +43,7 @@ export default function NDialog({
   submitTone = 'primary',
   backdropClickClose = true,
   width = 'md',
+  contentSx,
 }: NDialogProps) {
   return (
     <React.Fragment>
@@ -59,7 +62,7 @@ export default function NDialog({
         loader={loading}
       >
         {dialogContent ? (
-          <DialogContent sx={{ padding: 'var(--ds-space-5)' }}>
+          <DialogContent sx={{ padding: 'var(--ds-space-5)', ...contentSx }}>
             <DialogContentText id='alert-dialog-description'>{dialogContent}</DialogContentText>
           </DialogContent>
         ) : (

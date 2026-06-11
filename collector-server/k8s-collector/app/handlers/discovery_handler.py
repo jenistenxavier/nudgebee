@@ -12,6 +12,7 @@ from apis.model.workload_details import WorkloadDetails
 from config import Configs
 from db import database, clickhouse
 from db.redis_client import acquire_discovery_lock, record_cleanup_done, should_skip_cleanup
+from handlers.batch_reconcile import claim_reconcile, gc_superseded_active_resources, record_batch_progress
 from handlers.alert_rules_handler import handle_alert_rules
 from handlers.kg_update import publish_kg_update
 from psycopg2 import extras
@@ -195,6 +196,15 @@ def run_async_discovery_handler(content) -> None:
             logging.error(f"Missing required field '{field}' in discovery data")
             return
 
+    # tenant / cloud_account_id scope EVERY downstream DB write (active_resources,
+    # discovery_batch_progress, the reconcile UPDATEs). Reject empties here at the
+    # single entry point rather than guarding each function — an empty value would
+    # write/operate on a bogus empty-id partition. ("data" may legitimately be []
+    # for an empty final batch, so it's excluded from this non-empty check.)
+    if not data["tenant"] or not data["cloud_account_id"]:
+        logging.error("Empty tenant or cloud_account_id in discovery data")
+        return
+
     # Serialize processing per cloud_account_id to prevent PostgreSQL deadlocks
     # on concurrent INSERT ... ON CONFLICT into cloud_resourses for the same account.
     # Uses Redis distributed lock (works across pods); falls back to threading.Lock.
@@ -255,6 +265,8 @@ def _process_discovery(data) -> None:
             is_first_batch,
             metadata,
             is_batch_operation,
+            batch_id=batch_id,
+            batch_sequence=batch_sequence,
         )
     elif data_type == "node":
         run_node_discovery(
@@ -265,6 +277,8 @@ def _process_discovery(data) -> None:
             is_first_batch,
             metadata,
             is_batch_operation,
+            batch_id=batch_id,
+            batch_sequence=batch_sequence,
         )
     elif data_type == "job":
         run_job_discovery(
@@ -275,6 +289,8 @@ def _process_discovery(data) -> None:
             is_first_batch,
             metadata,
             is_batch_operation=is_batch_operation,
+            batch_id=batch_id,
+            batch_sequence=batch_sequence,
         )
     elif data_type == "status":
         run_status_update(data["data"], data["tenant"], data["cloud_account_id"])
@@ -294,6 +310,8 @@ def _process_discovery(data) -> None:
             is_first_batch,
             metadata,
             is_batch_operation,
+            batch_id=batch_id,
+            batch_sequence=batch_sequence,
         )
     elif data_type == "alert_rules":
         handle_alert_rules(data["data"], data["tenant"], data["cloud_account_id"])
@@ -311,6 +329,8 @@ def run_service_discovery(
     is_first_batch: bool = True,
     metadata: Dict[str, Any] = None,
     is_batch_operation: bool = True,
+    batch_id: str = None,
+    batch_sequence: int = 1,
 ):
     resources = []
     pods = []
@@ -333,25 +353,24 @@ def run_service_discovery(
             continue
         process_service_discovery(_id, cloud_account_id, k8s_data, pods, resources, service_key, tenant, workloads)
 
-    # Handle active resources tracking for batched discovery only.
-    # Incremental updates (is_first_batch=False, is_last_batch=False) contain only CHANGED
-    # resources, not all resources. Clearing active_resources and running cleanup on incremental
-    # updates would wipe all resources not in the small delta, causing mass deactivation.
-    # Only clear on first batch (start of full sync) and cleanup on last batch (end of full sync).
-    should_cleanup = is_last_batch
-
-    # Filter resources by type before clearing/storing
+    # Stage this batch and decide whether to reconcile. For batched snapshots the
+    # reconcile is gated on full-sequence completeness (order-independent, once per
+    # snapshot, multi-pod safe); incremental updates never reconcile. See
+    # stage_batch_and_should_reconcile.
     pod_resources = [r for r in resources if r.get("type") == "Pod"]
     workload_resources = [r for r in resources if r.get("type") != "Pod" and r.get("type") not in ["node", "Namespace"]]
 
-    if is_batch_operation:
-        if is_first_batch:
-            clear_active_resources(cloud_account_id, tenant, "Pod")
-            clear_active_resources(cloud_account_id, tenant, "workload")
-
-        # Store active resources from this batch for all batches in a sequence
-        store_active_resources(cloud_account_id, tenant, pod_resources, "Pod")
-        store_active_resources(cloud_account_id, tenant, workload_resources, "workload")
+    should_cleanup, cleanup_batch_id = stage_batch_and_should_reconcile(
+        cloud_account_id,
+        tenant,
+        "service",
+        [("Pod", pod_resources), ("workload", workload_resources)],
+        batch_id,
+        batch_sequence,
+        is_first_batch,
+        is_last_batch,
+        is_batch_operation,
+    )
 
     logging.debug(
         f"Service discovery batch {cloud_account_id}/{tenant}: {len(pod_resources)} pods, "
@@ -370,6 +389,7 @@ def run_service_discovery(
         should_cleanup,
         is_first_batch,
         metadata,
+        cleanup_batch_id,
     )
 
 
@@ -473,6 +493,7 @@ def update_resources(
     should_cleanup: bool = True,
     is_first_batch: bool = True,
     metadata: Dict[str, Any] = None,
+    cleanup_batch_id: str = None,
 ):
     try:
         logging.debug("inserting cloud_resourses for account_id {}".format(cloud_account_id))
@@ -521,11 +542,9 @@ def update_resources(
                     )
 
                 if not skip_pod:
-                    handle_active_resources_deletion(cloud_account_id, tenant, "Pod", total_pods)
-                    record_cleanup_done(cloud_account_id, "Pod", Configs)
+                    reconcile_resource_type(cloud_account_id, tenant, "Pod", total_pods, cleanup_batch_id)
                 if not skip_wl:
-                    handle_active_resources_deletion(cloud_account_id, tenant, "workload", total_workloads)
-                    record_cleanup_done(cloud_account_id, "workload", Configs)
+                    reconcile_resource_type(cloud_account_id, tenant, "workload", total_workloads, cleanup_batch_id)
 
         # Deduplicate pods and workloads by cloud_resource_id before insertion
         unique_pods = {}
@@ -572,9 +591,13 @@ def clear_active_resources(cloud_account_id, tenant, resource_type):
         logging.exception(f"Failed to clear active resources for {cloud_account_id}/{tenant}/{resource_type}")
 
 
-def store_active_resources(cloud_account_id, tenant, resources, resource_type):
+def store_active_resources(cloud_account_id, tenant, resources, resource_type, batch_id=None):
     """
     Store active resources from current batch into permanent table.
+
+    batch_id tags each row with the snapshot that wrote it so the reconcile can
+    diff the live set against ONLY the completed snapshot (and GC superseded
+    snapshots). NULL = legacy / incremental path.
     """
     try:
         # Prepare data for insertion
@@ -587,14 +610,17 @@ def store_active_resources(cloud_account_id, tenant, resources, resource_type):
                     "external_resource_id": resource["external_resource_id"],
                     "resourse_id": resource["resourse_id"],
                     "resource_type": resource_type,
+                    "batch_id": batch_id,
                 }
             )
 
-        # Use ON CONFLICT to handle duplicates (in case of retries)
+        # Use ON CONFLICT to handle duplicates (in case of retries). batch_id is
+        # refreshed so a resource still present in a newer snapshot adopts the
+        # new batch_id (and the old snapshot's rows are GC'd post-reconcile).
         if active_resources_data:
             on_conflict = (
                 "ON CONFLICT(cloud_account_id, tenant_id, external_resource_id, resource_type) DO UPDATE SET "
-                "updated_at = CURRENT_TIMESTAMP"
+                "updated_at = CURRENT_TIMESTAMP, batch_id = EXCLUDED.batch_id"
             )
             database.insert_data("active_resources", active_resources_data, on_conflict=on_conflict)
 
@@ -604,7 +630,69 @@ def store_active_resources(cloud_account_id, tenant, resources, resource_type):
         logging.exception(f"Failed to store active resources for {resource_type}")
 
 
-def handle_active_resources_deletion(cloud_account_id, tenant, resource_type, total_resources_count=None):  # noqa: C901
+def stage_batch_and_should_reconcile(
+    cloud_account_id,
+    tenant,
+    data_type,
+    resource_groups,
+    batch_id,
+    batch_sequence,
+    is_first_batch,
+    is_last_batch,
+    is_batch_operation,
+):
+    """Stage this batch's active_resources and decide whether to reconcile now.
+
+    ``resource_groups`` is a list of ``(resource_type, resources)`` to stash into
+    active_resources for this data_type (e.g. service => [("Pod", ...),
+    ("workload", ...)]).
+
+    Returns ``(should_cleanup, cleanup_batch_id)``:
+
+    * Incremental update (no batch metadata) -> ``(False, None)``: never reconcile.
+    * Batched snapshot (``batch_id`` present) -> reconcile is gated on
+      FULL-SEQUENCE COMPLETENESS via the shared progress ledger and claimed
+      atomically, so it fires once-per-snapshot regardless of arrival order or
+      which pod/worker processed which batch. Returns ``(claimed, batch_id)``;
+      when claimed, reconcile/GC must scope to ``batch_id``.
+    * Legacy single-message full-load (``batch_id`` absent) -> keeps the historic
+      atomic clear+store+reconcile-on-last behavior, unscoped: ``(is_last_batch,
+      None)``.
+    """
+    if not is_batch_operation:
+        return False, None
+
+    if batch_id:
+        for resource_type, resources in resource_groups:
+            store_active_resources(cloud_account_id, tenant, resources, resource_type, batch_id=batch_id)
+        # Record arrival AFTER storing so "progress row exists" implies "this
+        # batch's active_resources committed" — the invariant completeness relies on.
+        record_batch_progress(cloud_account_id, tenant, data_type, batch_id, batch_sequence, is_last_batch)
+        should_cleanup = claim_reconcile(cloud_account_id, tenant, data_type, batch_id)
+        return should_cleanup, batch_id
+
+    # Legacy / no batch_id: single atomic full-load message.
+    if is_first_batch:
+        for resource_type, _ in resource_groups:
+            clear_active_resources(cloud_account_id, tenant, resource_type)
+    for resource_type, resources in resource_groups:
+        store_active_resources(cloud_account_id, tenant, resources, resource_type, batch_id=None)
+    return is_last_batch, None
+
+
+def reconcile_resource_type(cloud_account_id, tenant, resource_type, total_count, batch_id):
+    """Reconcile one resource_type for a completed snapshot: mark absent resources
+    inactive, record the cleanup timestamp, and GC superseded batch rows. Callers
+    gate this behind should_skip_cleanup. batch_id None = legacy/atomic path."""
+    handle_active_resources_deletion(cloud_account_id, tenant, resource_type, total_count, batch_id=batch_id)
+    record_cleanup_done(cloud_account_id, resource_type, Configs)
+    if batch_id is not None:
+        gc_superseded_active_resources(cloud_account_id, tenant, resource_type, batch_id)
+
+
+def handle_active_resources_deletion(  # noqa: C901
+    cloud_account_id, tenant, resource_type, total_resources_count=None, batch_id=None
+):
     """
     Handle deleted resources detection using permanent active_resources table.
     Called on last batch of discovery operations.
@@ -613,11 +701,15 @@ def handle_active_resources_deletion(cloud_account_id, tenant, resource_type, to
         total_resources_count: If provided, represents the total count of resources from discovery.
                               If 0, means no resources exist and allows complete cleanup.
                               If None, means incremental update and skips complete cleanup.
+        batch_id: When set (batched snapshot), the "active set" is scoped to rows
+                  tagged with this batch_id, so the diff runs against ONLY the
+                  completed snapshot — never a partially-arrived one. NULL =
+                  legacy/atomic path (diff against all rows for the type).
     """
     try:
         logging.warning(
             f"PROCESSING RESOURCE DELETIONS for {cloud_account_id}/{tenant}/{resource_type}, "
-            f"total_count: {total_resources_count}"
+            f"total_count: {total_resources_count}, batch_id: {batch_id}"
         )
 
         # Get all active resources from the permanent table
@@ -628,8 +720,12 @@ def handle_active_resources_deletion(cloud_account_id, tenant, resource_type, to
             AND tenant_id = %s
             AND resource_type = %s
         """
+        active_resources_params = [cloud_account_id, tenant, resource_type]
+        if batch_id is not None:
+            active_resources_query += " AND batch_id = %s"
+            active_resources_params.append(batch_id)
 
-        active_resources = database.run_query(active_resources_query, [cloud_account_id, tenant, resource_type])
+        active_resources = database.run_query(active_resources_query, active_resources_params)
 
         if len(active_resources) > 0:
             # Create IN clauses for resources that are active
@@ -642,7 +738,7 @@ def handle_active_resources_deletion(cloud_account_id, tenant, resource_type, to
                     "UPDATE cloud_resourses "
                     "SET is_active = false, status = 'Inactive' "
                     "WHERE account = %s AND external_resource_id != ALL(%s) "
-                    "AND (is_active = true OR is_active IS NULL) AND type = 'Pod'",
+                    "AND is_active IS NOT FALSE AND type = 'Pod'",
                     [cloud_account_id, external_ids],
                 )
                 # Only update k8s_pods for Pod resources
@@ -659,7 +755,7 @@ def handle_active_resources_deletion(cloud_account_id, tenant, resource_type, to
                     "UPDATE cloud_resourses "
                     "SET is_active = false, status = 'Inactive' "
                     "WHERE account = %s AND external_resource_id != ALL(%s) "
-                    "AND (is_active = true OR is_active IS NULL) "
+                    "AND is_active IS NOT FALSE "
                     "AND type NOT IN ('Pod', 'node', 'Namespace', 'External')",
                     [cloud_account_id, external_ids],
                 )
@@ -675,7 +771,7 @@ def handle_active_resources_deletion(cloud_account_id, tenant, resource_type, to
                     "UPDATE cloud_resourses "
                     "SET is_active = false, status = 'Inactive' "
                     "WHERE account = %s AND external_resource_id != ALL(%s) "
-                    "AND (is_active = true OR is_active IS NULL) AND type = 'Job'",
+                    "AND is_active IS NOT FALSE AND type = 'Job'",
                     [cloud_account_id, external_ids],
                 )
                 database.run_query(
@@ -698,7 +794,7 @@ def handle_active_resources_deletion(cloud_account_id, tenant, resource_type, to
                     "UPDATE cloud_resourses "
                     "SET is_active = false, status = 'Inactive' "
                     "WHERE account = %s AND external_resource_id != ALL(%s) "
-                    "AND (is_active = true OR is_active IS NULL) AND type = 'node'",
+                    "AND is_active IS NOT FALSE AND type = 'node'",
                     [cloud_account_id, external_ids],
                 )
                 database.run_query(
@@ -713,7 +809,7 @@ def handle_active_resources_deletion(cloud_account_id, tenant, resource_type, to
                     "UPDATE cloud_resourses "
                     "SET is_active = false, status = 'Inactive' "
                     "WHERE account = %s AND external_resource_id != ALL(%s) "
-                    "AND (is_active = true OR is_active IS NULL) AND type != 'External'",
+                    "AND is_active IS NOT FALSE AND type != 'External'",
                     [cloud_account_id, external_ids],
                 )
 
@@ -827,7 +923,7 @@ def handle_active_resources_deletion(cloud_account_id, tenant, resource_type, to
                 database.run_query(
                     "UPDATE cloud_resourses "
                     "SET is_active = false, status = 'Inactive' "
-                    "WHERE account = %s AND (is_active = true OR is_active IS NULL) AND type = 'Pod'",
+                    "WHERE account = %s AND is_active IS NOT FALSE AND type = 'Pod'",
                     [cloud_account_id],
                 )
                 database.run_query(
@@ -840,7 +936,7 @@ def handle_active_resources_deletion(cloud_account_id, tenant, resource_type, to
                 database.run_query(
                     "UPDATE cloud_resourses "
                     "SET is_active = false, status = 'Inactive' "
-                    "WHERE account = %s AND (is_active = true OR is_active IS NULL) "
+                    "WHERE account = %s AND is_active IS NOT FALSE "
                     "AND type NOT IN ('Pod', 'node', 'Namespace', 'External')",
                     [cloud_account_id],
                 )
@@ -854,7 +950,7 @@ def handle_active_resources_deletion(cloud_account_id, tenant, resource_type, to
                 database.run_query(
                     "UPDATE cloud_resourses "
                     "SET is_active = false, status = 'Inactive' "
-                    "WHERE account = %s AND (is_active = true OR is_active IS NULL) AND type = 'Job'",
+                    "WHERE account = %s AND is_active IS NOT FALSE AND type = 'Job'",
                     [cloud_account_id],
                 )
                 database.run_query(
@@ -867,7 +963,7 @@ def handle_active_resources_deletion(cloud_account_id, tenant, resource_type, to
                 database.run_query(
                     "UPDATE cloud_resourses "
                     "SET is_active = false, status = 'Inactive' "
-                    "WHERE account = %s AND (is_active = true OR is_active IS NULL) AND type = 'node'",
+                    "WHERE account = %s AND is_active IS NOT FALSE AND type = 'node'",
                     [cloud_account_id],
                 )
                 database.run_query(
@@ -976,7 +1072,7 @@ def handle_full_load_deleted_resources(cloud_account_id, active_resources, tenan
             "UPDATE cloud_resourses "
             "SET is_active = false, status = 'Inactive' "
             "WHERE account = %s AND external_resource_id != ALL(%s) "
-            "AND (is_active = true OR is_active IS NULL) AND \"type\" = 'External'",
+            "AND is_active IS NOT FALSE AND \"type\" = 'External'",
             [cloud_account_id, resource_keys],
         )
 
@@ -1065,6 +1161,8 @@ def run_node_discovery(  # noqa: C901
     is_first_batch: bool = True,
     metadata: Dict[str, Any] = None,
     is_batch_operation: bool = True,
+    batch_id: str = None,
+    batch_sequence: int = 1,
 ):
     resources = []
     metrics = []
@@ -1164,15 +1262,19 @@ def run_node_discovery(  # noqa: C901
         resources.append(cloud_resource)
         nodes.append(NodeDetails(**node))
 
-    # Only clear/cleanup on batched full syncs, not incremental updates (see service discovery comment).
-    should_cleanup = is_last_batch
-
-    if is_batch_operation:
-        if is_first_batch:
-            clear_active_resources(cloud_account_id, tenant, "node")
-
-        # Store active resources from this batch for all batches in a sequence
-        store_active_resources(cloud_account_id, tenant, resources, "node")
+    # Stage + gated reconcile (completeness-based for batched snapshots, see
+    # stage_batch_and_should_reconcile).
+    should_cleanup, cleanup_batch_id = stage_batch_and_should_reconcile(
+        cloud_account_id,
+        tenant,
+        "node",
+        [("node", resources)],
+        batch_id,
+        batch_sequence,
+        is_first_batch,
+        is_last_batch,
+        is_batch_operation,
+    )
 
     logging.debug(
         f"Node discovery batch {cloud_account_id}/{tenant}: {len(nodes)} active nodes, {len(deleted_resources)} "
@@ -1245,8 +1347,7 @@ def run_node_discovery(  # noqa: C901
             if should_skip_cleanup(cloud_account_id, "node", Configs):
                 logging.info(f"Skipping node cleanup for {cloud_account_id}/{tenant} — ran recently")
             else:
-                handle_active_resources_deletion(cloud_account_id, tenant, "node", total_nodes)
-                record_cleanup_done(cloud_account_id, "node", Configs)
+                reconcile_resource_type(cloud_account_id, tenant, "node", total_nodes, cleanup_batch_id)
     except Exception:
         logging.exception(f"Failed to insert row {json.dumps(resources, default=str)}")
 
@@ -1403,6 +1504,8 @@ def run_job_discovery(
     metadata: Dict[str, Any] = None,
     full_load: bool = False,
     is_batch_operation: bool = True,
+    batch_id: str = None,
+    batch_sequence: int = 1,
 ):
     resources = []
     metrics = []
@@ -1477,15 +1580,19 @@ def run_job_discovery(
             f"(received {len(data)}, unique {len(resources)})"
         )
 
-    # Only clear/cleanup on batched full syncs, not incremental updates (see service discovery comment).
-    should_cleanup = is_last_batch
-
-    if is_batch_operation:
-        if is_first_batch:
-            clear_active_resources(cloud_account_id, tenant, "Job")
-
-        # Store active resources from this batch for all batches in a sequence
-        store_active_resources(cloud_account_id, tenant, list(resources.values()), "Job")
+    # Stage + gated reconcile (completeness-based for batched snapshots, see
+    # stage_batch_and_should_reconcile).
+    should_cleanup, cleanup_batch_id = stage_batch_and_should_reconcile(
+        cloud_account_id,
+        tenant,
+        "job",
+        [("Job", list(resources.values()))],
+        batch_id,
+        batch_sequence,
+        is_first_batch,
+        is_last_batch,
+        is_batch_operation,
+    )
 
     logging.debug(
         f"Job discovery batch {cloud_account_id}/{tenant}: {len(jobs)} active jobs, "
@@ -1503,6 +1610,7 @@ def run_job_discovery(
         should_cleanup,
         is_first_batch,
         metadata,
+        cleanup_batch_id,
     )
 
 
@@ -1517,6 +1625,7 @@ def update_jobs(
     should_cleanup: bool = True,
     is_first_batch: bool = True,
     metadata: Dict[str, Any] = None,
+    cleanup_batch_id: str = None,
 ):
     try:
         logging.debug("inserting job cloud_resourses for account_id {}".format(cloud_account_id))
@@ -1547,8 +1656,7 @@ def update_jobs(
             if should_skip_cleanup(cloud_account_id, "Job", Configs):
                 logging.info(f"Skipping job cleanup for {cloud_account_id}/{tenant} — ran recently")
             else:
-                handle_active_resources_deletion(cloud_account_id, tenant, "Job", total_jobs)
-                record_cleanup_done(cloud_account_id, "Job", Configs)
+                reconcile_resource_type(cloud_account_id, tenant, "Job", total_jobs, cleanup_batch_id)
 
         if len(jobs) > 0:
             logging.debug("inserting k8s_workloads for account_id {}".format(cloud_account_id))
@@ -1584,6 +1692,8 @@ def run_namespace_discovery(
     is_first_batch: bool = True,
     metadata: Dict[str, Any] = None,
     is_batch_operation: bool = True,
+    batch_id: str = None,
+    batch_sequence: int = 1,
 ):
     namespaces = []
     namespace_resources = []
@@ -1610,15 +1720,19 @@ def run_namespace_discovery(
         if not k8s_data.get("deleted", False):
             namespace_resources.append(namespace_resource)
 
-    # Only clear/cleanup on batched full syncs, not incremental updates (see service discovery comment).
-    should_cleanup = is_last_batch
-
-    if is_batch_operation:
-        if is_first_batch:
-            clear_active_resources(cloud_account_id, tenant, "Namespace")
-
-        # Store active resources from this batch for all batches in a sequence
-        store_active_resources(cloud_account_id, tenant, namespace_resources, "Namespace")
+    # Stage + gated reconcile (completeness-based for batched snapshots, see
+    # stage_batch_and_should_reconcile).
+    should_cleanup, cleanup_batch_id = stage_batch_and_should_reconcile(
+        cloud_account_id,
+        tenant,
+        "namespace",
+        [("Namespace", namespace_resources)],
+        batch_id,
+        batch_sequence,
+        is_first_batch,
+        is_last_batch,
+        is_batch_operation,
+    )
 
     deleted_count = len([n for n in namespaces if not n.is_active])
     active_count = len(namespace_resources)
@@ -1664,8 +1778,7 @@ def run_namespace_discovery(
         if should_skip_cleanup(cloud_account_id, "Namespace", Configs):
             logging.info(f"Skipping namespace cleanup for {cloud_account_id}/{tenant} — ran recently")
         else:
-            handle_active_resources_deletion(cloud_account_id, tenant, "Namespace", total_namespaces)
-            record_cleanup_done(cloud_account_id, "Namespace", Configs)
+            reconcile_resource_type(cloud_account_id, tenant, "Namespace", total_namespaces, cleanup_batch_id)
 
 
 def get_metric_data(
