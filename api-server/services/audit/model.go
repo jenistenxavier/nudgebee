@@ -31,11 +31,17 @@ const (
 	EventAgentToken                EventCategory = "AGENT_TOKEN"
 	EventCategoryIntegration       EventCategory = "INTEGRATIONS"
 	EventCategoryTriage            EventCategory = "TRIAGE"
+	EventCategoryOwnership         EventCategory = "OWNERSHIP"
 )
 
 type EventType string
 
 const (
+	EventTypeOwnershipAssign     EventType = "OWNERSHIP_ASSIGN"
+	EventTypeOwnershipDelete     EventType = "OWNERSHIP_DELETE"
+	EventTypeOwnershipRuleUpsert EventType = "OWNERSHIP_RULE_UPSERT"
+	EventTypeOwnershipRuleDelete EventType = "OWNERSHIP_RULE_DELETE"
+
 	EventTypeUserCreate EventType = "USER_CREATE"
 	EventTypeUserUpdate EventType = "USER_UPDATE"
 	EventTypeUserDelete EventType = "USER_DELETE"
