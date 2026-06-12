@@ -146,14 +146,14 @@ func checkoutCodeRepoGitLab(ctx AccountAdapterContext, request ApplyRecommendati
 	cmd := exec.Command("git", "clone", "--depth", "1", "-b", gitDetails.BaseBranch, gitURL, dir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		ctx.GetLogger().Error("Error cloning repo", "error", err, "output", string(output))
+		ctx.GetLogger().Error("Error cloning repo", "error", err, "output", redactGitCredentials(string(output)))
 		return "", err
 	}
 
 	if gitDetails.Sha1 != "" {
 		cmdFetch := exec.Command("git", "-C", dir, "fetch", "--depth=1", "origin", gitDetails.Sha1)
 		if output, err := cmdFetch.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("fetch specific commit failed: %s, %v", output, err)
+			return "", fmt.Errorf("fetch specific commit failed: %s, %v", redactGitCredentials(string(output)), err)
 		}
 		cmdCheckout := exec.Command("git", "-C", dir, "checkout", gitDetails.Sha1)
 		if output, err := cmdCheckout.CombinedOutput(); err != nil {
@@ -178,7 +178,7 @@ func commitCodeGitLab(ctx AccountAdapterContext, dir string, request ApplyRecomm
 		cmd1.Dir = dir
 		output1, err1 := cmd1.Output()
 		if err1 != nil {
-			ctx.GetLogger().Error("Error fetching remote branch", "error", err1, "output", string(output1), "branch", branchName)
+			ctx.GetLogger().Error("Error fetching remote branch", "error", err1, "output", redactGitCredentials(string(output1)), "branch", branchName)
 			return "", err1
 		}
 		cmd2 := exec.Command("git", "checkout", "-b", branchName, "origin/"+branchName)
@@ -273,15 +273,15 @@ func commitCodeForEventGitLab(ctx AccountAdapterContext, dir string, request App
 		cmd1.Dir = dir
 		output1, err1 := cmd1.Output()
 		if err1 != nil {
-			ctx.GetLogger().Error("Error fetching remote branch", "error", err, "output", string(output1), "branch", branchName)
-			return "", err
+			ctx.GetLogger().Error("Error fetching remote branch", "error", err1, "output", redactGitCredentials(string(output1)), "branch", branchName)
+			return "", err1
 		}
 		cmd2 := exec.Command("git", "checkout", "-b", branchName, "origin/"+branchName)
 		cmd2.Dir = dir
 		output2, err2 := cmd2.Output()
 		if err2 != nil {
-			ctx.GetLogger().Error("Error checking out remote branch", "error", err, "output", string(output2), "branch", branchName)
-			return "", err
+			ctx.GetLogger().Error("Error checking out remote branch", "error", err2, "output", string(output2), "branch", branchName)
+			return "", err2
 		}
 	} else {
 		cmd := exec.Command("git", "checkout", "-b", branchName)
@@ -367,7 +367,7 @@ func raiseMrForCodeRepo(ctx AccountAdapterContext, dir string, branchName string
 	cmd.Dir = dir
 	output, err := cmd.Output()
 	if err != nil {
-		ctx.GetLogger().Error("Error pushing branch", "error", err, "output", string(output))
+		ctx.GetLogger().Error("Error pushing branch", "error", err, "output", redactGitCredentials(string(output)))
 		return "", err
 	}
 
