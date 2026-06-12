@@ -1712,7 +1712,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                           data={taskOutput.output}
                           defaultExpanded={2}
                           maxHeight='none'
-                          fontSize='10px'
+                          fontSize={ds.text.caption}
                           bare
                           showCopy
                           templatePrefix={task.id ? `Tasks['${task.id}'].output` : undefined}
@@ -1824,7 +1824,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                 data={result.output}
                 defaultExpanded={2}
                 maxHeight='none'
-                fontSize='10px'
+                fontSize={ds.text.caption}
                 bare
                 showCopy
                 templatePrefix={selectedNode?.id ? `Tasks['${selectedNode.data?.taskConfig?.id || selectedNode.id}'].output` : undefined}

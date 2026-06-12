@@ -112,7 +112,7 @@ export const FeatureCarousel: React.FC<FeatureCarouselProps> = ({ slides }) => {
             {/* Slide Title */}
             <Typography
               sx={{
-                fontSize: { md: '18px', lg: '21px', xl: '24px' },
+                fontSize: { md: ds.space.mul(0, 9), lg: ds.text.heading, xl: ds.space.mul(0, 12) },
                 fontWeight: 'var(--ds-font-weight-medium)',
                 color: 'var(--ds-brand-500)',
                 textAlign: 'center',
@@ -190,7 +190,7 @@ export const FeatureCarousel: React.FC<FeatureCarouselProps> = ({ slides }) => {
           <Box key={index} sx={{ display: 'flex', flexDirection: 'row', alignItems: 'flex-end', gap: { md: '2px', lg: '3px', xl: '4px' } }}>
             <Typography
               sx={{
-                fontSize: { md: '16px', lg: '19px', xl: '22px' },
+                fontSize: { md: ds.text.title, lg: ds.text.heading, xl: ds.space.mul(0, 11) },
                 fontWeight: 'var(--ds-font-weight-semibold)',
                 color: 'var(--ds-brand-500)',
                 lineHeight: { md: '22px', lg: '25px', xl: '28px' },
@@ -201,7 +201,7 @@ export const FeatureCarousel: React.FC<FeatureCarouselProps> = ({ slides }) => {
             </Typography>
             <Typography
               sx={{
-                fontSize: { md: '14px', lg: '16px', xl: '18px' },
+                fontSize: { md: ds.text.bodyLg, lg: ds.text.title, xl: ds.space.mul(0, 9) },
                 lineHeight: { md: '20px', lg: '22px', xl: '24px' },
                 color: 'rgba(26, 54, 93, 0.7)',
                 fontFamily: 'Roboto, sans-serif',
