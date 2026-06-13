@@ -666,6 +666,11 @@ func (m *MockWorkflowStore) Update(ctx context.Context, tenantID, accountID, id 
 	return args.Error(0)
 }
 
+func (m *MockWorkflowStore) UpdateInternal(ctx context.Context, tenantID, accountID, id string, wf model.Workflow) error {
+	args := m.Called(ctx, tenantID, accountID, id, wf)
+	return args.Error(0)
+}
+
 func (m *MockWorkflowStore) Delete(ctx context.Context, tenantID, accountID, id string) error {
 	args := m.Called(ctx, tenantID, accountID, id)
 	return args.Error(0)
@@ -930,7 +935,9 @@ func TestWebhookTriggers(t *testing.T) {
 				assert.Equal(t, "wf-"+savedWf.ID+"-my-hook", savedWf.Definition.Triggers[0].Internal.Name)
 			})
 
-		mockStore.On("Update", mock.Anything, "test-tenant", "test-account", mock.Anything, mock.Anything).Return(nil)
+		// CreateWorkflow injects the generated webhook secret via the internal
+		// (non-audit) persist path, so expect UpdateInternal, not Update.
+		mockStore.On("UpdateInternal", mock.Anything, "test-tenant", "test-account", mock.Anything, mock.Anything).Return(nil)
 
 		// Expect Describe to return NotFound (simulating no existing schedule)
 		// Use mock.Anything for the scheduleID string

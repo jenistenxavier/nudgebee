@@ -622,8 +622,10 @@ func (s *Service) handleWorkflowTrigger(ctx *security.RequestContext, id, tenant
 
 				// Update workflow in DB to persist the secret. This is an
 				// internal touch-up (webhook secret injection), not a user
-				// publish, so we only write the draft — no version row.
-				err = s.store.Update(ctx.GetContext(), tenantId, accountId, id, *wf)
+				// publish, so we only write the draft — no version row — and
+				// UpdateInternal leaves updated_by/updated_at untouched so the
+				// triggering request's identity doesn't corrupt the edit trail.
+				err = s.store.UpdateInternal(ctx.GetContext(), tenantId, accountId, id, *wf)
 				if err != nil {
 					return nil, "", fmt.Errorf("failed to update workflow with webhook secret: %w", err)
 				}

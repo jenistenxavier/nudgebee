@@ -36,6 +36,12 @@ type WorkflowStore interface {
 	// literal name appears in the field.
 	ListCallers(ctx context.Context, tenantID, accountID, calleeName string) ([]WorkflowCaller, error)
 	Update(ctx context.Context, tenantID, accountID, id string, wf Workflow) error
+	// UpdateInternal persists a workflow's definition WITHOUT touching the audit
+	// columns (updated_by / updated_at). Use for internal touch-ups that are not
+	// user edits — e.g. injecting a generated webhook secret during trigger
+	// registration — so the "last edited by / at" trail isn't corrupted by the
+	// triggering request's identity. Genuine user edits must use Update.
+	UpdateInternal(ctx context.Context, tenantID, accountID, id string, wf Workflow) error
 	Delete(ctx context.Context, tenantID, accountID, id string) error
 	UpdateWorkflowStatus(ctx context.Context, tenantID, accountID, id string, status WorkflowStatus) error
 	GetState(ctx context.Context, workflowID string) ([]WorkflowStateItem, error)

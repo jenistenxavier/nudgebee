@@ -138,6 +138,9 @@ func (m *MockWorkflowStore) ListCallers(ctx context.Context, tenantID, accountID
 func (m *MockWorkflowStore) Update(ctx context.Context, tenantID, accountID, id string, wf model.Workflow) error {
 	return nil
 }
+func (m *MockWorkflowStore) UpdateInternal(ctx context.Context, tenantID, accountID, id string, wf model.Workflow) error {
+	return nil
+}
 func (m *MockWorkflowStore) Delete(ctx context.Context, tenantID, accountID, id string) error {
 	return nil
 }

@@ -828,7 +828,14 @@ func (s *WorkflowDao) DeleteExpiredState(ctx context.Context, limit int) (int64,
 	return count, nil
 }
 
-func (s *WorkflowDao) Update(ctx context.Context, tenantID, accountID, id string, wf model.Workflow) error {
+// Update is the genuine user-edit persist path: it writes the definition AND
+// stamps the audit columns (updated_by, updated_at). Named return is required so
+// the deferred tx.Commit() error actually propagates to the caller.
+func (s *WorkflowDao) Update(ctx context.Context, tenantID, accountID, id string, wf model.Workflow) (err error) {
+	if tenantID == "" || accountID == "" {
+		return fmt.Errorf("tenantID and accountID must not be empty")
+	}
+
 	wfBytes, err := json.Marshal(wf.Definition)
 	if err != nil {
 		return fmt.Errorf("failed to marshal workflow: %w", err)
@@ -855,12 +862,62 @@ func (s *WorkflowDao) Update(ctx context.Context, tenantID, accountID, id string
 		}
 	}()
 
+	// updated_at is set explicitly here (not by a DB trigger) so only genuine
+	// user edits bump it; internal/system writes leave it untouched.
 	query := `
 		UPDATE workflows
-		SET name = $1, definition = $2, tags = $3, status = $4, last_execution_status = $5, updated_by = $6
+		SET name = $1, definition = $2, tags = $3, status = $4, last_execution_status = $5, updated_by = $6, updated_at = now()
 		WHERE id = $7 AND tenant_id = $8 AND account_id = $9
 	`
 	_, err = tx.ExecContext(ctx, query, wf.Name, wfBytes, tagBytes, wf.Status, wf.LastExecutionStatus, wf.UpdatedBy, id, tenantID, accountID)
+	if err != nil {
+		return fmt.Errorf("failed to update workflow: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateInternal persists a workflow's definition WITHOUT touching the audit
+// columns (updated_by / updated_at). Used for internal touch-ups that are not
+// user edits (e.g. injecting a generated webhook secret during trigger
+// registration) so the "last edited by / at" trail is preserved.
+func (s *WorkflowDao) UpdateInternal(ctx context.Context, tenantID, accountID, id string, wf model.Workflow) (err error) {
+	if tenantID == "" || accountID == "" {
+		return fmt.Errorf("tenantID and accountID must not be empty")
+	}
+
+	wfBytes, err := json.Marshal(wf.Definition)
+	if err != nil {
+		return fmt.Errorf("failed to marshal workflow: %w", err)
+	}
+
+	tagBytes, err := json.Marshal(wf.Tags)
+	if err != nil {
+		log.Printf("failed to marshal tags: %v", err)
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			log.Printf("panic in UpdateInternal: %v", p)
+			err = fmt.Errorf("failed to update workflow due to an unexpected error")
+		} else if err != nil {
+			_ = tx.Rollback()
+		} else {
+			err = tx.Commit()
+		}
+	}()
+
+	query := `
+		UPDATE workflows
+		SET name = $1, definition = $2, tags = $3, status = $4, last_execution_status = $5
+		WHERE id = $6 AND tenant_id = $7 AND account_id = $8
+	`
+	_, err = tx.ExecContext(ctx, query, wf.Name, wfBytes, tagBytes, wf.Status, wf.LastExecutionStatus, id, tenantID, accountID)
 	if err != nil {
 		return fmt.Errorf("failed to update workflow: %w", err)
 	}
