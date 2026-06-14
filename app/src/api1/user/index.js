@@ -170,6 +170,56 @@ mutation DeleteUserToken($name: String!) {
 }
 `;
 
+const LIST_INTEGRATION_ACCOUNTS = `
+query ListIntegrationAccounts($user_id: String!) {
+  users_list_integration_accounts(user_id: $user_id) {
+    id
+    account_id
+    account_name
+    integration_type
+    external_user_id
+    username
+    email
+    display_name
+    mapped_user_id
+    mapped_via
+  }
+}
+`;
+
+const LIST_UNMAPPED_ACCOUNTS = `
+query ListUnmappedAccounts($integration_type: String) {
+  users_list_unmapped_accounts(integration_type: $integration_type) {
+    id
+    account_id
+    account_name
+    integration_type
+    external_user_id
+    username
+    email
+    display_name
+  }
+}
+`;
+
+const CREATE_ACCOUNT_MAPPING = `
+mutation CreateAccountMapping($mapping_id: String!, $user_id: String!) {
+  users_create_account_mapping(mapping_id: $mapping_id, user_id: $user_id) {
+    id
+    status
+  }
+}
+`;
+
+const DELETE_ACCOUNT_MAPPING = `
+mutation DeleteAccountMapping($mapping_id: String!) {
+  users_delete_account_mapping(mapping_id: $mapping_id) {
+    id
+    status
+  }
+}
+`;
+
 const apiUser = {
   listK8sNamespaces: async function () {
     try {
@@ -321,6 +371,30 @@ const apiUser = {
     return {
       data: response,
     };
+  },
+  listIntegrationAccounts: async function (userId) {
+    try {
+      const response = await queryGraphQL(LIST_INTEGRATION_ACCOUNTS, 'ListIntegrationAccounts', { user_id: userId });
+      return response?.data?.data?.users_list_integration_accounts ?? [];
+    } catch {
+      return [];
+    }
+  },
+  listUnmappedAccounts: async function (integrationType) {
+    try {
+      const response = await queryGraphQL(LIST_UNMAPPED_ACCOUNTS, 'ListUnmappedAccounts', { integration_type: integrationType ?? null });
+      return response?.data?.data?.users_list_unmapped_accounts ?? [];
+    } catch {
+      return [];
+    }
+  },
+  createAccountMapping: async function ({ mappingId, userId }) {
+    const response = await queryGraphQL(CREATE_ACCOUNT_MAPPING, 'CreateAccountMapping', { mapping_id: mappingId, user_id: userId });
+    return response?.data?.data?.users_create_account_mapping;
+  },
+  deleteAccountMapping: async function ({ mappingId }) {
+    const response = await queryGraphQL(DELETE_ACCOUNT_MAPPING, 'DeleteAccountMapping', { mapping_id: mappingId });
+    return response?.data?.data?.users_delete_account_mapping;
   },
   listUserTenants: async function (username) {
     let userResponse = await queryGraphQL(USER_TENANTS, 'UserTenant', { username: username });
