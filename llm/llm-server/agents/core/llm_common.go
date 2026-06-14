@@ -259,6 +259,13 @@ func GetLLMNumTokensFromMessages(context *security.RequestContext, messages []ll
 	return numTokens
 }
 
+// newLLMModel constructs the llms.Model used by GenerateAndTrackLLMContent.
+// It is a package-level seam: production points it at GetLLMModel, while tests
+// override it to inject a fake llms.Model and exercise the generation path
+// (summarization, planners, agents, …) without real provider credentials or
+// network calls. Behaviour is identical to calling GetLLMModel directly.
+var newLLMModel = GetLLMModel
+
 // GenerateAndTrackLLMContent generates content using an LLM and tracks token usage
 func GenerateAndTrackLLMContent(ctx *security.RequestContext, userId string, accountId string, conversationId string, messageId string, agentId string, trackContent bool, promptMessages []llms.MessageContent, cleanupMarkdown bool, options ...llms.CallOption) (*llms.ContentResponse, error) {
 	t0 := time.Now()
@@ -290,8 +297,9 @@ func GenerateAndTrackLLMContent(ctx *security.RequestContext, userId string, acc
 	provider := res.Provider
 	model := res.Model
 
-	// Step 2: Initialize LLM using the resolution context
-	llm, err := GetLLMModel(provider, model, agentName, agentName != "", accountId, res)
+	// Step 2: Initialize LLM using the resolution context (newLLMModel is a test
+	// seam; in production it is GetLLMModel).
+	llm, err := newLLMModel(provider, model, agentName, agentName != "", accountId, res)
 	if err != nil {
 		ctx.GetLogger().Error("Failed to initialize LLM model", "error", err, "agentName", agentName, "provider", provider, "model", model)
 		return nil, ErrLlmUnableToGenerate(err)
@@ -2420,7 +2428,14 @@ func recordTokenUsageFailure(
 
 	bgCtx := security.NewRequestContext(context.Background(), ctx.GetSecurityContext(), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
 	insertFn := func() {
-		if err := GetConversationDao().InsertTokenUsage(record); err != nil {
+		// Best-effort: skip if the DAO is unavailable rather than panicking this
+		// background goroutine on a nil interface (see trackTokenUsage).
+		dao := GetConversationDao()
+		if dao == nil {
+			bgCtx.GetLogger().Debug("recordTokenUsageFailure: skipping — conversation DAO unavailable")
+			return
+		}
+		if err := dao.InsertTokenUsage(record); err != nil {
 			bgCtx.GetLogger().Error("recordTokenUsageFailure: failed to insert failure row", "error", err,
 				"agentName", agentName, "messageId", messageId, "model", model)
 		}
@@ -2581,15 +2596,25 @@ func trackTokenUsage(
 		}
 	}
 
+	// Best-effort tracking: if the conversation DAO is unavailable (e.g. the
+	// metastore DB is down, or in hermetic tests), skip silently rather than
+	// dereferencing a nil interface and panicking this background goroutine —
+	// which would otherwise crash the process.
+	dao := GetConversationDao()
+	if dao == nil {
+		ctx.GetLogger().Debug("llm: skipping token usage tracking — conversation DAO unavailable")
+		return
+	}
+
 	// Insert into new token usage table
-	err := GetConversationDao().InsertTokenUsage(record)
+	err := dao.InsertTokenUsage(record)
 	if err != nil {
 		ctx.GetLogger().Error("llm: unable to insert token usage", "error", err)
 	}
 
 	// Update thought content on the agent record (if applicable)
 	if agentUUID != nil && trackContent && content != "" {
-		if err := GetConversationDao().UpdateConversationAgentThought(*agentUUID, content); err != nil {
+		if err := dao.UpdateConversationAgentThought(*agentUUID, content); err != nil {
 			ctx.GetLogger().Error("llm: unable to update agent thought", "error", err)
 		}
 	}
