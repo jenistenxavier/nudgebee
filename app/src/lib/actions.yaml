@@ -504,6 +504,102 @@ actions:
       - role: account_admin
       - role: tenant_admin_readonly
       - role: tenant_admin
+  - name: ai_get_conversation_tree
+    definition:
+      kind: synchronous
+      handler: '{{LLM_SERVER_URL}}/v1/completions/conversation-tree'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: LLM_SERVER_TOKEN
+      timeout: 120
+    permissions:
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+  - name: ai_get_conversation_agent
+    definition:
+      kind: synchronous
+      handler: '{{LLM_SERVER_URL}}/v1/completions/conversation-agent'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: LLM_SERVER_TOKEN
+      timeout: 120
+    permissions:
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+  - name: ai_list_conversation_costs
+    definition:
+      kind: synchronous
+      handler: '{{LLM_SERVER_URL}}/v1/completions/usage-conversations'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: LLM_SERVER_TOKEN
+      timeout: 60
+    permissions:
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+  - name: ai_list_agent_costs
+    definition:
+      kind: synchronous
+      handler: '{{LLM_SERVER_URL}}/v1/completions/usage-agents'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: LLM_SERVER_TOKEN
+      timeout: 60
+    permissions:
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+  - name: ai_get_usage_filters
+    definition:
+      kind: synchronous
+      handler: '{{LLM_SERVER_URL}}/v1/completions/usage-filters'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: LLM_SERVER_TOKEN
+      timeout: 60
+    permissions:
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+  - name: ai_aggregate_usage_metrics
+    definition:
+      kind: synchronous
+      handler: '{{LLM_SERVER_URL}}/v1/completions/usage-metrics'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: LLM_SERVER_TOKEN
+      timeout: 60
+    permissions:
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
+      - role: tenant_admin_readonly
+      - role: tenant_admin
   - name: ai_get_gc
     definition:
       kind: "synchronous"

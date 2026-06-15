@@ -1,0 +1,1466 @@
+/**
+ * Screen 3 — Conversation Detail (spec §6). Where did this conversation's money
+ * and time go? Header summary card, then a tabbed body:
+ *   - Sub-tasks & model calls — step → model-call drill-down
+ *   - Conversation metrics    — legacy usage-metrics panel
+ *   - Details                 — trace waterfall + cost composition
+ */
+import * as React from 'react';
+import { Box, CircularProgress, Drawer } from '@mui/material';
+import CloseIcon from '@mui/icons-material/Close';
+import FormatListBulletedIcon from '@mui/icons-material/FormatListBulleted';
+import PaidOutlinedIcon from '@mui/icons-material/PaidOutlined';
+import TimerOutlinedIcon from '@mui/icons-material/TimerOutlined';
+import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
+import OpenInNewOutlinedIcon from '@mui/icons-material/OpenInNewOutlined';
+import { Button } from '@ui/Button';
+import { Banner } from '@ui/Banner';
+import { Card } from '@ui/Card';
+import { CostCallout } from '@ui/CostCallout';
+import { Chip } from '@ui/Chip';
+import { Label } from '@ui/Label';
+import { ToggleGroup } from '@ui/ToggleGroup';
+import { EmptyState } from '@ui/EmptyState';
+import CustomTable2 from '@shared/tables/CustomTable';
+import CustomTabs from '@shared/navigation/Tabs';
+import TraceWaterfall from '../components/TraceWaterfall';
+import CostTreemap from '../components/CostTreemap';
+import ConversationUsagePanel from '../components/ConversationUsagePanel';
+import { MODEL_HUE } from '../components/palette';
+import HeaderLabel from '../components/HeaderLabel';
+import { fmtCost, fmtDuration, fmtTokens, runModelBreakdown, triggerLabel } from '../format';
+import { adaptAgentDetail, type AgentDetail } from '../adapt';
+import {
+  getConversationAgent,
+  generateConversationOptimization,
+  getStoredConversationOptimization,
+  type ConversationUsageSummary,
+  type ConversationOptimization,
+  type OptFinding,
+  type OptExemplar,
+} from '@api1/ai-cost';
+import type { ModelCall, Run, RunStatus, Step, StepToolCall } from '../types';
+
+interface ConversationDetailViewProps {
+  run: Run | null;
+  loading: boolean;
+  error: string | null;
+  /** Legacy per-conversation summary for the "basic summary" panel (may be null). */
+  usage?: ConversationUsageSummary | null;
+  /** session_id of the open conversation — needed to lazy-fetch per-agent detail. */
+  conversationId?: string;
+  /** account scope for the per-agent detail fetch. */
+  accountId?: string;
+  onBack: () => void;
+  /** Hide the "← Back to conversations" bar (e.g. when shown inside a Modal that has its own close). */
+  hideBackBar?: boolean;
+  /** When set (cross-link from the Agents tab), focus the Sub-tasks tab on this agent invocation. */
+  initialAgentId?: string;
+  /** Which tab to open on (default 'subtasks'). The "Analyse" action opens 'optimize'. */
+  initialTab?: 'subtasks' | 'optimize';
+  /** When opened via "Analyse": auto-run the optimization if there's no cached result. */
+  autoRunOptimize?: boolean;
+}
+
+type DetailTabId = 'subtasks' | 'metrics' | 'details' | 'optimize';
+
+function BackBar({ onBack }: { onBack: () => void }) {
+  return (
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)' }}>
+      <Button tone='link' size='sm' onClick={onBack} id='cost-detail-back'>
+        ← Back to conversations
+      </Button>
+    </Box>
+  );
+}
+
+const STATUS_TONE: Record<RunStatus, 'success' | 'critical' | 'warning' | 'neutral'> = {
+  completed: 'success',
+  failed: 'critical',
+  'awaiting-approval': 'warning',
+  cancelled: 'neutral',
+};
+
+function SummaryStat({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 110 }}>
+      <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>{label}</Box>
+      <Box sx={{ fontSize: 'var(--ds-text-body)', color: 'var(--ds-gray-700)', fontWeight: 'var(--ds-font-weight-medium)' }}>{children}</Box>
+    </Box>
+  );
+}
+
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <Box
+      sx={{ fontSize: 'var(--ds-text-body-lg)', fontWeight: 'var(--ds-font-weight-semibold)', color: 'var(--ds-gray-700)', mb: 'var(--ds-space-3)' }}
+    >
+      {children}
+    </Box>
+  );
+}
+
+/** Latency vs wait-time split bar (spec §6a / §2.2). */
+function TimeSplitBar({ run }: { run: Run }) {
+  const toolTime = run.steps.reduce((a, s) => a + s.toolTimeMs, 0);
+  const overhead = Math.max(0, run.wallClockMs - run.totalModelLatencyMs - toolTime - run.totalWaitTimeMs);
+  const segs = [
+    { label: 'Model latency', ms: run.totalModelLatencyMs, color: 'var(--ds-blue-400)' },
+    { label: 'Tool time', ms: toolTime, color: 'var(--ds-gray-400)' },
+    { label: 'Wait (approval)', ms: run.totalWaitTimeMs, color: 'var(--ds-amber-400)' },
+    { label: 'Overhead', ms: overhead, color: 'var(--ds-gray-300)' },
+  ].filter((s) => s.ms > 0);
+  const total = run.wallClockMs || 1;
+
+  return (
+    <Box>
+      <Box sx={{ display: 'flex', height: 14, borderRadius: 'var(--ds-radius-pill)', overflow: 'hidden', border: '1px solid var(--ds-gray-200)' }}>
+        {segs.map((s) => (
+          <Box key={s.label} sx={{ width: `${(s.ms / total) * 100}%`, backgroundColor: s.color }} title={`${s.label} · ${fmtDuration(s.ms)}`} />
+        ))}
+      </Box>
+      <Box
+        sx={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 'var(--ds-space-3)',
+          mt: 'var(--ds-space-2)',
+          fontSize: 'var(--ds-text-caption)',
+          color: 'var(--ds-gray-600)',
+        }}
+      >
+        {segs.map((s) => (
+          <Box key={s.label} sx={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
+            <Box sx={{ width: 9, height: 9, borderRadius: 2, backgroundColor: s.color }} />
+            {s.label} · {fmtDuration(s.ms)}
+          </Box>
+        ))}
+      </Box>
+    </Box>
+  );
+}
+
+const cellNum = { fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)', fontVariantNumeric: 'tabular-nums' } as const;
+
+/** Hover tooltip text justifying a model call's cost from its component split. */
+function costBreakdownTitle(c: ModelCall): string | undefined {
+  const bd = c.costBreakdown;
+  if (!bd?.components?.length) return undefined;
+  const lines = bd.components.map((x) => `${x.kind}: ${fmtTokens(x.tokens)} tok → $${x.cost_usd.toFixed(4)}`);
+  return `Cost breakdown (tier: ${bd.tier})\n${lines.join('\n')}`;
+}
+
+// Header name → sortable value for the model-call table.
+const MODEL_CALL_SORT: Record<string, (c: ModelCall) => number | string> = {
+  Model: (c) => c.model,
+  'In token': (c) => c.inputTokens,
+  'Out token': (c) => c.outputTokens,
+  Cached: (c) => c.cachedInputTokens ?? 0,
+  'Thinking token': (c) => c.thinkingTokens ?? 0,
+  TTFT: (c) => c.ttftMs ?? 0,
+  Cost: (c) => c.totalCost,
+  Latency: (c) => c.latencyMs,
+};
+
+/** The model-call table (expanded-row content) — one row per LLM call for the agent. */
+function ModelCallsTable({ calls }: { calls: ModelCall[] }) {
+  const [sort, setSort] = React.useState<{ name: string; order: 'asc' | 'desc' }>({ name: '', order: 'desc' });
+  const rows = React.useMemo(() => {
+    const val = MODEL_CALL_SORT[sort.name];
+    if (!val) return calls;
+    const sorted = [...calls].sort((a, b) => {
+      const av = val(a);
+      const bv = val(b);
+      return typeof av === 'string' ? String(av).localeCompare(String(bv)) : (av as number) - (bv as number);
+    });
+    return sort.order === 'desc' ? sorted.reverse() : sorted;
+  }, [calls, sort]);
+
+  if (!calls.length) {
+    return <Box sx={{ p: 'var(--ds-space-3)', fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>No model calls for this agent.</Box>;
+  }
+  const headers = [
+    { name: 'Model', width: '20%', sortEnabled: true },
+    {
+      name: 'In token',
+      width: '11%',
+      sortEnabled: true,
+      component: <HeaderLabel label='In token' info='Input (prompt) tokens sent to the model.' />,
+    },
+    { name: 'Out token', width: '11%', sortEnabled: true, component: <HeaderLabel label='Out token' info='Output (generated) tokens.' /> },
+    {
+      name: 'Cached',
+      width: '11%',
+      sortEnabled: true,
+      component: <HeaderLabel label='Cached' info='Input tokens served from cache (cheaper than fresh input).' />,
+    },
+    {
+      name: 'Thinking token',
+      width: '14%',
+      sortEnabled: true,
+      component: <HeaderLabel label='Thinking token' info='Reasoning tokens the model spent before answering.' />,
+    },
+    { name: 'TTFT', width: '9%', sortEnabled: true, component: <HeaderLabel label='TTFT' info='Time to first token (ms).' /> },
+    {
+      name: 'Cost',
+      width: '10%',
+      sortEnabled: true,
+      component: <HeaderLabel label='Cost' info='Call cost. Hover the value for the per-component breakdown.' />,
+    },
+    { name: 'Latency', width: '9%', sortEnabled: true },
+    { name: 'Flags', width: '9%', component: <HeaderLabel label='Flags' info='cached · retry · error indicators for the call.' /> },
+  ];
+  const tableData = rows.map((c) => [
+    { component: <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)' }}>{c.model}</Box> },
+    { component: <Box sx={cellNum}>{fmtTokens(c.inputTokens)}</Box> },
+    { component: <Box sx={cellNum}>{fmtTokens(c.outputTokens)}</Box> },
+    {
+      component: (
+        <Box sx={{ ...cellNum, color: (c.cachedInputTokens ?? 0) > 0 ? 'var(--ds-green-700)' : 'var(--ds-gray-400)' }}>
+          {c.cachedInputTokens ? fmtTokens(c.cachedInputTokens) : '—'}
+        </Box>
+      ),
+    },
+    { component: <Box sx={cellNum}>{c.thinkingTokens ? `${fmtTokens(c.thinkingTokens)} tokens` : '—'}</Box> },
+    { component: <Box sx={cellNum}>{c.ttftMs ? `${Math.round(c.ttftMs)}ms` : '—'}</Box> },
+    {
+      component: (
+        <Box component='span' title={costBreakdownTitle(c)} sx={{ display: 'inline-flex' }}>
+          <CostCallout value={c.totalCost} size='sm' tone='neutral' fractionDigits={2} />
+        </Box>
+      ),
+    },
+    { component: <Box sx={cellNum}>{fmtDuration(c.latencyMs)}</Box> },
+    {
+      component: (
+        <Box sx={{ display: 'inline-flex', gap: 'var(--ds-space-1)' }}>
+          {c.cached && (
+            <Chip size='2xs' variant='tag' tone='success'>
+              cached
+            </Chip>
+          )}
+          {c.retry && (
+            <Chip size='2xs' variant='tag' tone='warning'>
+              retry
+            </Chip>
+          )}
+          {c.error && (
+            <Box component='span' title={c.errorMessage || 'Request failed'} sx={{ display: 'inline-flex' }}>
+              <Chip size='2xs' variant='tag' tone='critical'>
+                error
+              </Chip>
+            </Box>
+          )}
+          {!c.cached && !c.retry && !c.error && (
+            <Box component='span' sx={{ color: 'var(--ds-gray-400)' }}>
+              —
+            </Box>
+          )}
+        </Box>
+      ),
+    },
+  ]);
+  return (
+    <CustomTable2 headers={headers} tableData={tableData} sort={sort} onSortChange={(s: { name: string; order: 'asc' | 'desc' }) => setSort(s)} />
+  );
+}
+
+/** The tool-call table (expanded-row content) — the actual tools the agent ran. */
+function ToolCallsTable({ tools }: { tools: StepToolCall[] }) {
+  if (!tools.length) {
+    return <Box sx={{ p: 'var(--ds-space-3)', fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>This agent made no tool calls.</Box>;
+  }
+  const headers = [
+    { name: 'Tool', width: '15%' },
+    { name: 'Parameters', width: '30%' },
+    { name: 'Response', width: '34%' },
+    { name: 'Status', width: '11%' },
+    { name: 'Duration', width: '10%' },
+  ];
+  // Wrapped, scrollable cells so long params/responses stay readable (no truncation).
+  const wrap = { fontSize: 'var(--ds-text-caption)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 140, overflow: 'auto' } as const;
+  const empty = (
+    <Box component='span' sx={{ color: 'var(--ds-gray-400)' }}>
+      —
+    </Box>
+  );
+  const tableData = tools.map((t) => [
+    {
+      component: (
+        <Box sx={{ fontSize: 'var(--ds-text-caption)', color: t.isError ? 'var(--ds-red-700)' : 'var(--ds-gray-700)', wordBreak: 'break-word' }}>
+          {t.name}
+        </Box>
+      ),
+    },
+    { component: t.parameters ? <Box sx={{ ...wrap, color: 'var(--ds-gray-600)' }}>{t.parameters}</Box> : empty },
+    {
+      // Response body — for failed calls this is the error/output.
+      component: t.response ? <Box sx={{ ...wrap, color: t.isError ? 'var(--ds-red-700)' : 'var(--ds-gray-600)' }}>{t.response}</Box> : empty,
+    },
+    {
+      component: t.status ? (
+        <Chip
+          size='2xs'
+          variant='tag'
+          tone={t.isError || /fail|error|terminated/i.test(t.status) ? 'critical' : /success|ok|complete/i.test(t.status) ? 'success' : 'neutral'}
+        >
+          {t.status}
+        </Chip>
+      ) : (
+        empty
+      ),
+    },
+    { component: <Box sx={cellNum}>{fmtDuration(t.durationMs)}</Box> },
+  ]);
+  return <CustomTable2 headers={headers} tableData={tableData} />;
+}
+
+/** One labelled execution block (query / thought / response) — scrolls if long. */
+function ExecBlock({ label, text }: { label: string; text: string }) {
+  if (!text) return null;
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+      <Box sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-semibold)', color: 'var(--ds-gray-600)' }}>{label}</Box>
+      <Box
+        sx={{
+          fontSize: 'var(--ds-text-caption)',
+          color: 'var(--ds-gray-700)',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+          // Grows with content up to ~420px; long text scrolls. Drag the bottom-right
+          // handle to resize, so short snippets stay compact and long ones expand.
+          maxHeight: 420,
+          overflow: 'auto',
+          resize: 'vertical',
+          backgroundColor: 'var(--ds-background-100)',
+          border: '1px solid var(--ds-gray-200)',
+          borderRadius: 'var(--ds-radius-md)',
+          p: 'var(--ds-space-2)',
+        }}
+      >
+        {text}
+      </Box>
+    </Box>
+  );
+}
+
+const EMPTY_DETAIL: AgentDetail = { query: '', thought: '', response: '', calls: [], tools: [] };
+
+// FocusedAgentPanel renders one agent invocation's full detail at the top of the
+// Sub-tasks tab — the deep-link target when you click an agent in the Agents tab.
+// It fetches by agent_id directly (the invocation may be nested, not a top-level
+// step), so it doesn't depend on CustomTable2 row expansion.
+function FocusedAgentPanel({ conversationId, accountId, agentId }: { conversationId?: string; accountId?: string; agentId: string }) {
+  const [state, setState] = React.useState<{ loading: boolean; error: string | null; data: AgentDetail | null }>({
+    loading: false,
+    error: null,
+    data: null,
+  });
+
+  React.useEffect(() => {
+    if (!conversationId || !accountId || !agentId) return;
+    let cancelled = false;
+    setState({ loading: true, error: null, data: null });
+    getConversationAgent({ conversationId, accountId, agentId })
+      .then((d) => {
+        if (!cancelled) setState({ loading: false, error: null, data: d ? adaptAgentDetail(d, conversationId) : EMPTY_DETAIL });
+      })
+      .catch((e) => {
+        if (!cancelled) setState({ loading: false, error: e instanceof Error ? e.message : 'Failed to load agent', data: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId, accountId, agentId]);
+
+  return (
+    <Card>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)', mb: 'var(--ds-space-2)' }}>
+        <SectionTitle>Focused agent</SectionTitle>
+        <Chip size='2xs' variant='tag' hue='violet'>
+          from Agents tab
+        </Chip>
+      </Box>
+      {state.loading && (
+        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 120 }}>
+          <CircularProgress size={22} />
+        </Box>
+      )}
+      {state.error && <Banner tone='critical' title='Could not load agent' message={state.error} />}
+      {state.data && (
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)' }}>
+          <ExecBlock label='Query' text={state.data.query} />
+          <ExecBlock label='Thought' text={state.data.thought} />
+          <ExecBlock label='Response' text={state.data.response} />
+          <Box>
+            <Box
+              sx={{
+                fontSize: 'var(--ds-text-small)',
+                fontWeight: 'var(--ds-font-weight-semibold)',
+                color: 'var(--ds-gray-600)',
+                mb: 'var(--ds-space-1)',
+              }}
+            >
+              Model calls
+            </Box>
+            <ModelCallsTable calls={state.data.calls} />
+          </Box>
+          {state.data.tools && state.data.tools.length > 0 && (
+            <Box>
+              <Box
+                sx={{
+                  fontSize: 'var(--ds-text-small)',
+                  fontWeight: 'var(--ds-font-weight-semibold)',
+                  color: 'var(--ds-gray-600)',
+                  mb: 'var(--ds-space-1)',
+                }}
+              >
+                Tool calls
+              </Box>
+              <ToolCallsTable tools={state.data.tools} />
+            </Box>
+          )}
+        </Box>
+      )}
+    </Card>
+  );
+}
+
+// Module-level cache so the three expand tabs (mounted together when a row opens)
+// share ONE `ai_get_conversation_agent` fetch per agent instead of three.
+const agentDetailCache = new Map<string, AgentDetail>();
+const agentDetailInflight = new Map<string, Promise<AgentDetail>>();
+
+interface AgentDetailState {
+  loading: boolean;
+  error: string | null;
+  data: AgentDetail;
+}
+
+function useAgentDetail(step: Step, conversationId?: string, accountId?: string): AgentDetailState {
+  const canFetch = !!conversationId && !!accountId;
+  const key = `${conversationId}|${accountId}|${step.stepId}`;
+  const [state, setState] = React.useState<AgentDetailState>(() => {
+    if (canFetch && agentDetailCache.has(key)) return { loading: false, error: null, data: agentDetailCache.get(key)! };
+    return { loading: canFetch, error: null, data: { ...EMPTY_DETAIL, calls: step.calls, tools: step.tools ?? [] } };
+  });
+
+  React.useEffect(() => {
+    if (!canFetch) return;
+    if (agentDetailCache.has(key)) {
+      setState({ loading: false, error: null, data: agentDetailCache.get(key)! });
+      return;
+    }
+    let cancelled = false;
+    setState((s) => ({ ...s, loading: true, error: null }));
+    let p = agentDetailInflight.get(key);
+    if (!p) {
+      p = getConversationAgent({ conversationId: conversationId!, accountId: accountId!, agentId: step.stepId })
+        .then((d) => {
+          const ad = d ? adaptAgentDetail(d, step.runId) : EMPTY_DETAIL;
+          agentDetailCache.set(key, ad);
+          return ad;
+        })
+        .finally(() => agentDetailInflight.delete(key));
+      agentDetailInflight.set(key, p);
+    }
+    p.then((ad) => !cancelled && setState({ loading: false, error: null, data: ad })).catch(
+      (e) => !cancelled && setState((s) => ({ loading: false, error: e instanceof Error ? e.message : 'Failed to load agent detail', data: s.data }))
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canFetch, key]);
+
+  return state;
+}
+
+interface AgentModelStat {
+  model: string;
+  calls: number;
+  cost: number;
+}
+
+/** Group an agent's model calls into per-model {calls, cost}, cost-desc. */
+function modelBreakdown(calls: ModelCall[]): AgentModelStat[] {
+  const m = new Map<string, AgentModelStat>();
+  for (const c of calls) {
+    const e = m.get(c.model) ?? { model: c.model, calls: 0, cost: 0 };
+    e.calls += 1;
+    e.cost += c.totalCost;
+    m.set(c.model, e);
+  }
+  return [...m.values()].sort((a, b) => b.cost - a.cost);
+}
+
+/** Resolve one agent's detail through the shared cache (reused by the expand). */
+function fetchAgentDetailCached(conversationId: string, accountId: string, step: Step): Promise<AgentDetail> {
+  const key = `${conversationId}|${accountId}|${step.stepId}`;
+  const cached = agentDetailCache.get(key);
+  if (cached) return Promise.resolve(cached);
+  let p = agentDetailInflight.get(key);
+  if (!p) {
+    p = getConversationAgent({ conversationId, accountId, agentId: step.stepId })
+      .then((d) => {
+        const ad = d ? adaptAgentDetail(d, step.runId) : EMPTY_DETAIL;
+        agentDetailCache.set(key, ad);
+        return ad;
+      })
+      .finally(() => agentDetailInflight.delete(key));
+    agentDetailInflight.set(key, p);
+  }
+  return p;
+}
+
+/**
+ * Resolve one agent's detail by id (used by the Optimize drill-down). Shares the
+ * SAME module cache as the expand rows — their cache key uses step.stepId, which
+ * IS the agent id — so opening a finding's backing call reuses an existing fetch.
+ */
+function fetchAgentDetailById(conversationId: string, accountId: string, agentId: string): Promise<AgentDetail> {
+  const key = `${conversationId}|${accountId}|${agentId}`;
+  const cached = agentDetailCache.get(key);
+  if (cached) return Promise.resolve(cached);
+  let p = agentDetailInflight.get(key);
+  if (!p) {
+    p = getConversationAgent({ conversationId, accountId, agentId })
+      .then((d) => {
+        const ad = d ? adaptAgentDetail(d, conversationId) : EMPTY_DETAIL;
+        agentDetailCache.set(key, ad);
+        return ad;
+      })
+      .finally(() => agentDetailInflight.delete(key));
+    agentDetailInflight.set(key, p);
+  }
+  return p;
+}
+
+/**
+ * Per-task model breakdown for the list's Models column. The structure-only tree
+ * carries no per-agent model names, so we resolve each agent's detail (concurrency
+ * limited, shared cache) and group its calls by model. Expanding a row is then instant.
+ */
+function useAgentModels(steps: Step[], conversationId?: string, accountId?: string): Map<string, AgentModelStat[]> {
+  const [map, setMap] = React.useState<Map<string, AgentModelStat[]>>(new Map());
+  React.useEffect(() => {
+    if (!conversationId || !accountId) return;
+    let cancelled = false;
+    const targets = steps.filter((s) => (s.modelCallCount ?? 0) > 0);
+    setMap(new Map());
+    let i = 0;
+    const worker = async (): Promise<void> => {
+      while (i < targets.length && !cancelled) {
+        const s = targets[i++];
+        try {
+          const ad = await fetchAgentDetailCached(conversationId, accountId, s);
+          if (cancelled) return;
+          const bd = modelBreakdown(ad.calls);
+          setMap((prev) => {
+            const next = new Map(prev);
+            next.set(s.stepId, bd);
+            return next;
+          });
+        } catch {
+          /* leave this row's models unresolved */
+        }
+      }
+    };
+    const CONCURRENCY = 6;
+    Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker));
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId, accountId, steps.length]);
+  return map;
+}
+
+/** Models cell: per-model chips with (calls · cost); '…' while resolving, '—' if none. */
+function StepModels({ models, loading }: { models?: AgentModelStat[]; loading: boolean }) {
+  if (!models) {
+    return (
+      <Box component='span' sx={{ color: 'var(--ds-gray-400)', fontSize: 'var(--ds-text-caption)' }}>
+        {loading ? '…' : '—'}
+      </Box>
+    );
+  }
+  if (!models.length) {
+    return (
+      <Box component='span' sx={{ color: 'var(--ds-gray-400)' }}>
+        —
+      </Box>
+    );
+  }
+  return (
+    <Box sx={{ display: 'flex', gap: 'var(--ds-space-1)', flexWrap: 'wrap' }}>
+      {models.map((m) => (
+        <Chip key={m.model} size='2xs' variant='tag' tone='subtle' hue={MODEL_HUE[m.model] ?? 'slate'}>
+          {m.model}
+          <Box component='span' sx={{ ml: '3px', color: 'var(--ds-gray-500)', fontWeight: 'var(--ds-font-weight-regular)' }}>
+            ({m.calls} · {fmtCost(m.cost)})
+          </Box>
+        </Chip>
+      ))}
+    </Box>
+  );
+}
+
+type AgentTabMode = 'detail' | 'models' | 'tools';
+
+/** One expand tab. All three share `useAgentDetail` (single fetch via the cache). */
+function AgentDetailTab({ mode, step, conversationId, accountId }: { mode: AgentTabMode; step: Step; conversationId?: string; accountId?: string }) {
+  const { loading, error, data } = useAgentDetail(step, conversationId, accountId);
+  if (loading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 120 }}>
+        <CircularProgress size={22} />
+      </Box>
+    );
+  }
+  if (error) return <Banner tone='critical' title='Could not load agent detail' message={error} />;
+
+  // Surface the failure reason at the top of every tab when the task failed.
+  // The error can live in a model call, a tool response, or — as with a failed
+  // agent that produced no errored call/tool — in the agent's own response text.
+  const failedCall = data.calls.find((c) => c.error && c.errorMessage);
+  const failedTool = data.tools.find((t) => t.isError && t.response);
+  const isFailed = step.status === 'failed';
+  let errMsg = failedCall?.errorMessage || (failedTool ? `${failedTool.name}: ${failedTool.response}` : '');
+  if (!errMsg && isFailed) errMsg = data.response || 'This task failed (no error message returned).';
+  const errorBanner = errMsg ? (
+    <Banner tone='critical' title='This task failed' message={errMsg.length > 600 ? `${errMsg.slice(0, 600)}…` : errMsg} />
+  ) : null;
+
+  let body: React.ReactNode;
+  if (mode === 'models') body = <ModelCallsTable calls={data.calls} />;
+  else if (mode === 'tools') body = <ToolCallsTable tools={data.tools} />;
+  else {
+    const hasExec = data.query || data.thought || data.response;
+    body = hasExec ? (
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)' }}>
+        <ExecBlock label='Query' text={data.query} />
+        <ExecBlock label='Thought' text={data.thought} />
+        <ExecBlock label='Response' text={data.response} />
+      </Box>
+    ) : (
+      <Box sx={{ p: 'var(--ds-space-3)', fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>No execution content recorded.</Box>
+    );
+  }
+
+  if (!errorBanner) return <>{body}</>;
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)' }}>
+      {errorBanner}
+      {body}
+    </Box>
+  );
+}
+
+const AGENT_DETAIL_TABS = (['detail', 'models', 'tools'] as const).map((mode, i) => ({
+  text: { detail: 'Agent detail', models: 'Model calls', tools: 'Tool calls' }[mode],
+  value: i,
+  key: mode,
+  componentFn: (_o: unknown, q: { step?: Step; conversationId?: string; accountId?: string }) =>
+    q?.step ? <AgentDetailTab mode={mode} step={q.step} conversationId={q.conversationId} accountId={q.accountId} /> : <></>,
+}));
+
+/** Task (sub-task) cell: agent name, lineage subtext, gate flag, error. Lineage is
+ * shown as "from <parent>" (not indentation) so it survives sorting/filtering. */
+function TaskCell({ step }: { step: Step }) {
+  const lineage = step.parentAgentName ? `from ${step.parentAgentName}` : '';
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 }}>
+      <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--ds-space-1)', flexWrap: 'wrap' }}>
+        <Box component='span' sx={{ fontSize: 'var(--ds-text-body)', color: 'var(--ds-gray-700)', fontWeight: 'var(--ds-font-weight-medium)' }}>
+          {step.agent}
+        </Box>
+        {step.waitTimeMs > 0 && (
+          <Chip size='2xs' variant='tag' tone='warning'>
+            gate
+          </Chip>
+        )}
+      </Box>
+      {lineage && <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>{lineage}</Box>}
+      {step.errorMessage && (
+        <Box
+          title={step.errorMessage}
+          sx={{
+            fontSize: 'var(--ds-text-caption)',
+            color: 'var(--ds-red-700)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            maxWidth: 320,
+          }}
+        >
+          {step.errorMessage}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+type TaskView = 'all' | 'cost' | 'latency' | 'failed';
+
+const TASK_VIEW_OPTIONS = [
+  { value: 'all', label: 'All tasks', icon: <FormatListBulletedIcon sx={{ fontSize: 14 }} /> },
+  { value: 'cost', label: 'Top 5 by cost', icon: <PaidOutlinedIcon sx={{ fontSize: 14 }} /> },
+  { value: 'latency', label: 'Top 5 by latency', icon: <TimerOutlinedIcon sx={{ fontSize: 14 }} /> },
+  { value: 'failed', label: 'Show failed', icon: <ErrorOutlineIcon sx={{ fontSize: 14 }} /> },
+];
+
+// Header name → sortable value. Headers absent here are not sortable.
+const TASK_SORT_VALUE: Record<string, (s: Step) => number | string> = {
+  Task: (s) => s.sequence,
+  'Total calls': (s) => (s.modelCallCount ?? s.calls.length) + (s.toolCallCount ?? 0),
+  Latency: (s) => s.stepLatencyMs,
+  Tokens: (s) => s.stepInputTokens,
+  Cost: (s) => s.stepCost,
+  Status: (s) => s.status ?? '',
+};
+
+/** Step → expandable task table. Built from agent aggregates; the per-agent model
+ * + tool calls and execution content load on expand via ai_get_conversation_agent. */
+function StepBreakdown({ run, conversationId, accountId }: { run: Run; conversationId?: string; accountId?: string }) {
+  const runCost = run.totalCost || 1;
+  const [view, setView] = React.useState<TaskView>('all');
+  const [sort, setSort] = React.useState<{ name: string; order: 'asc' | 'desc' }>({ name: '', order: 'desc' });
+  const agentModels = useAgentModels(run.steps, conversationId, accountId);
+
+  // Same consistency rule as the conversation list: a "Top 5 by X" preset syncs
+  // the column sort to that metric so the shown order matches the preset.
+  // 'all' / 'failed' fall back to natural task (sequence) order.
+  const handleViewChange = (v: string) => {
+    const next = (v as TaskView) || 'all';
+    setView(next);
+    if (next === 'cost') setSort({ name: 'Cost', order: 'desc' });
+    else if (next === 'latency') setSort({ name: 'Latency', order: 'desc' });
+    else setSort({ name: '', order: 'desc' });
+  };
+  const modelsResolving = !!conversationId && !!accountId;
+
+  // Top-5 presets narrow the set; column sort then orders whatever is shown.
+  const displayed = React.useMemo(() => {
+    let list = run.steps;
+    if (view === 'cost') list = [...run.steps].sort((a, b) => b.stepCost - a.stepCost).slice(0, 5);
+    else if (view === 'latency') list = [...run.steps].sort((a, b) => b.stepLatencyMs - a.stepLatencyMs).slice(0, 5);
+    else if (view === 'failed') list = run.steps.filter((s) => (s.status ?? '') === 'failed');
+    const val = TASK_SORT_VALUE[sort.name];
+    if (val) {
+      const sorted = [...list].sort((a, b) => {
+        const av = val(a);
+        const bv = val(b);
+        return typeof av === 'string' ? String(av).localeCompare(String(bv)) : (av as number) - (bv as number);
+      });
+      list = sort.order === 'desc' ? sorted.reverse() : sorted;
+    }
+    return list;
+  }, [run.steps, view, sort]);
+
+  const headers = [
+    {
+      name: 'Task',
+      width: '18%',
+      sortEnabled: true,
+      component: <HeaderLabel label='Task' info='The agent (sub-task). “from X” names the parent agent that invoked it.' />,
+    },
+    { name: 'Models', width: '21%', component: <HeaderLabel label='Models' info='Models this task used, with per-model calls · cost.' /> },
+    {
+      name: 'Total calls',
+      width: '18%',
+      sortEnabled: true,
+      component: <HeaderLabel label='Total calls' info='Model (LLM) calls + tool calls this task made.' />,
+    },
+    {
+      name: 'Latency',
+      width: '10%',
+      sortEnabled: true,
+      component: <HeaderLabel label='Latency' info='Total model round-trip time for this task.' />,
+    },
+    {
+      name: 'Tokens',
+      width: '12%',
+      sortEnabled: true,
+      component: <HeaderLabel label='Tokens' secondary='(in/out)' info='Input / output tokens for this task.' />,
+    },
+    { name: 'Cost', width: '8%', sortEnabled: true, component: <HeaderLabel label='Cost' info='This task’s direct model-call cost.' /> },
+    { name: 'Status', width: '8%', sortEnabled: true },
+    { name: '% run', width: '7%', component: <HeaderLabel label='% run' info='This task’s direct cost as a share of the whole conversation.' /> },
+  ];
+  const tableData = displayed.map((step) => {
+    const models = step.modelCallCount ?? step.calls.length;
+    const toolCalls = step.toolCallCount ?? 0;
+    const status = step.status ?? 'completed';
+    return [
+      {
+        drilldownQuery: { step, conversationId, accountId },
+        component: <TaskCell step={step} />,
+      },
+      { component: <StepModels models={models === 0 ? [] : agentModels.get(step.stepId)} loading={modelsResolving} /> },
+      {
+        component: (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <Box sx={cellNum}>{models + toolCalls}</Box>
+            <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>
+              Model: {models} · Tool: {toolCalls}
+            </Box>
+          </Box>
+        ),
+      },
+      { component: <Box sx={cellNum}>{fmtDuration(step.stepLatencyMs)}</Box> },
+      {
+        component: (
+          <Box sx={cellNum}>
+            {fmtTokens(step.stepInputTokens)} / {fmtTokens(step.stepOutputTokens)}
+          </Box>
+        ),
+      },
+      { component: <CostCallout value={step.stepCost} size='sm' tone='neutral' fractionDigits={2} /> },
+      { component: <Label tone={STATUS_TONE[status]} text={status} /> },
+      { component: <Box sx={{ ...cellNum, color: 'var(--ds-gray-500)' }}>{Math.round((step.stepCost / runCost) * 100)}%</Box> },
+    ];
+  });
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)' }}>
+      <Box sx={{ display: 'flex', justifyContent: 'flex-start' }}>
+        <ToggleGroup selection='single' size='sm' ariaLabel='Filter tasks' value={view} onChange={handleViewChange} options={TASK_VIEW_OPTIONS} />
+      </Box>
+      <CustomTable2
+        headers={headers}
+        tableData={tableData}
+        expandable={{ tabs: AGENT_DETAIL_TABS }}
+        sort={sort}
+        onSortChange={(s: { name: string; order: 'asc' | 'desc' }) => setSort(s)}
+      />
+    </Box>
+  );
+}
+
+// ─── Optimize tab ──────────────────────────────────────────────────────────
+// Lazy-fetches the read-only optimization analysis when the tab is first opened
+// (one fetch per conversation; the analysis is an LLM call, so don't refetch on
+// every tab toggle).
+// phase: init = cheap read for a prior analysis (no LLM); idle = none found, await
+// the button; loading = running the LLM analysis; data = showing results; error.
+type OptPhase = 'init' | 'idle' | 'loading' | 'data' | 'error';
+
+interface OptimizationState {
+  phase: OptPhase;
+  error: string | null;
+  data: ConversationOptimization | null;
+  analyzedAt: string | null;
+}
+
+// On open, the runner does a CHEAP read (no LLM): if this conversation was already
+// analyzed, show the stored result immediately. The expensive LLM analysis only
+// fires on run() (the Analyze / Re-analyze button). run() aborts any in-flight call.
+function useOptimizationRunner(conversationId?: string, accountId?: string): OptimizationState & { run: () => void } {
+  const [state, setState] = React.useState<OptimizationState>({ phase: 'init', error: null, data: null, analyzedAt: null });
+  const ctrlRef = React.useRef<AbortController | null>(null);
+
+  // Cheap cached-result load on open / conversation change.
+  React.useEffect(() => {
+    if (!conversationId || !accountId) {
+      setState({ phase: 'idle', error: null, data: null, analyzedAt: null });
+      return;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    setState({ phase: 'init', error: null, data: null, analyzedAt: null });
+    getStoredConversationOptimization({ conversationId, accountId }, controller.signal)
+      .then((cached) => {
+        if (cancelled) return;
+        if (cached) setState({ phase: 'data', error: null, data: cached.optimization, analyzedAt: cached.analyzedAt });
+        else setState({ phase: 'idle', error: null, data: null, analyzedAt: null });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ phase: 'idle', error: null, data: null, analyzedAt: null }); // read failure → just offer to analyze
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [conversationId, accountId]);
+
+  const run = React.useCallback(() => {
+    if (!conversationId || !accountId) return;
+    ctrlRef.current?.abort();
+    const controller = new AbortController();
+    ctrlRef.current = controller;
+    setState((s) => ({ ...s, phase: 'loading', error: null }));
+    generateConversationOptimization({ conversationId, accountId }, controller.signal)
+      .then((d) => {
+        if (controller.signal.aborted) return;
+        if (d) setState({ phase: 'data', error: null, data: d, analyzedAt: new Date().toISOString() });
+        else setState({ phase: 'error', error: 'No analysis was returned', data: null, analyzedAt: null });
+      })
+      .catch((e) => {
+        if (controller.signal.aborted) return;
+        setState({ phase: 'error', error: e instanceof Error ? e.message : 'Failed to analyze', data: null, analyzedAt: null });
+      });
+  }, [conversationId, accountId]);
+
+  React.useEffect(() => () => ctrlRef.current?.abort(), []);
+
+  return { ...state, run };
+}
+
+// ─── Backing-calls drill-down drawer ───────────────────────────────────────
+// Opens the raw per-call rows behind a finding (the same ai_get_conversation_agent
+// detail the sub-tasks table expands to) so a hypothesis can be verified.
+interface BackingDrawerState {
+  loading: boolean;
+  error: string | null;
+  data: AgentDetail | null;
+}
+
+function BackingCallsDrawer({
+  agentId,
+  conversationId,
+  accountId,
+  onClose,
+}: {
+  agentId: string | null;
+  conversationId?: string;
+  accountId?: string;
+  onClose: () => void;
+}) {
+  const [state, setState] = React.useState<BackingDrawerState>({ loading: false, error: null, data: null });
+
+  React.useEffect(() => {
+    if (!agentId || !conversationId || !accountId) return;
+    let cancelled = false;
+    setState({ loading: true, error: null, data: null });
+    fetchAgentDetailById(conversationId, accountId, agentId)
+      .then((ad) => !cancelled && setState({ loading: false, error: null, data: ad }))
+      .catch((e) => !cancelled && setState({ loading: false, error: e instanceof Error ? e.message : 'Failed to load calls', data: null }));
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId, conversationId, accountId]);
+
+  const data = state.data;
+  return (
+    <Drawer
+      anchor='right'
+      open={!!agentId}
+      onClose={onClose}
+      // The Backing-calls drawer is opened from inside the "Conversation details"
+      // Dialog (MUI modal z-index 1300). A MUI Drawer defaults to z-index 1200, so
+      // it would render BEHIND the dialog — lift it above the modal layer.
+      sx={{ zIndex: (theme) => theme.zIndex.modal + 1 }}
+      PaperProps={{ sx: { width: 'min(760px, 92vw)' } }}
+    >
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-4)', p: 'var(--ds-space-4)' }}>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--ds-space-3)' }}>
+          <Box>
+            <SectionTitle>Backing calls</SectionTitle>
+            <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+              {agentId}
+            </Box>
+          </Box>
+          <Button tone='link' size='sm' onClick={onClose} id='cost-backing-close'>
+            <CloseIcon sx={{ fontSize: 18 }} />
+          </Button>
+        </Box>
+
+        {state.loading && (
+          <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 160 }}>
+            <CircularProgress size={24} />
+          </Box>
+        )}
+        {state.error && <Banner tone='critical' title='Could not load backing calls' message={state.error} />}
+        {data && (
+          <>
+            {(data.query || data.thought || data.response) && (
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)' }}>
+                <ExecBlock label='Query' text={data.query} />
+                <ExecBlock label='Thought' text={data.thought} />
+                <ExecBlock label='Response' text={data.response} />
+              </Box>
+            )}
+            <Box>
+              <Box
+                sx={{
+                  fontSize: 'var(--ds-text-small)',
+                  fontWeight: 'var(--ds-font-weight-semibold)',
+                  color: 'var(--ds-gray-600)',
+                  mb: 'var(--ds-space-2)',
+                }}
+              >
+                Model calls ({data.calls.length})
+              </Box>
+              <ModelCallsTable calls={data.calls} />
+            </Box>
+            {data.tools.length > 0 && (
+              <Box>
+                <Box
+                  sx={{
+                    fontSize: 'var(--ds-text-small)',
+                    fontWeight: 'var(--ds-font-weight-semibold)',
+                    color: 'var(--ds-gray-600)',
+                    mb: 'var(--ds-space-2)',
+                  }}
+                >
+                  Tool calls ({data.tools.length})
+                </Box>
+                <ToolCallsTable tools={data.tools} />
+              </Box>
+            )}
+          </>
+        )}
+      </Box>
+    </Drawer>
+  );
+}
+
+const FINDING_TONE: Record<string, 'success' | 'critical' | 'warning' | 'neutral'> = {
+  high: 'success',
+  medium: 'warning',
+  low: 'neutral',
+};
+
+function findingTargetLabel(f: OptFinding): string {
+  if (f.target.model) {
+    const n = f.target.call_count ? ` · ${f.target.call_count} calls` : '';
+    return `${f.target.agent_name ?? ''} / ${f.target.model}${n}`;
+  }
+  return f.target.agent_name ?? f.target.kind;
+}
+
+function exemplarTaskText(ex: OptExemplar): string {
+  const t = (ex.task || ex.outcome || '').replace(/\s+/g, ' ').trim();
+  return t.length > 90 ? `${t.slice(0, 90)}…` : t;
+}
+
+function FindingRow({ f, onDrill }: { f: OptFinding; onDrill: (agentId: string) => void }) {
+  const isAdvisory = !!f.advisory;
+  const facts = f.supporting_evidence ?? [];
+  const exemplars = f.exemplars ?? [];
+  const backing = f.backing_agent_ids ?? [];
+  return (
+    <Box
+      sx={{
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 'var(--ds-space-3)',
+        py: 'var(--ds-space-3)',
+        borderTop: '1px solid var(--ds-gray-200)',
+      }}
+    >
+      <Box sx={{ minWidth: 96 }}>
+        {isAdvisory ? (
+          <>
+            <CostCallout value={f.current_cost_usd} size='sm' tone='neutral' fractionDigits={4} />
+            <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>addressable</Box>
+          </>
+        ) : (
+          <>
+            <CostCallout value={f.estimated_savings_usd} size='sm' tone='high-savings' fractionDigits={4} />
+            <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>{f.estimated_savings_pct.toFixed(1)}%</Box>
+          </>
+        )}
+      </Box>
+      <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)', minWidth: 0 }}>
+        <Box sx={{ display: 'flex', gap: 'var(--ds-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+          <Chip size='2xs' variant='tag' hue='blue'>
+            {f.type.replace(/_/g, ' ')}
+          </Chip>
+          <Box sx={{ fontWeight: 'var(--ds-font-weight-semibold)', color: 'var(--ds-gray-700)' }}>{f.title}</Box>
+          <Label tone={FINDING_TONE[f.confidence] ?? 'neutral'} text={f.confidence} />
+          {f.overlaps_with && f.overlaps_with.length > 0 && (
+            <Chip size='2xs' variant='tag' hue='slate'>
+              overlaps {f.overlaps_with.join(', ')}
+            </Chip>
+          )}
+        </Box>
+        <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)' }}>{findingTargetLabel(f)}</Box>
+        {f.evidence && <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>evidence: {f.evidence}</Box>}
+        {f.recommendation && (
+          <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)' }}>
+            → {f.suggested_model ? `${f.suggested_model}. ` : ''}
+            {f.recommendation}
+          </Box>
+        )}
+
+        {/* Server-derived proof facts — the verifiable numbers behind the hypothesis. */}
+        {facts.length > 0 && (
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--ds-space-1) var(--ds-space-3)', mt: 'var(--ds-space-1)' }}>
+            {facts.map((e, i) => (
+              <Box key={`${e.label}-${i}`} sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)' }}>
+                <Box component='span' sx={{ color: 'var(--ds-gray-500)' }}>
+                  {e.label}:
+                </Box>{' '}
+                <Box component='span' sx={{ fontVariantNumeric: 'tabular-nums', color: 'var(--ds-gray-700)' }}>
+                  {e.value}
+                </Box>
+              </Box>
+            ))}
+          </Box>
+        )}
+
+        {/* Exemplar calls — real numbers; click to open the call rows. */}
+        {exemplars.map((ex, i) => {
+          const task = exemplarTaskText(ex);
+          return (
+            <Box
+              key={`${ex.agent_id}-${i}`}
+              onClick={() => ex.agent_id && onDrill(ex.agent_id)}
+              id={`cost-finding-exemplar-${f.id}-${i}`}
+              sx={{
+                fontSize: 'var(--ds-text-caption)',
+                color: 'var(--ds-gray-600)',
+                cursor: ex.agent_id ? 'pointer' : 'default',
+                '&:hover': ex.agent_id ? { color: 'var(--ds-blue-700)', textDecoration: 'underline' } : undefined,
+              }}
+            >
+              ↳ e.g. {ex.model} · in {fmtTokens(ex.input_tokens)} / out {fmtTokens(ex.output_tokens)} tok · {fmtCost(ex.cost_usd)}
+              {task ? ` — ${task}` : ''}
+            </Box>
+          );
+        })}
+
+        {/* Drill-down: open the raw per-call rows for each backing instance. */}
+        {backing.length > 0 && (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)', flexWrap: 'wrap', mt: 'var(--ds-space-1)' }}>
+            <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>Verify:</Box>
+            {backing.map((id, i) => (
+              <Button key={id} tone='link' size='sm' onClick={() => onDrill(id)} id={`cost-finding-backing-${f.id}-${i}`}>
+                View calls {backing.length > 1 ? `#${i + 1}` : ''} →
+              </Button>
+            ))}
+          </Box>
+        )}
+      </Box>
+    </Box>
+  );
+}
+
+function OptimizePanel({ conversationId, accountId, autoRun = false }: { conversationId?: string; accountId?: string; autoRun?: boolean }) {
+  const { phase, error, data, analyzedAt, run } = useOptimizationRunner(conversationId, accountId);
+  const canRun = !!conversationId && !!accountId;
+  const [drillAgentId, setDrillAgentId] = React.useState<string | null>(null);
+
+  // Opened via "Analyse": once the cheap cached read finishes with no prior result,
+  // auto-start the analysis. (If a cached result was found, we show it instead.)
+  const autoRanRef = React.useRef(false);
+  React.useEffect(() => {
+    if (autoRun && phase === 'idle' && canRun && !autoRanRef.current) {
+      autoRanRef.current = true;
+      run();
+    }
+  }, [autoRun, phase, canRun, run]);
+
+  // init — cheap read for a prior analysis (no LLM); brief.
+  if (phase === 'init') {
+    return (
+      <Card>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--ds-space-3)', minHeight: 120 }}>
+          <CircularProgress size={20} />
+          <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>Checking for a previous analysis…</Box>
+        </Box>
+      </Card>
+    );
+  }
+
+  // idle — no prior analysis; the LLM analysis fires only on the button click.
+  if (phase === 'idle') {
+    return (
+      <Card>
+        <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 'var(--ds-space-3)' }}>
+          <SectionTitle>Optimize this conversation</SectionTitle>
+          <Box sx={{ fontSize: 'var(--ds-text-body)', color: 'var(--ds-gray-600)', maxWidth: 640 }}>
+            Analyze where this conversation&apos;s cost went and get recommendations — lighter models, redundant agents, and retry/failure waste. This
+            runs one analysis on demand; it isn&apos;t computed automatically.
+          </Box>
+          <Button tone='primary' size='sm' onClick={run} disabled={!canRun} id='cost-optimize-run'>
+            Analyze cost
+          </Button>
+          {!canRun && (
+            <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>Open a conversation in a specific account to analyze.</Box>
+          )}
+        </Box>
+      </Card>
+    );
+  }
+
+  if (phase === 'loading') {
+    return (
+      <Card>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--ds-space-3)', minHeight: 160 }}>
+          <CircularProgress size={24} />
+          <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>
+            Analyzing… this runs an LLM analysis and can take a minute or two.
+          </Box>
+        </Box>
+      </Card>
+    );
+  }
+
+  if (phase === 'error') {
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)' }}>
+        <Banner tone='critical' title='Could not analyze conversation' message={error ?? 'Analysis failed'} />
+        <Box>
+          <Button tone='secondary' size='sm' onClick={run} id='cost-optimize-retry'>
+            Try again
+          </Button>
+        </Box>
+      </Box>
+    );
+  }
+
+  if (!data) return null;
+  const analyzedLabel = analyzedAt ? new Date(analyzedAt).toLocaleString() : '';
+
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)' }}>
+      <Card>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--ds-space-4)', flexWrap: 'wrap' }}>
+          <Box sx={{ flex: 1, minWidth: 240 }}>
+            <SectionTitle>Optimization summary</SectionTitle>
+            <Box sx={{ fontSize: 'var(--ds-text-body)', color: 'var(--ds-gray-700)' }}>{data.summary}</Box>
+            <Box sx={{ mt: 'var(--ds-space-3)', display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)' }}>
+              <Button tone='link' size='sm' onClick={run} id='cost-optimize-rerun'>
+                Re-analyze
+              </Button>
+              {analyzedLabel && <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-400)' }}>Analyzed {analyzedLabel}</Box>}
+            </Box>
+          </Box>
+          <Box sx={{ textAlign: 'right' }}>
+            <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>Potential savings</Box>
+            <CostCallout value={data.total_potential_savings_usd} size='lg' tone='high-savings' fractionDigits={2} />
+            <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>
+              {data.total_potential_savings_pct.toFixed(1)}% of {fmtCost(data.current_cost_usd)}
+            </Box>
+          </Box>
+        </Box>
+      </Card>
+
+      <Card>
+        <SectionTitle>Findings</SectionTitle>
+        {data.findings.length === 0 ? (
+          <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>No optimization opportunities found.</Box>
+        ) : (
+          <Box>
+            {data.findings.map((f) => (
+              <FindingRow key={f.id} f={f} onDrill={setDrillAgentId} />
+            ))}
+          </Box>
+        )}
+        <Box sx={{ mt: 'var(--ds-space-3)', fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-400)' }}>
+          Savings are computed from actual token usage and model pricing; overlapping findings count once toward the total. Open “View calls” to
+          verify a finding against its raw per-call rows.
+        </Box>
+      </Card>
+
+      <BackingCallsDrawer agentId={drillAgentId} conversationId={conversationId} accountId={accountId} onClose={() => setDrillAgentId(null)} />
+    </Box>
+  );
+}
+
+export function ConversationDetailView({
+  run,
+  loading,
+  error,
+  usage,
+  conversationId,
+  accountId,
+  onBack,
+  hideBackBar = false,
+  initialAgentId,
+  initialTab = 'subtasks',
+  autoRunOptimize = false,
+}: ConversationDetailViewProps) {
+  const [detailTab, setDetailTab] = React.useState<DetailTabId>(initialTab);
+  // Header "Analyze cost" shortcut flips this on and jumps to the Optimize tab,
+  // which auto-runs the analysis (same path as the list's "Analyse" action).
+  const [optimizeAutoRun, setOptimizeAutoRun] = React.useState(autoRunOptimize);
+
+  if (loading) {
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-4)' }}>
+        {!hideBackBar && <BackBar onBack={onBack} />}
+        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 240 }}>
+          <CircularProgress size={28} />
+        </Box>
+      </Box>
+    );
+  }
+
+  if (error || !run) {
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-4)' }}>
+        {!hideBackBar && <BackBar onBack={onBack} />}
+        {error ? (
+          <Banner tone='critical' title='Could not load conversation' message={error} />
+        ) : (
+          <EmptyState
+            size='section'
+            illustration='no-results'
+            title='Conversation not found'
+            description='It may have been deleted or is outside your access.'
+          />
+        )}
+      </Box>
+    );
+  }
+
+  const stepSlices = run.steps.filter((s) => s.stepCost > 0).map((s) => ({ key: `${s.sequence}. ${s.agent}`, cost: s.stepCost }));
+
+  // The structure-only tree carries no models and no wall/active timing; the
+  // parallel usage-metrics summary (ai_get_conversation_usage_metrics) does, so
+  // prefer it for the header and fall back to the tree-derived run when it's
+  // absent (that action can fail without failing the view). Per-model COST from
+  // this action is legacy/inconsistent — we only read names, tokens, and timing.
+  const headerModels = usage?.model_usage?.length ? usage.model_usage.map((m) => m.model_name) : runModelBreakdown(run).map((m) => m.model);
+  const wallMs = usage?.wall_time_seconds != null ? usage.wall_time_seconds * 1000 : run.wallClockMs;
+  const activeMs = usage?.agent_active_time_seconds != null ? usage.agent_active_time_seconds * 1000 : null;
+  const modelLatencyMs = usage?.total_latency_seconds != null ? usage.total_latency_seconds * 1000 : run.totalModelLatencyMs;
+
+  const detailTabOptions = [
+    { value: 'subtasks', text: 'Agents' },
+    { value: 'metrics', text: 'Models' },
+    { value: 'details', text: 'Details' },
+    { value: 'optimize', text: 'Optimize' },
+  ];
+
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-5)' }}>
+      {!hideBackBar && <BackBar onBack={onBack} />}
+
+      {/* Header summary */}
+      <Card>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--ds-space-4)', flexWrap: 'wrap' }}>
+          <Box>
+            <Box sx={{ fontSize: 'var(--ds-text-heading)', fontWeight: 'var(--ds-font-weight-semibold)', color: 'var(--ds-gray-700)' }}>
+              {run.title}
+            </Box>
+            <Box sx={{ display: 'flex', gap: 'var(--ds-space-2)', alignItems: 'center', mt: 'var(--ds-space-1)', flexWrap: 'wrap' }}>
+              <Chip size='xs' variant='tag' hue='violet'>
+                {run.source ?? triggerLabel[run.triggerType]}
+              </Chip>
+
+              <Label tone={STATUS_TONE[run.status]} text={run.status} />
+              {run.anomalyFlag && (
+                <Chip size='xs' tone='waste' variant='tag'>
+                  Anomalous
+                </Chip>
+              )}
+            </Box>
+          </Box>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-3)', flexShrink: 0 }}>
+            {/* Deep-link to the original conversation in the Ask-Nubi chat (new tab,
+                so the Cost Analyser stays open behind the modal). */}
+            <CostCallout value={run.totalCost} size='lg' tone={run.anomalyFlag ? 'waste' : 'neutral'} fractionDigits={2} />
+            <Button
+              tone='secondary'
+              size='sm'
+              icon={<OpenInNewOutlinedIcon sx={{ fontSize: 16 }} />}
+              onClick={() => window.open(`/ask-nudgebee?accountId=${accountId}&session_id=${conversationId}`, '_blank', 'noopener,noreferrer')}
+              disabled={!conversationId || !accountId}
+              id='cost-goto-conversation'
+            >
+              Go to conversation
+            </Button>
+            <Button
+              tone='primary'
+              size='sm'
+              onClick={() => {
+                setOptimizeAutoRun(true);
+                setDetailTab('optimize');
+              }}
+              disabled={!conversationId || !accountId}
+              id='cost-analyze-header'
+            >
+              Analyze cost
+            </Button>
+          </Box>
+        </Box>
+
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--ds-space-5)', mt: 'var(--ds-space-4)' }}>
+          <SummaryStat label='Tokens (in / out)'>
+            {fmtTokens(run.totalInputTokens)} / {fmtTokens(run.totalOutputTokens)}
+          </SummaryStat>
+          <SummaryStat label='Wall clock'>{fmtDuration(wallMs)}</SummaryStat>
+          {/* Time agents were actively running (from the usage summary). Replaces
+              the old "Wait time" slot — the payload exposes no wait/gate field. */}
+          <SummaryStat label='Active time'>{activeMs != null ? fmtDuration(activeMs) : '—'}</SummaryStat>
+          <SummaryStat label='Model latency'>{fmtDuration(modelLatencyMs)}</SummaryStat>
+          <SummaryStat label='Models'>
+            {/* Prefer the usage summary's model_usage names; fall back to the
+                tree-derived breakdown (which is empty for structure-only trees). */}
+            <Box sx={{ display: 'flex', gap: 'var(--ds-space-1)', flexWrap: 'wrap' }}>
+              {headerModels.length ? (
+                headerModels.map((m) => (
+                  <Chip key={m} size='2xs' variant='tag' hue='blue'>
+                    {m}
+                  </Chip>
+                ))
+              ) : (
+                <Box component='span' sx={{ color: 'var(--ds-gray-400)' }}>
+                  —
+                </Box>
+              )}
+            </Box>
+          </SummaryStat>
+        </Box>
+
+        <Box sx={{ mt: 'var(--ds-space-4)' }}>
+          <TimeSplitBar run={run} />
+        </Box>
+      </Card>
+
+      {/* Tabbed body — sub-tasks / metrics / details */}
+      <CustomTabs
+        options={{ tabOptions: detailTabOptions }}
+        value={detailTab}
+        onChange={(next: string) => setDetailTab(next as DetailTabId)}
+        behavior='filter'
+        variant='primary'
+        ariaLabel='Conversation detail sections'
+      />
+
+      {detailTab === 'subtasks' && (
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)' }}>
+          {initialAgentId && <FocusedAgentPanel conversationId={conversationId} accountId={accountId} agentId={initialAgentId} />}
+          <Card>
+            <StepBreakdown run={run} conversationId={conversationId} accountId={accountId} />
+          </Card>
+        </Box>
+      )}
+
+      {detailTab === 'metrics' &&
+        (usage ? (
+          <Card>
+            <ConversationUsagePanel usage={usage} />
+          </Card>
+        ) : (
+          <EmptyState
+            size='section'
+            illustration='no-results'
+            title='No conversation metrics'
+            description='Per-conversation usage metrics are not available for this conversation.'
+          />
+        ))}
+
+      {detailTab === 'details' && (
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)' }}>
+          <Card>
+            <SectionTitle>Trace</SectionTitle>
+            <TraceWaterfall run={run} />
+          </Card>
+          <Card>
+            <SectionTitle>Cost composition</SectionTitle>
+            <CostTreemap slices={stepSlices} total={run.totalCost} />
+          </Card>
+        </Box>
+      )}
+
+      {detailTab === 'optimize' && <OptimizePanel conversationId={conversationId} accountId={accountId} autoRun={optimizeAutoRun} />}
+    </Box>
+  );
+}
+
+export default ConversationDetailView;

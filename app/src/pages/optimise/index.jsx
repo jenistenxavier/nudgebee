@@ -3,12 +3,14 @@ import AnchorComponent from '@shared/navigation/AnchorComponent';
 import ErrorBoundary from '@shared/ErrorBoundary';
 import OptimizeNewPage from '@components/optimise-new/OptimizeNewPage';
 import SummaryView from '@components/optimise-new/summary/SummaryView';
+import CostAnalyser from '@components/llm/cost-analyser/CostAnalyser';
 import { useRouter } from 'next/router';
-import { OptimizeSummaryIcon, RecommendationIcon } from '@assets';
+import { OptimizeSummaryIcon, RecommendationIcon, LLMConsumptionIcon } from '@assets';
 
 const filterOptions = [
   { name: 'Summary', id: 'summary', fragment: 'summary', value: 0, icon: OptimizeSummaryIcon },
   { name: 'Recommendations', id: 'recommendations', fragment: 'recommendations', value: 1, icon: RecommendationIcon, iconSize: 18 },
+  { name: 'LLM Analyser', id: 'llm-analyser', fragment: 'cost-analyser', value: 2, icon: LLMConsumptionIcon, iconSize: 18 },
 ];
 
 const Optimise = () => {
@@ -34,6 +36,7 @@ const Optimise = () => {
       <ErrorBoundary key={activeTab}>
         {activeTab === 0 && <SummaryView />}
         {activeTab === 1 && <OptimizeNewPage />}
+        {activeTab === 2 && <CostAnalyser />}
       </ErrorBoundary>
     </>
   );
