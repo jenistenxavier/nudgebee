@@ -283,6 +283,13 @@ export interface AgentModelCall {
   latency_seconds: number;
   ttft_ms: number;
   created_at: string;
+  /** True when a stored prompt/response trace exists (LLM_TRACE_ENABLED). The UI
+   * shows a "view prompt" action; the text itself is fetched lazily by id. */
+  has_trace?: boolean;
+  /** Raw trace — populated ONLY by the by-id lazy fetch (model_call_id), omitted
+   * from the normal per-agent listing. */
+  prompt_messages?: string;
+  response_content?: string;
 }
 
 export interface AgentToolCall {
@@ -628,13 +635,17 @@ export async function getConversationTree(req: ConversationDetailRequest, signal
 
 export interface ConversationAgentRequest extends ConversationDetailRequest {
   agentId: string;
+  /** When set, the response carries ONLY that model call, with its prompt/response
+   * trace populated (the lazy "view prompt" fetch). Omit for the normal listing. */
+  modelCallId?: string;
 }
 
 /** On-click detail for one agent: its model calls (with cost_breakdown), tool calls
- * (params/response/thought), and the agent's query/thought/response. */
+ * (params/response/thought), and the agent's query/thought/response. When
+ * `modelCallId` is set, returns just that call with its prompt/response trace. */
 export async function getConversationAgent(req: ConversationAgentRequest, signal?: AbortSignal): Promise<ConversationAgentDetail | null> {
-  const query = `mutation GetConversationAgent($conversationId: String!, $accountId: String!, $agentId: String!, $userId: String) {
-    ai_get_conversation_agent(request: { conversation_id: $conversationId, account_id: $accountId, agent_id: $agentId, user_id: $userId }) {
+  const query = `mutation GetConversationAgent($conversationId: String!, $accountId: String!, $agentId: String!, $userId: String, $modelCallId: String) {
+    ai_get_conversation_agent(request: { conversation_id: $conversationId, account_id: $accountId, agent_id: $agentId, user_id: $userId, model_call_id: $modelCallId }) {
       data
     }
   }`;
@@ -646,6 +657,7 @@ export async function getConversationAgent(req: ConversationAgentRequest, signal
       accountId: req.accountId,
       agentId: req.agentId,
       userId: req.userId ?? null,
+      modelCallId: req.modelCallId ?? null,
     },
     undefined,
     signal

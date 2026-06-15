@@ -15,6 +15,7 @@ import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import OpenInNewOutlinedIcon from '@mui/icons-material/OpenInNewOutlined';
 import { Button } from '@ui/Button';
 import { Banner } from '@ui/Banner';
+import { Modal } from '@ui/Modal';
 import { Card } from '@ui/Card';
 import { CostCallout } from '@ui/CostCallout';
 import { Chip } from '@ui/Chip';
@@ -162,8 +163,190 @@ const MODEL_CALL_SORT: Record<string, (c: ModelCall) => number | string> = {
   Latency: (c) => c.latencyMs,
 };
 
+/** One parsed prompt message (role + flattened text) for the trace modal. */
+interface ParsedPromptMessage {
+  role: string;
+  text: string;
+}
+
+/** Flatten one message "part" to a string. Our trace serializes text parts with
+ * `text` and tool parts with `name`/`content`; we also tolerate string parts and
+ * arbitrary objects (stringified) so a part is NEVER rendered as a raw object. */
+function partToText(p: unknown): string {
+  if (typeof p === 'string') return p;
+  if (p && typeof p === 'object') {
+    const o = p as { text?: string; name?: string; content?: string };
+    if (typeof o.text === 'string' && o.text) return o.text;
+    if (o.name || o.content) return [o.name, o.content].filter(Boolean).join(': ');
+    return JSON.stringify(p);
+  }
+  return p == null ? '' : String(p);
+}
+
+/** Parse the stored `prompt_messages` JSON (`[{role, parts:[{type,text|name|content}]}]`)
+ * into readable role/text blocks. `text` is ALWAYS a string — tolerates array /
+ * object `content` (other providers), string parts, and malformed JSON (shown raw)
+ * so the modal can never render a non-string child. */
+function parsePromptMessages(raw: string): ParsedPromptMessage[] {
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [{ role: '', text: raw }];
+    return arr.map((m: { role?: string; parts?: unknown[]; content?: unknown }) => {
+      let text = '';
+      if (Array.isArray(m?.parts)) text = m.parts.map(partToText).join('');
+      else if (Array.isArray(m?.content)) text = (m.content as unknown[]).map(partToText).join('');
+      else if (m?.content != null) text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+      else text = typeof m === 'string' ? m : '';
+      return { role: m?.role || '', text };
+    });
+  } catch {
+    return [{ role: '', text: raw }];
+  }
+}
+
+const traceFetchState = { loading: true, error: null as string | null, prompt: '', response: '' };
+type TraceFetchState = typeof traceFetchState;
+
+const preBox = {
+  fontFamily: 'var(--ds-font-mono, monospace)',
+  fontSize: 'var(--ds-text-caption)',
+  color: 'var(--ds-gray-700)',
+  whiteSpace: 'pre-wrap' as const,
+  wordBreak: 'break-word' as const,
+  backgroundColor: 'var(--ds-background-200)',
+  borderRadius: 'var(--ds-radius-md)',
+  padding: 'var(--ds-space-3)',
+  maxHeight: '40vh',
+  overflowY: 'auto' as const,
+};
+
+/** Small copy-to-clipboard action with brief "Copied" feedback. Renders nothing
+ * when there's no text to copy. */
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = React.useState(false);
+  if (!text) return null;
+  const onCopy = () => {
+    navigator.clipboard?.writeText(text).then(
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      },
+      () => {}
+    );
+  };
+  return (
+    <Button tone='link' size='sm' onClick={onCopy} aria-label='Copy to clipboard'>
+      {copied ? 'Copied' : 'Copy'}
+    </Button>
+  );
+}
+
+/** Section header: a Label with an optional right-aligned Copy action. */
+function SectionHead({ label, copyText }: { label: string; copyText?: string }) {
+  return (
+    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: 24 }}>
+      <Label>{label}</Label>
+      {copyText ? <CopyButton text={copyText} /> : null}
+    </Box>
+  );
+}
+
+/** Lazy "view prompt" modal: fetches one model call's prompt/response by id (the
+ * same ai_get_conversation_agent action, scoped to model_call_id) only on open. */
+function PromptTraceModal({
+  call,
+  conversationId,
+  accountId,
+  agentId,
+  onClose,
+}: {
+  call: ModelCall | null;
+  conversationId?: string;
+  accountId?: string;
+  agentId?: string;
+  onClose: () => void;
+}) {
+  const [state, setState] = React.useState<TraceFetchState>(traceFetchState);
+  // Depend on the id (primitive), not the call object — a new object reference with
+  // the same id must not trigger a redundant refetch.
+  const callId = call?.callId;
+
+  React.useEffect(() => {
+    if (!callId || !conversationId || !accountId || !agentId) return;
+    const ac = new AbortController();
+    setState({ loading: true, error: null, prompt: '', response: '' });
+    getConversationAgent({ conversationId, accountId, agentId, modelCallId: callId }, ac.signal)
+      .then((d) => {
+        if (ac.signal.aborted) return;
+        const mc = d?.model_calls?.[0];
+        setState({ loading: false, error: null, prompt: mc?.prompt_messages ?? '', response: mc?.response_content ?? '' });
+      })
+      .catch((e) => {
+        if (!ac.signal.aborted)
+          setState({ loading: false, error: e instanceof Error ? e.message : 'Failed to load trace', prompt: '', response: '' });
+      });
+    return () => ac.abort();
+  }, [callId, conversationId, accountId, agentId]);
+
+  const messages = React.useMemo(() => parsePromptMessages(state.prompt), [state.prompt]);
+  // Readable, copyable form of the whole prompt: each message as "[role]\n<text>".
+  const promptCopyText = React.useMemo(() => messages.map((m) => (m.role ? `[${m.role}]\n` : '') + m.text).join('\n\n'), [messages]);
+
+  return (
+    <Modal width='lg' title='Prompt & response' open={!!call} handleClose={onClose} onClose={onClose} maxHeight='85vh'>
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-4)', padding: '0 var(--ds-space-5) var(--ds-space-5)' }}>
+        {state.loading ? (
+          <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 160 }}>
+            <CircularProgress size={22} />
+          </Box>
+        ) : state.error ? (
+          <Banner tone='critical' title='Could not load trace' message={state.error} />
+        ) : (
+          <>
+            <Box>
+              <SectionHead label='Prompt messages' copyText={messages.length ? promptCopyText : undefined} />
+              {messages.length ? (
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-2)', mt: 'var(--ds-space-2)' }}>
+                  {messages.map((m, i) => (
+                    <Box key={i}>
+                      {m.role && (
+                        <Box sx={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--ds-gray-500)', mb: '2px' }}>
+                          {m.role}
+                        </Box>
+                      )}
+                      <Box sx={preBox}>{m.text}</Box>
+                    </Box>
+                  ))}
+                </Box>
+              ) : (
+                <Box sx={{ mt: 'var(--ds-space-2)', fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>No prompt captured.</Box>
+              )}
+            </Box>
+            <Box>
+              <SectionHead label='Response' copyText={state.response || undefined} />
+              <Box sx={{ ...preBox, mt: 'var(--ds-space-2)' }}>{state.response || 'No response captured.'}</Box>
+            </Box>
+          </>
+        )}
+      </Box>
+    </Modal>
+  );
+}
+
 /** The model-call table (expanded-row content) — one row per LLM call for the agent. */
-function ModelCallsTable({ calls }: { calls: ModelCall[] }) {
+function ModelCallsTable({
+  calls,
+  conversationId,
+  accountId,
+  agentId,
+}: {
+  calls: ModelCall[];
+  conversationId?: string;
+  accountId?: string;
+  agentId?: string;
+}) {
+  const [traceCall, setTraceCall] = React.useState<ModelCall | null>(null);
   const [sort, setSort] = React.useState<{ name: string; order: 'asc' | 'desc' }>({ name: '', order: 'desc' });
   const rows = React.useMemo(() => {
     const val = MODEL_CALL_SORT[sort.name];
@@ -209,6 +392,11 @@ function ModelCallsTable({ calls }: { calls: ModelCall[] }) {
     },
     { name: 'Latency', width: '9%', sortEnabled: true },
     { name: 'Flags', width: '9%', component: <HeaderLabel label='Flags' info='cached · retry · error indicators for the call.' /> },
+    {
+      name: 'Prompt',
+      width: '7%',
+      component: <HeaderLabel label='Prompt' info='View the exact prompt sent and the response received for this call (when captured).' />,
+    },
   ];
   const tableData = rows.map((c) => [
     { component: <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)' }}>{c.model}</Box> },
@@ -259,9 +447,23 @@ function ModelCallsTable({ calls }: { calls: ModelCall[] }) {
         </Box>
       ),
     },
+    {
+      component: c.hasTrace ? (
+        <Button tone='link' size='sm' onClick={() => setTraceCall(c)} id={`view-prompt-${c.callId}`}>
+          View
+        </Button>
+      ) : (
+        <Box component='span' sx={{ color: 'var(--ds-gray-400)' }}>
+          —
+        </Box>
+      ),
+    },
   ]);
   return (
-    <CustomTable2 headers={headers} tableData={tableData} sort={sort} onSortChange={(s: { name: string; order: 'asc' | 'desc' }) => setSort(s)} />
+    <>
+      <CustomTable2 headers={headers} tableData={tableData} sort={sort} onSortChange={(s: { name: string; order: 'asc' | 'desc' }) => setSort(s)} />
+      <PromptTraceModal call={traceCall} conversationId={conversationId} accountId={accountId} agentId={agentId} onClose={() => setTraceCall(null)} />
+    </>
   );
 }
 
@@ -403,7 +605,7 @@ function FocusedAgentPanel({ conversationId, accountId, agentId }: { conversatio
             >
               Model calls
             </Box>
-            <ModelCallsTable calls={state.data.calls} />
+            <ModelCallsTable calls={state.data.calls} conversationId={conversationId} accountId={accountId} agentId={agentId} />
           </Box>
           {state.data.tools && state.data.tools.length > 0 && (
             <Box>
@@ -633,7 +835,7 @@ function AgentDetailTab({ mode, step, conversationId, accountId }: { mode: Agent
   ) : null;
 
   let body: React.ReactNode;
-  if (mode === 'models') body = <ModelCallsTable calls={data.calls} />;
+  if (mode === 'models') body = <ModelCallsTable calls={data.calls} conversationId={conversationId} accountId={accountId} agentId={step.stepId} />;
   else if (mode === 'tools') body = <ToolCallsTable tools={data.tools} />;
   else {
     const hasExec = data.query || data.thought || data.response;
@@ -991,7 +1193,7 @@ function BackingCallsDrawer({
               >
                 Model calls ({data.calls.length})
               </Box>
-              <ModelCallsTable calls={data.calls} />
+              <ModelCallsTable calls={data.calls} conversationId={conversationId} accountId={accountId} agentId={agentId ?? undefined} />
             </Box>
             {data.tools.length > 0 && (
               <Box>

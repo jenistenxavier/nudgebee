@@ -106,6 +106,15 @@ type DetailModelCall struct {
 	LatencySeconds      float64       `json:"latency_seconds"`
 	TtftMs              int           `json:"ttft_ms"`
 	CreatedAt           time.Time     `json:"created_at"`
+	// HasTrace is true when the stored prompt/response trace exists for this call
+	// (LLM_TRACE_ENABLED was on). Always returned (cheap) so the UI can show a
+	// "view prompt" action without transferring the (large) trace text.
+	HasTrace bool `json:"has_trace"`
+	// PromptMessages / ResponseContent carry the raw trace and are populated ONLY
+	// when the request targets this call by model_call_id (the on-click lazy fetch);
+	// omitted from the normal per-agent listing to keep that payload light.
+	PromptMessages  string `json:"prompt_messages,omitempty"`
+	ResponseContent string `json:"response_content,omitempty"`
 }
 
 // AgentDetail is the ai_get_conversation_agent payload: one agent and the flat
@@ -159,7 +168,7 @@ const agentScopeWhere = `agent_id = $3::uuid AND conversation_id IN (
 // GetConversationAgentDetail returns one agent's execution content + its tool and
 // model calls with cost justification. Returns an empty AgentDetail (no error) if
 // the agent does not exist within the caller's session/account scope.
-func (chat *ConversationDao) GetConversationAgentDetail(sessionID, accountID, agentID string) (AgentDetail, error) {
+func (chat *ConversationDao) GetConversationAgentDetail(sessionID, accountID, agentID, modelCallID string) (AgentDetail, error) {
 	if sessionID == "" || accountID == "" || agentID == "" {
 		return AgentDetail{}, fmt.Errorf("GetConversationAgentDetail: session_id, account_id and agent_id are required")
 	}
@@ -289,6 +298,19 @@ func (chat *ConversationDao) GetConversationAgentDetail(sessionID, accountID, ag
 		StopReason          string    `db:"stop_reason"`
 		ErrorMessage        string    `db:"error_message"`
 		CreatedAt           time.Time `db:"created_at"`
+		HasTrace            bool      `db:"has_trace"`
+		PromptMessages      string    `db:"prompt_messages"`
+		ResponseContent     string    `db:"response_content"`
+	}
+	// has_trace is always cheap (a NULL check). The raw trace text is selected
+	// ONLY in lazy mode (model_call_id set), where we also narrow to that one row.
+	traceCols := "(prompt_messages IS NOT NULL) AS has_trace, '' AS prompt_messages, '' AS response_content"
+	mcWhere := agentScopeWhere
+	mcArgs := []any{sessionID, accountID, agentID}
+	if modelCallID != "" {
+		traceCols = "(prompt_messages IS NOT NULL) AS has_trace, COALESCE(prompt_messages, '') AS prompt_messages, COALESCE(response_content, '') AS response_content"
+		mcWhere = agentScopeWhere + " AND id = $4::uuid"
+		mcArgs = append(mcArgs, modelCallID)
 	}
 	mcQuery := fmt.Sprintf(`
 		SELECT id::text, llm_model, llm_provider,
@@ -299,11 +321,12 @@ func (chat *ConversationDao) GetConversationAgentDetail(sessionID, accountID, ag
 			retry_attempt, is_cache_hit, request_status,
 			COALESCE(stop_reason, '') AS stop_reason,
 			COALESCE(error_message, '') AS error_message,
-			created_at
+			created_at,
+			%s
 		FROM llm_conversation_token_usage
 		WHERE %s
-		ORDER BY created_at`, agentScopeWhere)
-	if err := chat.dbManager.Db.Select(&mcScans, mcQuery, args...); err != nil {
+		ORDER BY created_at`, traceCols, mcWhere)
+	if err := chat.dbManager.Db.Select(&mcScans, mcQuery, mcArgs...); err != nil {
 		slog.Error("GetConversationAgentDetail: model_calls query failed", "error", err)
 		return AgentDetail{}, fmt.Errorf("GetConversationAgentDetail model_calls: %w", err)
 	}
@@ -344,6 +367,9 @@ func (chat *ConversationDao) GetConversationAgentDetail(sessionID, accountID, ag
 			LatencySeconds:      m.LatencySeconds,
 			TtftMs:              m.TtftMs,
 			CreatedAt:           m.CreatedAt,
+			HasTrace:            m.HasTrace,
+			PromptMessages:      m.PromptMessages,
+			ResponseContent:     m.ResponseContent,
 		})
 
 		agentCost += cost
@@ -404,6 +430,10 @@ type ConversationAgentDetailRequest struct {
 	AccountId      string `json:"account_id" validate:"required"`
 	AgentId        string `json:"agent_id" validate:"required"`
 	UserId         string `json:"user_id"`
+	// ModelCallId, when set, switches to the lazy-trace mode: return only that one
+	// model call WITH its prompt_messages/response_content populated. Empty = the
+	// normal per-agent listing (trace text omitted, only has_trace flags).
+	ModelCallId string `json:"model_call_id"`
 }
 
 // HandleConversationAgentDetailApi backs ai_get_conversation_agent — the detail a
@@ -415,5 +445,5 @@ func HandleConversationAgentDetailApi(ctx *security.RequestContext, request Conv
 	if !ctx.GetSecurityContext().HasAccountAccess(request.AccountId, security.SecurityAccessTypeRead) {
 		return AgentDetail{}, fmt.Errorf("HandleConversationAgentDetailApi: forbidden account_id")
 	}
-	return GetConversationDao().GetConversationAgentDetail(request.ConversationId, request.AccountId, request.AgentId)
+	return GetConversationDao().GetConversationAgentDetail(request.ConversationId, request.AccountId, request.AgentId, request.ModelCallId)
 }

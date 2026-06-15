@@ -275,7 +275,7 @@ type IConversationDao interface {
 	GetUsageFilters(filter UsageMetricsFilter) (UsageFilters, error)
 	ListConversationCosts(filter UsageMetricsFilter, sortBy, sortDir string, limit, offset int) (ConversationCostList, error)
 	GetConversationTree(sessionID, accountID string) (ConversationTree, error)
-	GetConversationAgentDetail(sessionID, accountID, agentID string) (AgentDetail, error)
+	GetConversationAgentDetail(sessionID, accountID, agentID, modelCallID string) (AgentDetail, error)
 	GetConversationOptimizationProfile(sessionID, accountID string) (OptimizationProfile, *optSavingsIndex, error)
 	ListAgentCalls(filter UsageMetricsFilter, sortBy string, limit, latencyPercentile int) (AgentCallList, error)
 	InsertTokenUsage(record *TokenUsageRecord) error

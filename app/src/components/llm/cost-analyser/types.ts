@@ -68,6 +68,12 @@ export interface ModelCall {
   errorMessage?: string;
   /** Per-component cost split (input / cached / output / …), when available. */
   costBreakdown?: ModelCostBreakdown;
+  /** True when a stored prompt/response trace exists — gates the "view prompt"
+   * action. The trace text itself is fetched lazily on click, not carried here. */
+  hasTrace?: boolean;
+  /** Raw trace, populated only by the lazy by-id fetch (modal); undefined in the list. */
+  promptMessages?: string;
+  responseContent?: string;
 }
 
 // ─── Sub-task / Step ─────────────────────────────────────────────────────────
