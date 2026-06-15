@@ -637,6 +637,22 @@ const WorkflowListing: React.FC<WorkflowListingProps> = ({ accountId }) => {
         cleanTasks(clonedDefinition.tasks);
       }
 
+      // Webhook triggers carry a system-managed secret and an internal.name
+      // bound to the source workflow's ID (the `wf-<id>-` shadow prefix on
+      // legacy rows). Strip both so the backend re-derives a fresh secret
+      // and re-binds the integration under the new workflow's ID, matching
+      // the contract enforced by enforceWebhookSecrets / normalizeWebhookTriggers.
+      if (Array.isArray(clonedDefinition.triggers)) {
+        for (const trigger of clonedDefinition.triggers) {
+          if (trigger?.type === 'webhook') {
+            if (trigger.params) {
+              delete trigger.params.secret;
+            }
+            delete trigger.internal;
+          }
+        }
+      }
+
       const createRequest: WorkflowCreateRequest = {
         account_id: accountId,
         workflow: {
