@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go/aiplatform v1.124.0
 	cloud.google.com/go/auth v0.20.0
 	cloud.google.com/go/auth/oauth2adapt v0.2.8
-	cloud.google.com/go/bigquery v1.74.0
+	cloud.google.com/go/bigquery v1.77.0
 	cloud.google.com/go/cloudsqlconn v1.21.0
 	cloud.google.com/go/compute v1.62.0
 	cloud.google.com/go/container v1.46.0
@@ -16,7 +16,7 @@ require (
 	cloud.google.com/go/pubsub/v2 v2.6.0
 	cloud.google.com/go/recommender v1.18.0
 	cloud.google.com/go/run v1.21.0
-	cloud.google.com/go/storage v1.61.3
+	cloud.google.com/go/storage v1.62.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.21.1
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus v1.10.0
@@ -78,10 +78,10 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/costexplorer v1.63.2
 	github.com/aws/aws-sdk-go-v2/service/costoptimizationhub v1.22.10
 	github.com/aws/aws-sdk-go-v2/service/directconnect v1.38.19
-	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.4
+	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.59.0
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.300.0
 	github.com/aws/aws-sdk-go-v2/service/ecr v1.51.0
-	github.com/aws/aws-sdk-go-v2/service/ecrpublic v1.38.13
+	github.com/aws/aws-sdk-go-v2/service/ecrpublic v1.39.6
 	github.com/aws/aws-sdk-go-v2/service/ecs v1.82.4
 	github.com/aws/aws-sdk-go-v2/service/efs v1.41.13
 	github.com/aws/aws-sdk-go-v2/service/eks v1.84.0
@@ -96,13 +96,13 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/kafka v1.44.1
 	github.com/aws/aws-sdk-go-v2/service/kms v1.46.2
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.89.0
-	github.com/aws/aws-sdk-go-v2/service/pi v1.35.17
+	github.com/aws/aws-sdk-go-v2/service/pi v1.37.3
 	github.com/aws/aws-sdk-go-v2/service/pricing v1.41.2
 	github.com/aws/aws-sdk-go-v2/service/rds v1.108.5
 	github.com/aws/aws-sdk-go-v2/service/redshift v1.62.10
 	github.com/aws/aws-sdk-go-v2/service/route53 v1.62.5
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.101.0
-	github.com/aws/aws-sdk-go-v2/service/sagemaker v1.246.0
+	github.com/aws/aws-sdk-go-v2/service/sagemaker v1.254.0
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.7
 	github.com/aws/aws-sdk-go-v2/service/securityhub v1.65.0
 	github.com/aws/aws-sdk-go-v2/service/ses v1.35.0
@@ -141,7 +141,7 @@ require (
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.29.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.29.0
-	go.opentelemetry.io/otel/exporters/stdout/stdoutmetric v1.40.0
+	go.opentelemetry.io/otel/exporters/stdout/stdoutmetric v1.42.0
 	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.43.0
 	go.opentelemetry.io/otel/metric v1.44.0
 	go.opentelemetry.io/otel/sdk v1.44.0
@@ -180,9 +180,9 @@ require (
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.29 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/ini v1.8.6 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.24 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.9 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.12 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.9.15 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.12.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.12.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.23 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.23 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.0.11 // indirect
