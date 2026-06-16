@@ -212,6 +212,17 @@ type appConfig struct {
 	RabbitMqWebhookProcessExchange    string `mapstructure:"rabbit_mq_webhook_process_exchange"`
 	RabbitMqWebhookProcessQueue       string `mapstructure:"rabbit_mq_webhook_process_queue"`
 	RabbitMqWebhookProcessConcurrency int    `mapstructure:"rabbit_mq_webhook_process_concurrency"`
+
+	// LLM investigation-completed callback consumer. llm-server publishes a
+	// completion envelope here when an event investigation reaches a terminal
+	// state; this consumer runs the downstream event processors that were
+	// deferred at creation time. Exchange + routing key MUST match
+	// llm-server's publisher; the queue name MUST differ from runbook-server's
+	// so both services receive their own copy off the (direct) exchange.
+	RabbitMqEventInvestigateCompletedExchange    string `mapstructure:"rabbit_mq_event_investigate_completed_exchange"`
+	RabbitMqEventInvestigateCompletedQueue       string `mapstructure:"rabbit_mq_event_investigate_completed_queue"`
+	RabbitMqEventInvestigateCompletedRoutingKey  string `mapstructure:"rabbit_mq_event_investigate_completed_routing_key"`
+	RabbitMqEventInvestigateCompletedConcurrency int    `mapstructure:"rabbit_mq_event_investigate_completed_concurrency"`
 }
 
 // postInitHooks are callbacks fired after Config has been unmarshalled.
@@ -388,6 +399,14 @@ func init() {
 	viper.SetDefault("rabbit_mq_webhook_process_exchange", "webhook_process_exchange")
 	viper.SetDefault("rabbit_mq_webhook_process_queue", "webhook_process")
 	viper.SetDefault("rabbit_mq_webhook_process_concurrency", 5)
+
+	// LLM investigation-completed callback consumer. Exchange + routing key
+	// MUST match llm-server's publisher defaults; queue MUST differ from
+	// runbook-server's ("runbook_server_event_investigate_completed").
+	viper.SetDefault("rabbit_mq_event_investigate_completed_exchange", "llm_server_event_investigate_completed")
+	viper.SetDefault("rabbit_mq_event_investigate_completed_routing_key", "llm_server_event_investigate_completed")
+	viper.SetDefault("rabbit_mq_event_investigate_completed_queue", "services_event_investigate_completed")
+	viper.SetDefault("rabbit_mq_event_investigate_completed_concurrency", 5)
 
 	err := viper.ReadInConfig()
 	if err != nil {

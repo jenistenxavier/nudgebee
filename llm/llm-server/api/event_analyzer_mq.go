@@ -57,6 +57,27 @@ func publishInvestigationCompleted(env investigationCompletedEnvelope) {
 	}
 }
 
+// publishCompletionUnconditional emits a completion envelope regardless of
+// whether the request carried a TaskToken. It exists for the auto-AI-summary
+// path (api-server's llm.ProcessEvent), which sets no token but still needs a
+// callback so api-server can run the event processors it deferred until the
+// investigation finished. runbook-server's completion consumer drops
+// empty-token envelopes, so the extra publish is a no-op there; api-server's
+// own queue acts on it. Best-effort, same as publishInvestigationCompleted.
+func publishCompletionUnconditional(env investigationCompletedEnvelope) {
+	exch := config.Config.RabbitMqEventInvestigateCompletedExchange
+	rk := config.Config.RabbitMqEventInvestigateCompletedRoutingKey
+	if exch == "" || rk == "" {
+		slog.Warn("eventasync: completion exchange not configured, skipping publish",
+			"event_id", env.EventID, "account_id", env.AccountID)
+		return
+	}
+	if err := common.MqPublish(exch, rk, env); err != nil {
+		slog.Error("eventasync: failed to publish unconditional investigation completion",
+			"error", err, "event_id", env.EventID, "account_id", env.AccountID)
+	}
+}
+
 func init() {
 	// do not connect with RabbitMQ while doing testing
 	if testing.Testing() {
@@ -136,6 +157,20 @@ func processTroubleshootingEventFromMq(data []byte) error {
 				env.TaskToken = t
 				publishInvestigationCompleted(env)
 			}
+		}
+
+		// 3. Unconditional callback for the non-workflow (no-token) path.
+		//    api-server's llm.ProcessEvent defers its downstream event
+		//    processors (notification / workflow / pagerduty-comment) until
+		//    the investigation finishes; this envelope is how it learns the
+		//    analysis is done. Published on every terminal, non-skip path
+		//    (COMPLETED or FAILED). For token-bearing requests this is an
+		//    additional empty-token envelope — runbook-server drops it and
+		//    api-server dedups by event_id — so it is safe to always emit.
+		if !skipPublish && publishState.EventID != "" {
+			autoEnv := publishState
+			autoEnv.TaskToken = ""
+			publishCompletionUnconditional(autoEnv)
 		}
 	}()
 
@@ -264,6 +299,15 @@ func processTroubleshootingEventFromMq(data []byte) error {
 			"tenant", ctx.GetSecurityContext().GetTenantId(),
 			"account", eventAnalysisRequest.AccountId)
 		skipPublish = true
+		// api-server's llm.ProcessEvent passed its own feature gate and may
+		// have deferred this event's downstream processors pending a
+		// completion callback. This re-check disagreeing (a transient
+		// flag-toggle race against the primary gate) must not strand them —
+		// emit one terminal envelope so api-server still runs them. No token
+		// is set, so runbook-server drops it.
+		publishState.Status = string(events.AnalysisStatusFailed)
+		publishState.StatusReason = "auto-analysis disabled at llm-server"
+		publishCompletionUnconditional(publishState)
 		return nil
 	}
 
