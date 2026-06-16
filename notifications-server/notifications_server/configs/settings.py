@@ -447,6 +447,7 @@ class MSTeamsSettings(BaseSettings):
         "User.Read.All",
         "Team.ReadBasic.All",
         "Channel.ReadBasic.All",
+        "Channel.Create",
         "ChannelMessage.Send",
         "Chat.Create",
         "Chat.ReadWrite",

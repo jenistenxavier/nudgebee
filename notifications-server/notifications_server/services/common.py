@@ -452,6 +452,161 @@ class CommonService:
             },
         }
 
+    def create_channel(self, platform, tenant_id, name, is_private=False, description=None, team_id=None):
+        """Find-or-create a channel/space on the given platform.
+
+        Returns an existing destination whose name matches when one is found,
+        otherwise creates a new one. The structured {"success", "data"} /
+        {"error"} shape mirrors join_channel; "created" tells the caller whether
+        a new channel was made or an existing one reused.
+        """
+        try:
+            if platform == "google_chat":
+                return self._create_google_chat_space(tenant_id, name)
+            if platform == "slack":
+                return self._create_slack_channel(tenant_id, team_id, name, is_private)
+            if platform == "ms_teams":
+                return self._create_ms_teams_channel(tenant_id, team_id, name, description, is_private)
+            return {"error": {"message": f"Platform {platform} is not supported yet"}}
+        except Exception:
+            # Mirrors join_channel: known errors return via the structured paths
+            # above; this branch only fires for unhandled bugs/infra failures whose
+            # str(e) text could leak internals without helping the caller.
+            LOG.exception("Error creating channel")
+            return {"error": {"message": "Unexpected error while creating channel"}}
+
+    @staticmethod
+    def _normalize_slack_channel_name(name):
+        # Slack channel names are lowercase, <=80 chars, and may only contain
+        # letters, digits, hyphens and underscores. Pre-normalize so a friendly
+        # display name ("Incident #42") maps to a valid, stable channel name and
+        # the find-by-name lookup compares apples to apples.
+        normalized = re.sub(r"[^a-z0-9_-]+", "-", name.strip().lower())
+        return normalized.strip("-")[:80]
+
+    def _find_slack_channel(self, messaging_platform, normalized_name):
+        channels = self.get_slack_channels(messaging_platform).get("data", [])
+        for channel in channels:
+            if channel.get("name") == normalized_name:
+                return channel
+        return None
+
+    def _create_slack_channel(self, tenant_id, team_id, name, is_private):
+        messaging_platform = self._get_messaging_platform(tenant_id, team_id, "slack")
+        if not messaging_platform:
+            return {"error": {"message": f"No Slack installation found for tenant: {tenant_id}"}}
+
+        normalized = self._normalize_slack_channel_name(name)
+        if not normalized:
+            return {"error": {"message": "Channel name is empty after normalization"}}
+
+        existing = self._find_slack_channel(messaging_platform, normalized)
+        if existing:
+            return self._channel_result(False, "slack", existing["id"], existing["name"])
+
+        scope = "groups:write" if is_private else "channels:manage"
+        try:
+            response = self.slack_app.client.conversations_create(
+                token=messaging_platform.token,
+                name=normalized,
+                is_private=is_private,
+                team_id=messaging_platform.team_id,
+            )
+            if not response.get("ok"):
+                error_msg = response.get("error", ERR_UNKNOWN)
+                if error_msg == "name_taken":
+                    found = self._find_slack_channel(messaging_platform, normalized)
+                    if found:
+                        return self._channel_result(False, "slack", found["id"], found["name"])
+                LOG.error("Failed to create Slack channel %s: %s", normalized, error_msg)
+                return self._check_error_msg(error_msg, scope)
+        except SlackApiError as e:
+            error_msg = e.response.get("error", str(e))
+            # Race: another caller created it between our lookup and create.
+            if error_msg == "name_taken":
+                found = self._find_slack_channel(messaging_platform, normalized)
+                if found:
+                    return self._channel_result(False, "slack", found["id"], found["name"])
+            LOG.error("Slack API error creating channel %s: %s", normalized, error_msg)
+            return self._check_error_msg(error_msg, scope)
+
+        channel = response.get("channel", {})
+        return self._channel_result(True, "slack", channel.get("id"), channel.get("name"))
+
+    def _create_ms_teams_channel(self, tenant_id, team_id, name, description, is_private):
+        if not team_id:
+            return {"error": {"message": "team_id is required to create an MS Teams channel"}}
+
+        messaging_platform = self._get_messaging_platform(tenant_id, team_id, "ms_teams")
+        if not messaging_platform:
+            return {"error": {"message": f"No MS Teams installation found for tenant: {tenant_id}"}}
+
+        error = self._refresh_ms_teams_token(messaging_platform)
+        if error:
+            return {"error": {"message": error}}
+
+        # Find: match an existing channel by display name within the team.
+        try:
+            existing_channels = MsTeamsClient.list_team_channels(messaging_platform.token, team_id)
+        except Exception:
+            LOG.warning("Unable to list MS Teams channels for find-or-create; proceeding to create", exc_info=True)
+            existing_channels = []
+        for channel in existing_channels:
+            if channel.get("name") == name:
+                return self._channel_result(False, "ms_teams", channel["id"], channel["name"], team_id=team_id)
+
+        result = MsTeamsClient.create_channel(
+            access_token=messaging_platform.token,
+            team_id=team_id,
+            display_name=name,
+            description=description,
+            is_private=is_private,
+        )
+        if not result.get("success"):
+            return {"error": {"message": result.get("error") or "Failed to create MS Teams channel"}}
+        return self._channel_result(
+            True, "ms_teams", result.get("channel_id"), result.get("name"), team_id=team_id, url=result.get("url")
+        )
+
+    def _create_google_chat_space(self, tenant_id, name):
+        if not GoogleChatAppClient.is_enabled():
+            return {"error": {"message": "Google Chat service account is not configured"}}
+
+        # Find: match an existing space the app belongs to by display name.
+        existing = GoogleChatAppClient.find_space_by_display_name(name, tenant=tenant_id)
+        if existing:
+            return self._channel_result(False, "google_chat", existing, name)
+
+        result = GoogleChatAppClient.create_space(name, tenant=tenant_id)
+        if not result.get("success"):
+            if result.get("reason") == "needs_authorization":
+                return {
+                    "error": {
+                        "message": "Google Chat app needs admin authorization "
+                        "(chat.spaces.create) before it can create spaces."
+                    }
+                }
+            return {
+                "error": {"message": f"Failed to create Google Chat space: {result.get('error') or 'unknown error'}"}
+            }
+        return self._channel_result(
+            True, "google_chat", result.get("channel_id"), result.get("name"), url=result.get("url")
+        )
+
+    @staticmethod
+    def _channel_result(created, platform, channel_id, name, team_id=None, url=None):
+        data = {"channel_id": channel_id, "name": name, "platform": platform}
+        if team_id:
+            data["team_id"] = team_id
+        if url:
+            data["url"] = url
+        return {
+            "success": True,
+            "created": created,
+            "message": "Channel created" if created else "Existing channel reused",
+            "data": data,
+        }
+
     def _get_messaging_platform(self, tenant_id, team_id, platform):
         # Slack callers may target a specific workspace by team_id; MS Teams/Google
         # Chat resolve by tenant. Unions integrations + legacy messaging_platforms.

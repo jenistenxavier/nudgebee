@@ -25,6 +25,11 @@ CHAT_BOT_SCOPE = "https://www.googleapis.com/auth/chat.bot"
 # succeed; until then Google returns 403, which we surface for the guided-grant UI.
 CHAT_MEMBERSHIPS_SCOPE = "https://www.googleapis.com/auth/chat.app.memberships"
 
+# Lets the app create named spaces (find-or-create destinations for runbooks). Like
+# the memberships scope, the Workspace admin must authorize it before spaces.create
+# succeeds; until then Google returns 403, surfaced as reason='needs_authorization'.
+CHAT_SPACES_CREATE_SCOPE = "https://www.googleapis.com/auth/chat.spaces.create"
+
 
 class GoogleChatAppClient:
     """Service-account-authenticated Chat API client used for bot reply paths.
@@ -61,7 +66,7 @@ class GoogleChatAppClient:
                 raise ValueError("Google Chat service account key is not configured (GOOGLE_CHAT_SA_KEY).")
             sa_info = json.loads(sa_key)
             credentials = service_account.Credentials.from_service_account_info(
-                sa_info, scopes=[CHAT_BOT_SCOPE, CHAT_MEMBERSHIPS_SCOPE]
+                sa_info, scopes=[CHAT_BOT_SCOPE, CHAT_MEMBERSHIPS_SCOPE, CHAT_SPACES_CREATE_SCOPE]
             )
             cls._service = build("chat", "v1", credentials=credentials, cache_discovery=False)
             return cls._service
@@ -221,3 +226,69 @@ class GoogleChatAppClient:
         except Exception as e:
             LOG.exception("Unexpected error probing Google Chat membership for %s", space_id)
             return {"status": "error", "channel_id": space_id, "error": str(e)}
+
+    @classmethod
+    def find_space_by_display_name(cls, display_name, tenant=None):
+        """Return the first space (the app is a member of) whose displayName matches.
+
+        Used by the find-or-create path. Google Chat's spaces.list filter does not
+        support displayName, so we page through named spaces and match client-side.
+        Returns the space resource name (e.g. "spaces/AAA") or None.
+        """
+        try:
+            service = cls._get_service()
+            page_token = None
+            while True:
+                response = (
+                    service.spaces().list(filter='spaceType = "SPACE"', pageSize=1000, pageToken=page_token).execute()
+                )
+                for space in response.get("spaces", []):
+                    if space.get("displayName") == display_name:
+                        return space.get("name")
+                page_token = response.get("nextPageToken")
+                if not page_token:
+                    return None
+        except HttpError as e:
+            status_code, error_status, error_message = parse_http_error(e)
+            LOG.error(
+                "Google Chat (app auth) list-spaces error for tenant %s: %s (status=%s)",
+                tenant,
+                error_message,
+                status_code,
+            )
+            return None
+        except Exception:
+            LOG.exception("Unexpected error listing Google Chat spaces for tenant %s", tenant)
+            return None
+
+    @classmethod
+    def create_space(cls, display_name, tenant=None):
+        """Create a named Google Chat space as the Chat app.
+
+        Requires the chat.spaces.create scope to be authorized for the app in the
+        target Workspace; until an admin grants it Google returns 403, surfaced as
+        reason='needs_authorization' so the UI can prompt the admin.
+        """
+        try:
+            service = cls._get_service()
+            space = service.spaces().create(body={"spaceType": "SPACE", "displayName": display_name}).execute()
+            return {
+                "success": True,
+                "channel_id": space.get("name"),
+                "name": space.get("displayName", display_name),
+                "url": space.get("spaceUri"),
+                "raw": space,
+            }
+        except HttpError as e:
+            status_code, error_status, error_message = parse_http_error(e)
+            reason = "needs_authorization" if status_code == 403 else (error_status or "api_error")
+            LOG.error(
+                "Google Chat (app auth) create-space error for tenant %s: %s (status=%s)",
+                tenant,
+                error_message,
+                status_code,
+            )
+            return {"success": False, "reason": reason, "error": error_message}
+        except Exception as e:
+            LOG.exception("Unexpected error creating Google Chat space for tenant %s", tenant)
+            return {"success": False, "reason": "unexpected_error", "error": str(e)}

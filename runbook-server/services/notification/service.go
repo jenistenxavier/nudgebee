@@ -578,3 +578,94 @@ func JoinChannel(ctx *security.RequestContext, request JoinChannelRequest) (map[
 
 	return response, nil
 }
+
+// CreateChannelRequest represents a find-or-create request for a channel/space.
+type CreateChannelRequest struct {
+	Platform    string `json:"platform" validate:"required"`
+	Name        string `json:"name" validate:"required"`
+	IsPrivate   bool   `json:"is_private,omitempty"`
+	Description string `json:"description,omitempty"`
+	TeamID      string `json:"team_id,omitempty"`
+	AccountID   string `json:"account_id" validate:"required"`
+}
+
+// CreateChannelResponse represents the channel returned by the create endpoint.
+type CreateChannelResponse struct {
+	ChannelID string `json:"channel_id"`
+	Name      string `json:"name"`
+	TeamID    string `json:"team_id"`
+	URL       string `json:"url"`
+	Platform  string `json:"platform"`
+	Created   bool   `json:"created"`
+}
+
+// CreateChannel find-or-creates a channel/space on the given platform via the
+// notifications-server. Returns the existing channel when one with a matching
+// name is found, otherwise the newly created one.
+func CreateChannel(ctx *security.RequestContext, request CreateChannelRequest) (CreateChannelResponse, error) {
+	if err := validatePlatform(request.Platform); err != nil {
+		return CreateChannelResponse{}, err
+	}
+
+	if ctx.GetSecurityContext().GetTenantId() == "" {
+		return CreateChannelResponse{}, errors.New("notifications: tenantId is required")
+	}
+
+	if err := common.ValidateStruct(request); err != nil {
+		return CreateChannelResponse{}, err
+	}
+
+	if request.Platform == "ms_teams" && request.TeamID == "" {
+		return CreateChannelResponse{}, errors.New("notifications: team_id is required for ms_teams")
+	}
+
+	headers := map[string]string{
+		"tenant":       ctx.GetSecurityContext().GetTenantId(),
+		"Content-Type": "application/json",
+	}
+
+	requestBody := map[string]any{
+		"platform":   request.Platform,
+		"name":       request.Name,
+		"is_private": request.IsPrivate,
+		"account_id": request.AccountID,
+	}
+	if request.Description != "" {
+		requestBody["description"] = request.Description
+	}
+	if request.TeamID != "" {
+		requestBody["team_id"] = request.TeamID
+	}
+
+	resp, err := common.HttpPost(config.Config.NotificationServerUrl+"/api/channels/create", common.HttpWithHeaders(withActionToken(headers)), common.HttpWithJsonBody(requestBody))
+	if err != nil {
+		ctx.GetLogger().Error("notifications: unable to create channel", "error", err)
+		return CreateChannelResponse{}, errors.New("notifications: unable to create channel request")
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		ctx.GetLogger().Error("notifications: unable to read body", "error", err)
+		return CreateChannelResponse{}, err
+	}
+
+	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		return CreateChannelResponse{}, fmt.Errorf("notifications: unable to create channel - %s", string(body))
+	}
+
+	var response struct {
+		Success bool                  `json:"success"`
+		Created bool                  `json:"created"`
+		Data    CreateChannelResponse `json:"data"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return CreateChannelResponse{}, err
+	}
+
+	result := response.Data
+	result.Created = response.Created
+	return result, nil
+}
