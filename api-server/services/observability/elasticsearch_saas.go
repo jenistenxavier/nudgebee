@@ -438,11 +438,7 @@ func (e *ElasticSaasSource) QueryLabelValues(ctx *security.RequestContext, fetch
 		return nil, fmt.Errorf("index is required for querying label values")
 	}
 
-	// Try .keyword suffix first (required for text fields), fall back to original field name.
 	fieldsToTry := []string{fetchLogRequest.LabelName}
-	if !strings.HasSuffix(fetchLogRequest.LabelName, ".keyword") {
-		fieldsToTry = []string{fetchLogRequest.LabelName + ".keyword", fetchLogRequest.LabelName}
-	}
 
 	searchURL := fmt.Sprintf("%s/%s/_search", cfg.Url, index)
 	var bodyBytes []byte
