@@ -34,6 +34,7 @@ import HeaderLabel from '../components/HeaderLabel';
 import SectionHeader from '../components/Section';
 import AgentLatencyBars from '../components/AgentLatencyBars';
 import { fmtTokens } from '../format';
+import { makeSeverity, SeverityCell, type Severity } from '../components/severity';
 import { listAgentCosts, type AgentCallRow, type AgentLatencyProfile, type AgentLatencyPercentile, type AgentSortBy } from '@api1/ai-cost';
 import type { CostFilters } from '../types';
 
@@ -116,7 +117,7 @@ const SORT_VALUE: Record<string, (r: AgentCallRow) => number | string> = {
   Status: (r) => r.status || '',
 };
 
-function toRow(r: AgentCallRow, onSelectRun: AgentsViewProps['onSelectRun']) {
+function toRow(r: AgentCallRow, onSelectRun: AgentsViewProps['onSelectRun'], costSev: (v: number) => Severity, latSev: (v: number) => Severity) {
   const title = r.conversation_title || r.conversation_id;
   return [
     // Agent — plain text (no chip); name can wrap.
@@ -175,11 +176,27 @@ function toRow(r: AgentCallRow, onSelectRun: AgentsViewProps['onSelectRun']) {
         </Box>
       ),
     },
-    { align: 'right' as const, data: r.cost_usd, component: <CostCallout value={r.cost_usd} size='sm' tone='neutral' fractionDigits={3} /> },
+    {
+      align: 'right' as const,
+      data: r.cost_usd,
+      component: (
+        <Box sx={{ display: 'inline-flex', justifyContent: 'flex-end', width: '100%' }}>
+          <SeverityCell severity={costSev(r.cost_usd)} metric='cost'>
+            <CostCallout value={r.cost_usd} size='sm' tone='neutral' fractionDigits={3} />
+          </SeverityCell>
+        </Box>
+      ),
+    },
     {
       align: 'right' as const,
       data: r.latency_sum_seconds,
-      component: <Box sx={{ ...numCell, textAlign: 'right' }}>{secs(r.latency_sum_seconds)}</Box>,
+      component: (
+        <Box sx={{ display: 'inline-flex', justifyContent: 'flex-end', width: '100%' }}>
+          <SeverityCell severity={latSev(r.latency_sum_seconds)} metric='latency'>
+            <Box sx={{ ...numCell, textAlign: 'right' }}>{secs(r.latency_sum_seconds)}</Box>
+          </SeverityCell>
+        </Box>
+      ),
     },
     {
       align: 'right' as const,
@@ -309,7 +326,10 @@ export function AgentsView({ accountId, filters, agentOptions = [], onSelectRun 
     return sort.order === 'desc' ? arr.reverse() : arr;
   }, [state.rows, sort]);
 
-  const tableData = React.useMemo(() => sortedRows.map((r) => toRow(r, onSelectRun)), [sortedRows, onSelectRun]);
+  // Relative outlier highlighting: rank cost / total-latency within the rows shown.
+  const costSev = React.useMemo(() => makeSeverity(sortedRows.map((r) => r.cost_usd)), [sortedRows]);
+  const latSev = React.useMemo(() => makeSeverity(sortedRows.map((r) => r.latency_sum_seconds)), [sortedRows]);
+  const tableData = React.useMemo(() => sortedRows.map((r) => toRow(r, onSelectRun, costSev, latSev)), [sortedRows, onSelectRun, costSev, latSev]);
   const showEmpty = !state.loading && !state.error && state.rows.length === 0;
 
   return (

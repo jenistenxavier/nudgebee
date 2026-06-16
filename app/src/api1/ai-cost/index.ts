@@ -916,3 +916,292 @@ export async function getConversationUsageMetrics(req: ConversationDetailRequest
   // Response envelope is { data: { conversation: <summary> } }.
   return response?.data?.data?.ai_get_conversation_usage_metrics?.data?.conversation ?? null;
 }
+
+/** Three optimization levers, in priority order. */
+export type PromptLever = 'count' | 'cache' | 'relevance';
+/** Whether a component is byte-identical every call (cacheable) or varies. */
+export type PromptClassification = 'static' | 'dynamic' | 'mixed';
+
+/** One node in the prompt's component tree. The FRONTEND builds and measures this
+ * tree from the real prompt (a MACRO component per message groups its section
+ * SUB-components via `parent`); the model only annotates each node by `id`
+ * (classification + note). loc/size/tokens are measured from the real content — the
+ * model never defines sizes — so the numbers always match the actual prompt. */
+export interface PromptComponent {
+  /** Stable hierarchical id, e.g. "1", "1.2". */
+  id: string;
+  name: string;
+  /** Parent component id, omitted/empty for top-level (macro) components. */
+  parent?: string;
+  role?: string; // system | human | ai | tool | …
+  /** Filled from the model's per-id annotation (frontend leaves it unset). */
+  classification?: PromptClassification;
+  loc: number; // lines of content
+  size: number; // bytes (UTF-8)
+  tokens: number; // chars ÷ 4 (text estimate; the header total uses billed tokens)
+  pct: number; // % of measured-token total
+  /** Verbatim content of this component — present on leaf nodes (empty for groups). */
+  content?: string;
+  /** Filled from the model's per-id annotation. */
+  note?: string;
+}
+
+/** The model's per-component annotation (keyed by component id). */
+export interface PromptComponentAnnotation {
+  classification?: PromptClassification;
+  note?: string;
+}
+
+/** Cache-prefix verdict: is all STATIC content contiguous at the front? */
+export interface PromptCacheVerdict {
+  /** True when every STATIC component precedes every DYNAMIC one (clean cacheable prefix). */
+  prefix_contiguous: boolean;
+  /** The first dynamic-before-static offender that poisons the prefix (e.g. a timestamp); empty if none. */
+  poisoning?: string;
+  detail: string;
+}
+
+/** Declared-but-unused content — dead weight billed on every step. */
+export interface PromptDeadWeight {
+  name: string;
+  tokens: number;
+  detail: string;
+}
+
+/** One ranked optimization with its projected saving + explicit accuracy impact. */
+export interface PromptOptimization {
+  title: string;
+  lever: PromptLever; // count | cache | relevance
+  /** tier | subset | relocate | dedupe | conditionalize | reorder | cut | compact */
+  technique?: string;
+  projected_token_saving: number;
+  /** Cache reorders can be ~10× cost wins at zero token change — captured here. */
+  projected_cost_saving_pct?: number;
+  /** Implementation cost: low (text edit / reorder) … high (code changes across agents). */
+  effort?: string;
+  /** REQUIRED per the methodology's guardrails: never trade accuracy for size silently. */
+  accuracy_impact: string;
+  detail: string;
+}
+
+// The model's output. Components/sizes are NOT here — the frontend owns those; the
+// model returns per-id classifications plus the qualitative judgment.
+export interface PromptAnalysis {
+  summary: string;
+  /** Pareto: name the 1–2 components that dominate the token count, with their %. */
+  dominant_buckets: string;
+  /** Per-component annotation, keyed by the frontend component id. */
+  classifications?: Record<string, PromptComponentAnnotation | PromptClassification>;
+  cache_verdict: PromptCacheVerdict;
+  dead_weight: PromptDeadWeight[];
+  optimizations: PromptOptimization[];
+  /** One concrete real call validated bottom-up (where tokens/cost/latency go). */
+  concrete_instance?: string;
+}
+
+export interface StoredPromptAnalysis {
+  analysis: PromptAnalysis;
+  analyzedAt: string;
+}
+
+export interface AnalyzePromptRequest {
+  accountId: string;
+  /** model_call_id — gives the analysis a stable per-call session id so re-opening
+   * the same call shows the cached result instead of re-running. */
+  callId: string;
+  /** Raw `prompt_messages` JSON for the call (the exact bytes sent to the model). */
+  promptJson: string;
+  /** Frontend-built component list (id / parent / name / role / loc / size / tokens /
+   * % / content preview) — the leaves the model must classify by id and reference. */
+  measured?: string;
+  /** The model's response for this call — the usage signal for declared-vs-used. */
+  responseContent?: string;
+  userId?: string;
+}
+
+// The query is inlined into a GraphQL mutation string; a multi-hundred-KB prompt
+// would blow both the request and the model's context window. Cap the embedded
+// prompt and mark the truncation so the analysis (and the UI) can say so honestly.
+const PROMPT_ANALYSIS_MAX_CHARS = 120_000;
+
+const PROMPT_ANALYSIS_POLL_INTERVAL_MS = 3000;
+const PROMPT_ANALYSIS_POLL_TIMEOUT_MS = 3 * 60 * 1000; // a single completion, shorter than the optimizer
+
+const PROMPT_ANALYSIS_INSTRUCTIONS = `You are an LLM prompt-engineering analyst. Objective: reduce this prompt's token cost and latency WITHOUT degrading model accuracy. Optimize three levers in priority order: (1) token count, (2) cache rate, (3) relevance.
+
+The prompt has ALREADY been broken into COMPONENTS and measured for you (id / parent / name / role / loc / size / tokens / % / content-preview, in send order). You do NOT define components, sizes, or content — those are ground truth. Your job is to (a) classify each component by its id, and (b) produce the qualitative analysis below. The RAW PROMPT JSON and the model's RESPONSE are also provided for deeper inspection.
+
+Procedure:
+- CLASSIFY every component id as STATIC (byte-identical every call: role, format rules, tool details, app overview), DYNAMIC (changes per call: date, memory, history, notebook, observations, question), or MIXED. Return a map of component id → classification (+ an optional one-line note).
+- Follow the money (Pareto): name the 1-2 components (by name) that dominate the token count, with their %. Do not trim uniformly.
+- Check the cache layout: a prompt cache matches a byte-identical PREFIX. Using the send order, verify all STATIC components are contiguous at the front and DYNAMIC at the tail. Any dynamic value before static content (a timestamp is the classic offender) poisons the cache from that byte on — flag it.
+- Separate the two levers: cutting/tiering/compacting/deduping lowers token COUNT; caching (reordering static-first) lowers COST at the same token count (~10× cheaper). A pure reorder can be a cost win with zero content change.
+- Prove waste with usage data: cross-check tools/sections DECLARED in the prompt against what the RESPONSE actually used. Declared-but-never-used content is dead weight on every step. If usage can't be confirmed from the response, say so and mark it a hypothesis.
+
+Optimizations must be REALISTIC and PRACTICAL — an engineer should be able to act on each one as written:
+- Target SPECIFIC components by name (e.g. "tool: kubectl_exec", "system › Command Schema"), never the prompt as a whole.
+- State the EXACT change: what is cut, tiered (one-line default + load-on-demand), deduped against which other section, relocated to where (e.g. into the sub-agent's own prompt), conditionalized on which request type, or reordered to fix the cache prefix.
+- projected_token_saving MUST be grounded in the targeted components' MEASURED tokens (from the table) and never exceed them. Be conservative; a partial trim saves a fraction, not the whole.
+- Ban vague advice ("be more concise", "simplify", "optimize the prompt"). If you cannot name the target and the mechanism, drop the suggestion.
+- When removing content risks accuracy or its usage is unconfirmed, prefer tiering / subsetting / load-on-demand over deletion.
+- Give an implementation "effort" of low | medium | high (low = text edit / reorder; high = code changes across agents).
+- Guardrails: keep the user question/task LAST (recency). If a critical rule loses end-of-prompt recency after a reorder, restate it in one short line at the tail. Reordering must be semantically equivalent. State the accuracy impact explicitly for EVERY optimization.
+
+Respond with ONLY a single JSON object — no prose, no markdown code fences — matching this schema exactly:
+{
+  "summary": "2-3 sentence verdict: where the tokens/cost/latency go and the top lever to pull",
+  "dominant_buckets": "the 1-2 components that dominate, each with its % of total tokens",
+  "classifications": { "<component id>": { "classification": "static|dynamic|mixed", "note": "optional one line" } },
+  "cache_verdict": { "prefix_contiguous": <bool>, "poisoning": "first dynamic-before-static offender, empty if none", "detail": "one line" },
+  "dead_weight": [ { "name": "declared-but-unused item", "tokens": <int, from the table>, "detail": "why it is dead weight + confidence" } ],
+  "optimizations": [
+    { "title": "concrete action naming the target", "lever": "count|cache|relevance", "technique": "tier|subset|relocate|dedupe|conditionalize|reorder|cut|compact", "projected_token_saving": <int, bounded by the target's measured tokens>, "projected_cost_saving_pct": <0-100, optional>, "effort": "low|medium|high", "accuracy_impact": "explicit note — neutral/safe or the specific risk", "detail": "exactly what to change and where" }
+  ],
+  "concrete_instance": "one real call validated bottom-up: tokens × price → cost, confirming the thesis"
+}
+Rules: classifications must cover every component id. optimizations ranked by projected saving, biggest first, and each must be actionable as written. Use empty arrays where there is genuinely nothing to report.
+
+COMPONENTS (already measured — id | parent | name | role | loc | size | tokens | % | preview):
+__MEASURED__
+
+MODEL RESPONSE (usage signal for declared-vs-used):
+__RESPONSE__
+
+RAW PROMPT JSON:
+`;
+
+/** Tolerant parse of the LLM's reply into a PromptAnalysis: strips ```json fences
+ * and falls back to the first {...} span, so a chatty model can't break rendering.
+ * Components/sizes are owned by the frontend — this only validates the model's
+ * classifications + qualitative analysis. */
+function parsePromptAnalysis(raw: string): PromptAnalysis | null {
+  if (!raw) return null;
+  const tryParse = (s: string): PromptAnalysis | null => {
+    try {
+      const o = JSON.parse(s);
+      if (o && Array.isArray(o.optimizations) && o.cache_verdict) return o as PromptAnalysis;
+    } catch {
+      /* not JSON */
+    }
+    return null;
+  };
+  const direct = tryParse(raw.trim());
+  if (direct) return direct;
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) {
+    const f = tryParse(fenced[1].trim());
+    if (f) return f;
+  }
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start >= 0 && end > start) return tryParse(raw.slice(start, end + 1));
+  return null;
+}
+
+const promptAnalysisSession = (callId: string): string => `prompt-analysis-${callId}`;
+
+/** Fire the @LLM analysis async and poll the prompt-analysis-<callId> conversation
+ * for the structured result (newer than any prior run). Mirrors
+ * generateConversationOptimization's baseline+poll so a re-run never returns stale JSON. */
+export async function analyzePromptTrace(req: AnalyzePromptRequest, signal?: AbortSignal): Promise<PromptAnalysis | null> {
+  const sessionId = promptAnalysisSession(req.callId);
+
+  let promptBody = req.promptJson ?? '';
+  if (promptBody.length > PROMPT_ANALYSIS_MAX_CHARS) {
+    promptBody = `${promptBody.slice(0, PROMPT_ANALYSIS_MAX_CHARS)}\n…[prompt truncated for analysis — ${
+      promptBody.length - PROMPT_ANALYSIS_MAX_CHARS
+    } more chars]`;
+  }
+  // The model response is only a usage signal; cap it so it can't dominate the call.
+  const responseSignal = (req.responseContent ?? '').slice(0, 8000) || '(response not captured)';
+  const instructions = PROMPT_ANALYSIS_INSTRUCTIONS.replace('__MEASURED__', req.measured || '(no measured table provided)').replace(
+    '__RESPONSE__',
+    responseSignal
+  );
+  const triggerObj: Record<string, unknown> = {
+    account_id: req.accountId,
+    query: `@LLM ${instructions}${promptBody}`,
+    session_id: sessionId,
+    source: 'Optimize',
+    async: true,
+  };
+  if (req.userId) triggerObj.user_id = req.userId;
+
+  const pollQuery = `query PromptAnalysisPoll($request: AiGetConversationV3Request!) {
+    ai_get_conversation_v3(request: $request) {
+      messages { response status created_at }
+    }
+  }`;
+  const newestTs = (msgs: { created_at?: string }[]): string => msgs.reduce((max, m) => ((m.created_at ?? '') > max ? m.created_at ?? '' : max), '');
+  let baselineTs = '';
+  try {
+    const pre = await queryGraphQL(
+      pollQuery,
+      'PromptAnalysisPoll',
+      { request: { account_id: req.accountId, session_id: sessionId } },
+      undefined,
+      signal
+    );
+    baselineTs = newestTs(pre?.data?.data?.ai_get_conversation_v3?.messages ?? []);
+  } catch {
+    /* first run — baseline stays empty */
+  }
+
+  const triggerMutation = `mutation AnalyzePrompt {
+    ai_execute_investigation(request: __REQUEST__) { data { conversation_id } }
+  }`;
+  await queryGraphQL(triggerMutation.replace('__REQUEST__', gqlStringify(triggerObj)), 'AnalyzePrompt', {}, undefined, signal);
+
+  const deadline = Date.now() + PROMPT_ANALYSIS_POLL_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await optSleep(PROMPT_ANALYSIS_POLL_INTERVAL_MS, signal);
+    const resp = await queryGraphQL(
+      pollQuery,
+      'PromptAnalysisPoll',
+      { request: { account_id: req.accountId, session_id: sessionId } },
+      undefined,
+      signal
+    );
+    const messages: { response?: string; status?: string; created_at?: string }[] = resp?.data?.data?.ai_get_conversation_v3?.messages ?? [];
+    if (!messages.length) continue;
+    const latest = messages
+      .slice()
+      .sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''))
+      .pop();
+    if (baselineTs && (latest?.created_at ?? '') <= baselineTs) continue;
+    const status = (latest?.status ?? '').toUpperCase();
+    if (status === 'FAILED' || status === 'KILLED') throw new Error('Prompt analysis failed');
+    if (status === 'COMPLETED' && latest?.response) return parsePromptAnalysis(latest.response);
+    // IN_PROGRESS / WAITING → keep polling
+  }
+  throw new Error('Prompt analysis timed out — try again');
+}
+
+/** Cheap read (NO LLM): return a previously-stored analysis for this call so the
+ * trace modal can show it immediately instead of re-running. */
+export async function getStoredPromptAnalysis(
+  req: { accountId: string; callId: string },
+  signal?: AbortSignal
+): Promise<StoredPromptAnalysis | null> {
+  const sessionId = promptAnalysisSession(req.callId);
+  const query = `query StoredPromptAnalysis($request: AiGetConversationV3Request!) {
+    ai_get_conversation_v3(request: $request) {
+      messages { response status created_at }
+    }
+  }`;
+  const resp = await queryGraphQL(
+    query,
+    'StoredPromptAnalysis',
+    { request: { account_id: req.accountId, session_id: sessionId } },
+    undefined,
+    signal
+  );
+  const messages: { response?: string; status?: string; created_at?: string }[] = resp?.data?.data?.ai_get_conversation_v3?.messages ?? [];
+  const completed = messages
+    .filter((m) => (m.status ?? '').toUpperCase() === 'COMPLETED' && m.response)
+    .sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''));
+  const latest = completed.pop();
+  if (!latest?.response) return null;
+  const analysis = parsePromptAnalysis(latest.response);
+  return analysis ? { analysis, analyzedAt: latest.created_at ?? '' } : null;
+}
