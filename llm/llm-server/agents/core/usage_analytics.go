@@ -143,6 +143,31 @@ func (f UsageMetricsFilter) buildScopeWhere() (string, []any) {
 		[]any{pq.Array(f.AccountIDs), f.StartDate, f.EndDate}
 }
 
+// buildToolWhere renders the WHERE for the tool-usage aggregation (alias tc on
+// llm_conversation_tool_calls, c on llm_conversations). The tool-calls table has no
+// model / provider / request_status columns, so only the dimensions it can reach —
+// account + date + source — are honoured here; the bar's model/provider/status
+// filters do NOT apply to tools (mirrors buildCacheStorageWhere ignoring the
+// dimensions the cache table lacks). Date scopes on c.created_at so the Tools tab
+// covers the same conversations as every other analyser screen.
+func (f UsageMetricsFilter) buildToolWhere() (string, []any) {
+	args := []any{pq.Array(f.AccountIDs), f.StartDate, f.EndDate}
+	n := 4
+	clauses := []string{
+		"c.account_id = ANY($1::uuid[])",
+		"c.created_at >= $2",
+		"c.created_at <= $3",
+	}
+	if len(f.Sources) > 0 {
+		clauses = append(clauses, fmt.Sprintf("c.source = ANY($%d)", n))
+		args = append(args, pq.Array(f.Sources))
+	} else {
+		// Hide the cost_optimizer's own runs by default (parity with buildWhere).
+		clauses = append(clauses, "c.source IS DISTINCT FROM 'Optimize'")
+	}
+	return strings.Join(clauses, " AND "), args
+}
+
 // buildCacheStorageWhere renders the WHERE for the llm_cache_lifecycle storage
 // scan (alias cl). Scoped by account + window OVERLAP (a cache counts if it was
 // alive at any point inside [start,end]) and, when present, model/provider —

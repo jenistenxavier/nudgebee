@@ -15,6 +15,7 @@ import DashboardOutlinedIcon from '@mui/icons-material/DashboardOutlined';
 import ForumOutlinedIcon from '@mui/icons-material/ForumOutlined';
 import AutoAwesomeOutlinedIcon from '@mui/icons-material/AutoAwesomeOutlined';
 import SmartToyOutlinedIcon from '@mui/icons-material/SmartToyOutlined';
+import HandymanOutlinedIcon from '@mui/icons-material/HandymanOutlined';
 import CustomTabs from '@shared/CustomTabs';
 import { Banner } from '@ui/Banner';
 import { Chip } from '@ui/Chip';
@@ -25,6 +26,7 @@ import ConversationsView from './views/ConversationsView';
 import ConversationDetailView from './views/ConversationDetailView';
 import ModelsView from './views/ModelsView';
 import AgentsView from './views/AgentsView';
+import ToolsView from './views/ToolsView';
 import { rowToRun } from './adapt';
 import { useConversationTree, useCostData } from './useCostData';
 import type { CostFilters } from './types';
@@ -62,7 +64,7 @@ function defaultFilters(): CostFilters {
   };
 }
 
-type TabId = 'overview' | 'conversations' | 'models' | 'agents';
+type TabId = 'overview' | 'conversations' | 'models' | 'agents' | 'tools';
 
 export function CostAnalyser({ accountId }: CostAnalyserProps) {
   const [filters, setFilters] = React.useState<CostFilters>(() => defaultFilters());
@@ -124,6 +126,7 @@ export function CostAnalyser({ accountId }: CostAnalyserProps) {
     { value: 'conversations', text: 'Conversations', icon: ForumOutlinedIcon, iconSize: 16 },
     { value: 'models', text: 'Models', icon: AutoAwesomeOutlinedIcon, iconSize: 16 },
     { value: 'agents', text: 'Agents', icon: SmartToyOutlinedIcon, iconSize: 16 },
+    { value: 'tools', text: 'Tools', icon: HandymanOutlinedIcon, iconSize: 16 },
   ];
 
   return (
@@ -152,10 +155,13 @@ export function CostAnalyser({ accountId }: CostAnalyserProps) {
         anchorDate={anchorToday()}
       />
 
-      {/* The Agents tab fetches its own data (ai_list_agent_costs) and shows its
-          own loading/error, so it sits outside the shared metrics/list gate. */}
+      {/* The Agents and Tools tabs fetch their own data (ai_list_agent_costs /
+          ai_aggregate_tool_usage) and own their loading/error, so they sit outside
+          the shared metrics/list gate. */}
       {tab === 'agents' ? (
         <AgentsView accountId={effectiveAccountId} filters={filters} agentOptions={usageFilters?.agents ?? []} onSelectRun={openRunDirect} />
+      ) : tab === 'tools' ? (
+        <ToolsView accountId={effectiveAccountId} filters={filters} onSelectRun={openRunDirect} />
       ) : (
         <>
           {error && <Banner tone='critical' title='Could not load cost data' message={error} />}

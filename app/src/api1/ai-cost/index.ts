@@ -612,6 +612,165 @@ export async function listAgentCosts(req: ListAgentCostsRequest, signal?: AbortS
   return response?.data?.data?.ai_list_agent_costs?.data ?? null;
 }
 
+// ─── ai_aggregate_tool_usage (Tools leaderboard) ───────────────────────────────
+// Per-tool rollup across conversations from llm_conversation_tool_calls: usage
+// (calls), reliability (success/error), latency (avg/p90/max duration), and reach
+// (distinct agents/conversations). Tool calls carry no LLM token cost, so the only
+// cost is "downstream": the LLM cost of sub-agents a tool spawned (child_agent_id),
+// 0 for plain tools. The tool-calls table has no model/provider/status columns, so
+// only account + date + source from the shared bar apply here.
+
+export type ToolSortBy = 'calls' | 'errors' | 'duration' | 'cost';
+
+export interface ToolUsageRow {
+  tool_name: string;
+  tool_type: string;
+  calls: number;
+  success_count: number;
+  error_count: number;
+  in_progress_count: number;
+  error_rate_pct: number;
+  avg_duration_seconds: number;
+  p90_duration_seconds: number;
+  max_duration_seconds: number;
+  distinct_agents: number;
+  distinct_conversations: number;
+  /** LLM cost of sub-agents this tool spawned; 0 for non-spawn tools. */
+  downstream_cost_usd: number;
+  downstream_llm_calls: number;
+}
+
+export interface ToolUsageList {
+  sort_by: ToolSortBy;
+  limit: number;
+  rows: ToolUsageRow[];
+}
+
+export interface ListToolUsageRequest {
+  accountIds?: string[];
+  startDate: string; // RFC3339 UTC
+  endDate: string; // RFC3339 UTC
+  userId?: string;
+  /** Only account + date + source apply — tool calls have no model/provider/status. */
+  sources?: string[];
+  sortBy?: ToolSortBy;
+  limit?: number;
+}
+
+export async function listToolUsage(req: ListToolUsageRequest, signal?: AbortSignal): Promise<ToolUsageList | null> {
+  const query = `mutation AggregateToolUsage(
+    $accountIds: [String!], $startDate: String!, $endDate: String!, $userId: String,
+    $sources: [String!], $sortBy: String, $limit: Int
+  ) {
+    ai_aggregate_tool_usage(request: {
+      account_ids: $accountIds, start_date: $startDate, end_date: $endDate, user_id: $userId,
+      sources: $sources, sort_by: $sortBy, limit: $limit
+    }) {
+      data
+    }
+  }`;
+  const response = await queryGraphQL(
+    query,
+    'AggregateToolUsage',
+    {
+      accountIds: arr(req.accountIds),
+      startDate: req.startDate,
+      endDate: req.endDate,
+      userId: req.userId ?? null,
+      sources: arr(req.sources),
+      sortBy: req.sortBy ?? 'calls',
+      limit: req.limit ?? 100,
+    },
+    undefined,
+    signal
+  );
+  return response?.data?.data?.ai_aggregate_tool_usage?.data ?? null;
+}
+
+// ─── ai_list_tool_calls (per-tool invocation explorer / failures drill-in) ──────
+// The recent invocations of ONE tool (newest first), optionally restricted to a set
+// of statuses, each linked to its conversation. Powers the Tools-tab drill-in.
+
+/** Tool statuses, grouped for the drill-in toggle (lowercased on write). */
+export const TOOL_STATUS_GROUPS = {
+  errors: ['fail', 'error', 'terminated'],
+  in_progress: ['in_progress', 'waiting', 'waiting_for_client'],
+} as const;
+
+export type ToolStatusGroup = 'all' | 'errors' | 'in_progress';
+
+/** Resolve a UI status group to the status values the API filters on ([] = all). */
+export function toolStatusesFor(group: ToolStatusGroup): string[] {
+  return group === 'all' ? [] : [...TOOL_STATUS_GROUPS[group]];
+}
+
+export interface ToolCallRow {
+  id: string;
+  tool_name: string;
+  tool_type: string;
+  status: string;
+  agent_id: string;
+  agent_name: string;
+  conversation_id: string; // session_id — cross-link target
+  conversation_title: string;
+  account_id: string;
+  duration_seconds: number;
+  created_at: string;
+  parameters: string; // input args snippet
+  response: string; // output snippet
+  stderr: string; // separate stderr stream when present
+}
+
+export interface ToolCallList {
+  tool_name: string;
+  statuses: string[];
+  limit: number;
+  rows: ToolCallRow[];
+}
+
+export interface ListToolCallsRequest {
+  accountIds?: string[];
+  startDate: string; // RFC3339 UTC
+  endDate: string; // RFC3339 UTC
+  userId?: string;
+  sources?: string[];
+  toolName: string;
+  /** Restrict to these tool statuses (empty = all). */
+  statuses?: string[];
+  limit?: number;
+}
+
+export async function listToolCalls(req: ListToolCallsRequest, signal?: AbortSignal): Promise<ToolCallList | null> {
+  const query = `mutation ListToolCalls(
+    $accountIds: [String!], $startDate: String!, $endDate: String!, $userId: String,
+    $sources: [String!], $toolName: String!, $statuses: [String!], $limit: Int
+  ) {
+    ai_list_tool_calls(request: {
+      account_ids: $accountIds, start_date: $startDate, end_date: $endDate, user_id: $userId,
+      sources: $sources, tool_name: $toolName, statuses: $statuses, limit: $limit
+    }) {
+      data
+    }
+  }`;
+  const response = await queryGraphQL(
+    query,
+    'ListToolCalls',
+    {
+      accountIds: arr(req.accountIds),
+      startDate: req.startDate,
+      endDate: req.endDate,
+      userId: req.userId ?? null,
+      sources: arr(req.sources),
+      toolName: req.toolName,
+      statuses: arr(req.statuses),
+      limit: req.limit ?? 100,
+    },
+    undefined,
+    signal
+  );
+  return response?.data?.data?.ai_list_tool_calls?.data ?? null;
+}
+
 /** Full recursive drill-down of one conversation (flat arrays + per-node cost). */
 export async function getConversationTree(req: ConversationDetailRequest, signal?: AbortSignal): Promise<ConversationTree | null> {
   const query = `mutation GetConversationTree($conversationId: String!, $accountId: String!, $userId: String) {

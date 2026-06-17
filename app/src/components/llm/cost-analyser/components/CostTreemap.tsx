@@ -6,6 +6,7 @@
 import * as React from 'react';
 import { Box } from '@mui/material';
 import Tooltip from '@ui/Tooltip';
+import { seriesColor } from './palette';
 import { fmtCost, fmtPct } from '../format';
 
 export interface TreemapSlice {
@@ -17,20 +18,12 @@ interface CostTreemapProps {
   slices: TreemapSlice[];
   /** Total to compute share against; defaults to sum of slices. */
   total?: number;
+  /** How to render each slice's value in the legend / tooltip. Defaults to `fmtCost`
+   *  (the cost composition use); pass e.g. a count formatter to reuse for volume. */
+  formatValue?: (value: number) => string;
 }
 
-const PALETTE = [
-  'var(--ds-blue-400)',
-  'var(--ds-purple-400)',
-  'var(--ds-teal-400)',
-  'var(--ds-amber-400)',
-  'var(--ds-pink-400)',
-  'var(--ds-green-400)',
-  'var(--ds-red-400)',
-  'var(--ds-gray-400)',
-];
-
-export function CostTreemap({ slices, total }: CostTreemapProps) {
+export function CostTreemap({ slices = [], total, formatValue = fmtCost }: CostTreemapProps) {
   const sorted = [...slices].sort((a, b) => b.cost - a.cost);
   const sum = total ?? (sorted.reduce((a, s) => a + s.cost, 0) || 1);
 
@@ -50,12 +43,12 @@ export function CostTreemap({ slices, total }: CostTreemapProps) {
           const pct = (s.cost / sum) * 100;
           if (pct <= 0) return null;
           return (
-            <Tooltip key={s.key} title={`${s.key} · ${fmtCost(s.cost)} · ${fmtPct(s.cost / sum)}`} placement='top'>
+            <Tooltip key={s.key} title={`${s.key} · ${formatValue(s.cost)} · ${fmtPct(s.cost / sum)}`} placement='top'>
               <Box
                 sx={{
                   width: `${pct}%`,
                   height: '100%',
-                  backgroundColor: PALETTE[i % PALETTE.length],
+                  backgroundColor: seriesColor(s.key, i),
                   borderRight: i < sorted.length - 1 ? '1px solid var(--ds-background-100)' : 'none',
                 }}
               />
@@ -75,10 +68,10 @@ export function CostTreemap({ slices, total }: CostTreemapProps) {
               color: 'var(--ds-gray-700)',
             }}
           >
-            <Box sx={{ width: 10, height: 10, borderRadius: 2, backgroundColor: PALETTE[i % PALETTE.length], flexShrink: 0 }} />
+            <Box sx={{ width: 10, height: 10, borderRadius: 2, backgroundColor: seriesColor(s.key, i), flexShrink: 0 }} />
             <Box component='span'>{s.key}</Box>
             <Box component='span' sx={{ color: 'var(--ds-gray-500)', fontVariantNumeric: 'tabular-nums' }}>
-              {fmtCost(s.cost)} · {fmtPct(s.cost / sum)}
+              {formatValue(s.cost)} · {fmtPct(s.cost / sum)}
             </Box>
           </Box>
         ))}
