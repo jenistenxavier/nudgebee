@@ -1490,7 +1490,7 @@ const KubernetesLLMResponseGenerator = ({
             {/* Show ConversationLoader for first query in popup/workflow builder only */}
             {isConversationInProgress && messages.length === 0 && popup && (
               <Box sx={{ mt: ds.space.mul(0, 5), width: '100%', minWidth: ds.space.mul(1, 100) }}>
-                <ConversationLoader />
+                <ConversationLoader query={currentlyProcessingQuestion} />
               </Box>
             )}
 
@@ -1643,7 +1643,7 @@ const KubernetesLLMResponseGenerator = ({
                   mb={popup ? ds.space.mul(1, 5) : ds.space.mul(0, 35)}
                   sx={{ width: '100%', minWidth: popup ? ds.space.mul(1, 100) : 0, boxSizing: 'border-box' }}
                 >
-                  <ConversationLoader />
+                  <ConversationLoader query={currentlyProcessingQuestion} />
                 </Box>
               );
             })()}
