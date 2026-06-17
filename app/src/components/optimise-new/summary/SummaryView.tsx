@@ -335,7 +335,7 @@ const SummaryView = () => {
           />
         </Card>
 
-        {/* Filter + list-control toolbar */}
+        {/* Filter toolbar */}
         <Box
           sx={{
             display: 'flex',
@@ -404,31 +404,6 @@ const SummaryView = () => {
                 Clear all
               </Chip>
             )}
-          </Box>
-
-          {/* List controls */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
-            <DropdownMenu
-              align='end'
-              size='sm'
-              trigger={
-                <Button tone='secondary' size='xs' icon={<SortOutlinedIcon />} iconPlacement='start' id='sort-toggle'>
-                  {sortLabel}
-                </Button>
-              }
-              items={sortMenuItems}
-            />
-            <ToggleGroup
-              selection='single'
-              size='sm'
-              value={viewMode}
-              onChange={(v) => setViewMode(v)}
-              ariaLabel='View mode'
-              options={[
-                { value: 'cards', icon: <ViewStreamOutlinedIcon sx={{ fontSize: 16 }} />, ariaLabel: 'Cards view', tooltip: 'Card view' },
-                { value: 'list', icon: <ViewListOutlinedIcon sx={{ fontSize: 16 }} />, ariaLabel: 'List view', tooltip: 'List view' },
-              ]}
-            />
           </Box>
         </Box>
 
@@ -521,6 +496,44 @@ const SummaryView = () => {
                 )}
               </Box>
 
+              {/* Sort + view live here, directly above the list they reorder.
+                  The briefing + Top-3 box above is sort-independent by design, so
+                  parking these in the top filter toolbar made Sort look inert (#32478). */}
+              <Box
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: ds.space[2],
+                  mb: ds.space[3],
+                }}
+              >
+                <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>All findings</Typography>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
+                  <DropdownMenu
+                    align='end'
+                    size='sm'
+                    trigger={
+                      <Button tone='secondary' size='xs' icon={<SortOutlinedIcon />} iconPlacement='start' id='sort-toggle'>
+                        {sortLabel}
+                      </Button>
+                    }
+                    items={sortMenuItems}
+                  />
+                  <ToggleGroup
+                    selection='single'
+                    size='sm'
+                    value={viewMode}
+                    onChange={(v) => setViewMode(v)}
+                    ariaLabel='View mode'
+                    options={[
+                      { value: 'cards', icon: <ViewStreamOutlinedIcon sx={{ fontSize: 16 }} />, ariaLabel: 'Cards view', tooltip: 'Card view' },
+                      { value: 'list', icon: <ViewListOutlinedIcon sx={{ fontSize: 16 }} />, ariaLabel: 'List view', tooltip: 'List view' },
+                    ]}
+                  />
+                </Box>
+              </Box>
+
               {/* Category sections or list view */}
               {viewMode === 'cards' ? (
                 <>
@@ -567,10 +580,14 @@ const SummaryView = () => {
               ) : (
                 <CustomTable2
                   id='summary-findings-table'
+                  // Fixed layout: respect the declared column widths and let long resource
+                  // ARNs ellipsize, instead of auto-layout stretching the row past its
+                  // container and clipping the header bar on the right.
+                  sx={{ '& > table': { tableLayout: 'fixed' } }}
                   headers={[
                     { name: 'Severity', width: '8%' },
                     { name: 'Finding', width: '30%' },
-                    { name: 'Resource', width: '18%' },
+                    { name: 'Resource', width: '24%' },
                     { name: 'Provider', width: '10%' },
                     { name: 'Impact', width: '14%' },
                     { name: 'Action', width: '14%' },
@@ -620,12 +637,16 @@ const SummaryView = () => {
                       ),
                     },
                     {
-                      component: (
+                      component: item.impactValue ? (
                         <Box>
                           <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.semibold, color: ds.gray[700], lineHeight: 1.1 }}>
                             {item.impactValue}
                           </Typography>
                           <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500], lineHeight: 1.1 }}>{item.impactLabel}</Typography>
+                        </Box>
+                      ) : (
+                        <Box component='span' sx={{ color: ds.gray[500] }}>
+                          —
                         </Box>
                       ),
                     },
