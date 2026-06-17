@@ -3571,6 +3571,65 @@ type FilterValuesResponse struct {
 	Values     []string `json:"values"`      // Available values for this key
 }
 
+// excludeFilterKey returns a shallow copy of filters with the given key removed
+// from the maps/slices of the matching filter type. This is used when fetching
+// the candidate values for a key the user is editing: keeping that key's own
+// equality/existence filter would restrict the result to the already-selected
+// value, hiding the alternatives the dropdown is meant to offer.
+// The original filters value is left untouched.
+func excludeFilterKey(filters *GraphFilters, filterType, filterKey string) *GraphFilters {
+	if filters == nil {
+		return nil
+	}
+	out := *filters // shallow copy; maps/slices replaced below where needed
+	switch filterType {
+	case "label":
+		out.Labels = removeMapKey(out.Labels, filterKey)
+		out.LabelKeys = removeStringValue(out.LabelKeys, filterKey)
+	case "attribute":
+		out.Attributes = removeMapKey(out.Attributes, filterKey)
+		out.AttributeKeys = removeStringValue(out.AttributeKeys, filterKey)
+	}
+	return &out
+}
+
+// removeMapKey returns a copy of m without target. Returns the input unchanged
+// when target is absent to avoid needless allocation.
+func removeMapKey(m map[string]string, target string) map[string]string {
+	if _, ok := m[target]; !ok {
+		return m
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		if k != target {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// removeStringValue returns a new slice with all occurrences of target removed.
+// Returns the input unchanged when target is absent to avoid needless allocation.
+func removeStringValue(in []string, target string) []string {
+	found := false
+	for _, v := range in {
+		if v == target {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return in
+	}
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if v != target {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // buildNodeFilterSQL builds SQL WHERE additions and args for graph filters.
 // startArgCounter is the next $N placeholder index; the caller already has (startArgCounter-1) args.
 // Returns ("", nil, nil) when no filters are active.
@@ -3874,10 +3933,21 @@ func (s *Service) GetFilterOptions(tenantID string, filters *GraphFilters, nodeI
 	}, nil
 }
 
-// GetFilterValues retrieves values for a specific filter key (label or attribute)
-func (s *Service) GetFilterValues(tenantID, filterType, filterKey string) (*FilterValuesResponse, error) {
+// GetFilterValues retrieves values for a specific filter key (label or attribute).
+// When filters/nodeIDs are supplied, the value list is scoped to nodes matching
+// those already-applied filters (same semantics as GetFilterOptions), so the UI
+// dropdown only offers values that exist within the current filter context.
+// The key being edited is stripped from the matching-type filters so the user
+// always sees all alternative values for it, not just the currently selected one.
+func (s *Service) GetFilterValues(tenantID, filterType, filterKey string, filters *GraphFilters, nodeIDs []string) (*FilterValuesResponse, error) {
 	if s.dbManager == nil {
 		return nil, fmt.Errorf("database manager not initialized")
+	}
+
+	// Fail fast on an empty tenant: every query is tenant-scoped, so an empty
+	// tenantID would only ever scan for blank rows — reject it explicitly.
+	if tenantID == "" {
+		return nil, fmt.Errorf("tenant ID cannot be empty")
 	}
 
 	// Validate filter type
@@ -3894,35 +3964,38 @@ func (s *Service) GetFilterValues(tenantID, filterType, filterKey string) (*Filt
 		"filter_type", filterType,
 		"filter_key", filterKey)
 
-	var query string
-	if filterType == "label" {
-		query = `
-			SELECT DISTINCT labels->>$2 as value
-			FROM knowledge_graph_node
-			WHERE tenant_id = $1
-			  AND level = 'Tenant'
-			  AND jsonb_exists(labels, $2)
-			  AND labels->>$2 IS NOT NULL
-			  AND labels->>$2 != ''
-			  AND level = 'Tenant'
-			ORDER BY value
-			LIMIT 1000
-		`
-	} else { // attribute
-		query = `
-			SELECT DISTINCT query_attributes->>$2 as value
-			FROM knowledge_graph_node
-			WHERE tenant_id = $1
-			  AND level = 'Tenant'
-			  AND jsonb_exists(query_attributes, $2)
-			  AND query_attributes->>$2 IS NOT NULL
-			  AND query_attributes->>$2 != ''
-			ORDER BY value
-			LIMIT 1000
-		`
+	// Strip the key under edit from the matching-type filters (on a copy) so the
+	// dropdown surfaces every possible value for that key rather than only the
+	// value the user may have already picked for it.
+	filters = excludeFilterKey(filters, filterType, filterKey)
+
+	// $1 = tenantID, $2 = filterKey, so scoping filter args start at $3.
+	filterSQL, filterArgs, err := buildNodeFilterSQL(filters, nodeIDs, 3)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build node filter SQL: %w", err)
 	}
 
-	rows, err := s.dbManager.Query(query, tenantID, filterKey)
+	var jsonbColumn string
+	if filterType == "label" {
+		jsonbColumn = "labels"
+	} else { // attribute
+		jsonbColumn = "query_attributes"
+	}
+
+	query := fmt.Sprintf(`
+		SELECT DISTINCT %[1]s->>$2 as value
+		FROM knowledge_graph_node
+		WHERE tenant_id = $1
+		  AND level = 'Tenant'
+		  AND jsonb_exists(%[1]s, $2)
+		  AND %[1]s->>$2 IS NOT NULL
+		  AND %[1]s->>$2 != ''%[2]s
+		ORDER BY value
+		LIMIT 1000
+	`, jsonbColumn, filterSQL)
+
+	args := append([]interface{}{tenantID, filterKey}, filterArgs...)
+	rows, err := s.dbManager.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query filter values: %w", err)
 	}

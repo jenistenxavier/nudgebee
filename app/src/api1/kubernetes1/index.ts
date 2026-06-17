@@ -1873,7 +1873,17 @@ const apiKubernetes1 = {
     };
     return await queryGraphQL(MUTATION.replace('__WHERE__', gqlStringify(request)), 'KgUpsertTenantFilter', {});
   },
-  knowledgeGraphFilterOptionLabelValues: async function (data: any) {
+  knowledgeGraphFilterOptionLabelValues: async function (data: {
+    filterType: string;
+    filterKey: string;
+    accountIds?: string[];
+    nodeTypes?: string[];
+    nodeIds?: string[];
+    labels?: Record<string, string>;
+    attributes?: Record<string, string>;
+    labelKeys?: string[];
+    attributeKeys?: string[];
+  }) {
     const KNOWLEDGE_GRAPH_FILTER_LABEL_VALUES = `
     query KgFilterOptionLabelValues {
       kg_get_filter_values(request: __WHERE__) {
@@ -1888,6 +1898,15 @@ const apiKubernetes1 = {
     const request: any = {};
     request.filter_type = data.filterType;
     request.filter_key = data.filterKey;
+    // Scope the returned values to the user's currently-applied filters so the
+    // dropdown only offers values present within the active filter context.
+    if (data.accountIds?.length) request.account_ids = data.accountIds;
+    if (data.nodeTypes?.length) request.node_types = data.nodeTypes;
+    if (data.nodeIds?.length) request.node_ids = data.nodeIds;
+    if (data.labels && Object.keys(data.labels).length) request.labels = data.labels;
+    if (data.attributes && Object.keys(data.attributes).length) request.attributes = data.attributes;
+    if (data.labelKeys?.length) request.label_keys = data.labelKeys;
+    if (data.attributeKeys?.length) request.attribute_keys = data.attributeKeys;
     try {
       return await queryGraphQL(KNOWLEDGE_GRAPH_FILTER_LABEL_VALUES.replace('__WHERE__', gqlStringify(request)), 'KgFilterOptionLabelValues', {});
     } catch (err) {
