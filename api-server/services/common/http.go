@@ -201,6 +201,17 @@ func httpExecuteRequest(method string, url string, options ...HttpOption) (resp 
 	}
 	if httpConfig.Timeout > 0 {
 		client.Timeout = httpConfig.Timeout
+	} else if client.Timeout == 0 {
+		hasExplicitTimeout := false
+		for _, opt := range options {
+			if _, ok := opt.(httpTimeout); ok {
+				hasExplicitTimeout = true
+				break
+			}
+		}
+		if !hasExplicitTimeout {
+			client.Timeout = 30 * time.Second
+		}
 	}
 	if httpConfig.InsecureSkipVerify {
 		t := defaultTransport.Clone()
