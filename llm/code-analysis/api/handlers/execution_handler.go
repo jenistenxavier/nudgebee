@@ -69,6 +69,16 @@ var (
 	// from false-matching (they're regex alternations whose terms happen to
 	// start with a shell-interpreter name).
 	pipeToShellRe = regexp.MustCompile(`\|\s*(sh|bash|zsh|dash)\b`)
+	// Match `kubectl exec POD -- <remote>` (also `oc exec`, `k exec`). Everything
+	// after `--` runs inside the target pod and does NOT touch the workspace
+	// pod's filesystem, so the sensitive-path scan must not see it. We stop
+	// the match at `;`, `&`, `|` so a chained statement after the kubectl
+	// call (e.g. `kubectl exec … -- ls ; cat /etc/passwd`) is still scanned.
+	kubectlExecRemoteRe = regexp.MustCompile(`(?i)\b(?:kubectl|oc|k)\s+exec\b[^;&|]*\s--\s[^;&|\n]*`)
+	// Standard /dev pseudo-devices that are stdio / PRNG / null-sinks, not
+	// filesystem access. Treat references as out-of-scope for the /dev rule
+	// (e.g. `> /dev/null`, `2>&1`, `cat /dev/urandom | head -c N`).
+	devPseudoDeviceRe = regexp.MustCompile(`(?i)/dev/(null|stdout|stderr|stdin|zero|random|urandom|fd/\d+|tty)\b`)
 )
 
 type ExecutionHandler struct {
@@ -260,15 +270,25 @@ func (h *ExecutionHandler) validateCommand(command, workDir string) error {
 		return err
 	}
 
-	// 1. Block explicit attempts to access sensitive system directories
+	// 1. Block explicit attempts to access sensitive system directories.
+	// Build a sanitized scan target with two carve-outs that don't affect the
+	// workspace pod's filesystem:
+	//   a. `kubectl exec POD -- <remote>` — the remote portion runs in the
+	//      target pod, not the workspace pod, so its paths are out of scope.
+	//   b. `/dev/null`, `/dev/std{in,out,err}`, `/dev/fd/N`, `/dev/{zero,
+	//      random,urandom,tty}` — stdio / PRNG pseudo-devices, not /dev
+	//      filesystem access. (`> /dev/null`, `2>&1` are the common shapes.)
+	scanTarget := kubectlExecRemoteRe.ReplaceAllString(command, "kubectl exec")
+	scanTarget = devPseudoDeviceRe.ReplaceAllString(scanTarget, "")
+	scanTargetLower := strings.ToLower(scanTarget)
 	sensitivePaths := []string{"/etc", "/var", "/root", "/home", "/proc", "/sys", "/dev", "/usr/local/etc", "/usr/local/var"}
 	for _, path := range sensitivePaths {
 		patterns := []string{" " + path, "=" + path, "\"" + path, "'" + path}
-		if strings.HasPrefix(command, path) {
+		if strings.HasPrefix(scanTarget, path) {
 			return fmt.Errorf("access to absolute path %s is blocked", path)
 		}
 		for _, p := range patterns {
-			if strings.Contains(commandLower, p) {
+			if strings.Contains(scanTargetLower, p) {
 				return fmt.Errorf("access to absolute path %s is blocked", path)
 			}
 		}
