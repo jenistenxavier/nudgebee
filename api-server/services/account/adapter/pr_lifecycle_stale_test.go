@@ -147,9 +147,11 @@ func TestResurrectStaleResolution_DB(t *testing.T) {
 		return
 	}
 
+	ctx := security.NewRequestContextForSuperAdmin(nil, nil, nil)
+
 	// stale row -> resurrected with a fresh budget.
 	seed("stale_row", "stale", followupIterationCap+3, false)
-	require.NoError(t, resurrectStaleResolution(dbms, "stale_row", tbl))
+	require.NoError(t, resurrectStaleResolution(ctx, dbms, "stale_row", tbl))
 	st, it, pend := get("stale_row")
 	assert.Equal(t, "needs_followup", st)
 	assert.Equal(t, 0, it, "iteration budget reset")
@@ -157,7 +159,7 @@ func TestResurrectStaleResolution_DB(t *testing.T) {
 
 	// non-stale row -> guard leaves it as-is.
 	seed("merged_row", "merged", 2, false)
-	require.NoError(t, resurrectStaleResolution(dbms, "merged_row", tbl))
+	require.NoError(t, resurrectStaleResolution(ctx, dbms, "merged_row", tbl))
 	st, it, _ = get("merged_row")
 	assert.Equal(t, "merged", st, "non-stale row must not be resurrected")
 	assert.Equal(t, 2, it)

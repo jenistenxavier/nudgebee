@@ -253,7 +253,7 @@ func markStaleResolutionsInTables(ctx *security.RequestContext, dbms *database.D
 	now := time.Now()
 	var total int64
 	for _, tbl := range tables {
-		res, err := dbms.Db.Exec(
+		res, err := dbms.Db.ExecContext(ctx.GetContext(),
 			fmt.Sprintf(`UPDATE %s SET
 				pr_lifecycle_state = 'stale',
 				status_message = $1,
@@ -358,15 +358,16 @@ func ProcessOpenPRResolution(ctx *security.RequestContext, resolutionID, tableNa
 	// will run it. The cron never resurrects — it only re-stales — so blind hourly
 	// polling stays suppressed while genuine activity always gets a followup.
 	if row.PRLifecycleState == "stale" {
-		if rerr := resurrectStaleResolution(dbms, resolutionID, tableName); rerr != nil {
-			ctx.GetLogger().Error("pr_lifecycle: failed to resurrect stale resolution",
-				"id", resolutionID, "table", tableName, "error", rerr)
-		} else {
-			ctx.GetLogger().Info("pr_lifecycle: resurrected stale resolution on webhook signal",
-				"id", resolutionID, "table", tableName)
-			row.PRLifecycleState = "needs_followup"
-			row.PRIterationCount = 0
+		// Fail hard on a resurrection error rather than proceeding: a still-'stale'
+		// row would silently fail to claim below (claimOrMarkResolution only claims
+		// created/needs_followup), masking the real DB error as a no-op skip.
+		if rerr := resurrectStaleResolution(ctx, dbms, resolutionID, tableName); rerr != nil {
+			return fmt.Errorf("failed to resurrect stale resolution %s in %s: %w", resolutionID, tableName, rerr)
 		}
+		ctx.GetLogger().Info("pr_lifecycle: resurrected stale resolution on webhook signal",
+			"id", resolutionID, "table", tableName)
+		row.PRLifecycleState = "needs_followup"
+		row.PRIterationCount = 0
 	}
 
 	// State / cap / race gating is no longer a read-then-check here: the atomic
@@ -482,8 +483,11 @@ func markPRResolutionsTerminalByURL(ctx *security.RequestContext, dbms *database
 // (ProcessOpenPRResolution): a genuine PR signal overrides the age/iteration
 // staleness the cron applied. Guarded on the current state still being 'stale'
 // so a concurrent terminal (merge/close) is never overwritten back to active.
-func resurrectStaleResolution(dbms *database.DatabaseManager, id, tableName string) error {
-	dbCtx, cancel := context.WithTimeout(context.Background(), prDBOpTimeout)
+func resurrectStaleResolution(ctx *security.RequestContext, dbms *database.DatabaseManager, id, tableName string) error {
+	// Detached-but-traced: WithoutCancel keeps the request's trace/span and logger
+	// values while decoupling from request cancellation, and the timeout still
+	// bounds the write so a hung DB can't leak the goroutine.
+	dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx.GetContext()), prDBOpTimeout)
 	defer cancel()
 	_, err := dbms.Db.ExecContext(dbCtx,
 		fmt.Sprintf(`UPDATE %s SET pr_lifecycle_state = 'needs_followup',
