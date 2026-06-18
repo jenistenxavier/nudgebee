@@ -3016,6 +3016,18 @@ func (s *Service) GetMultipleNodeNeighbors(reqCtx *security.RequestContext, node
 		edges, err = s.fetchEdgesByIDs(traversedEdgeIDs, discoveredNodeIDs, nil)
 		if err == nil {
 			edges = filterLayeredEdges(edges, nodeMinDepth, TraverseDirectionBoth)
+			// With multiple seeds the layered filter yields one tree per seed and drops
+			// the edges that connect them (they sit between equal-depth nodes, Δdepth≠1,
+			// and at the default depth aren't even walked). Re-add the minimal set of
+			// such edges so the selected seeds render as one connected graph instead of
+			// disconnected trees. Single-seed selections stay a connected tree → no-op.
+			if len(realSeeds) > 1 {
+				induced, indErr := s.fetchEdgesBetweenNodes(discoveredNodeIDs)
+				if indErr != nil {
+					return KnowledgeGraph{}, fmt.Errorf("failed to fetch edges for bridge reconnection: %w", indErr)
+				}
+				edges = addBridgeEdges(edges, induced)
+			}
 		}
 	}
 	if err != nil {
@@ -4476,6 +4488,78 @@ func filterLayeredEdges(edges []*DbEdge, nodeMinDepth map[string]int, direction 
 		}
 	}
 	return filtered
+}
+
+// addBridgeEdges reconnects a layered forest produced by filterLayeredEdges.
+//
+// With multiple seed nodes the layered filter keeps one tree per seed and drops
+// every edge that links them (those edges sit between equal-depth nodes, so
+// |Δdepth| ≠ 1, and at shallow traversal depths are never even walked). The
+// result is several disconnected trees even when the underlying graph connects
+// the selected seeds.
+//
+// candidateEdges is the induced edge set over the discovered nodes (every edge
+// whose endpoints are both in the result). Treating the layered edges as the
+// spanning forest, we add the minimal set of remaining edges that join two
+// otherwise-separate trees — a union-find spanning step. This keeps the layered
+// tree shape intact while guaranteeing the selected seeds render as one
+// connected component wherever the graph actually connects them. Candidates are
+// processed in a stable edge-id order so the chosen bridge is deterministic.
+func addBridgeEdges(layeredEdges, candidateEdges []*DbEdge) []*DbEdge {
+	if len(candidateEdges) == 0 {
+		return layeredEdges
+	}
+
+	parent := make(map[string]string)
+	var find func(string) string
+	find = func(x string) string {
+		p, ok := parent[x]
+		if !ok {
+			parent[x] = x
+			return x
+		}
+		if p != x {
+			parent[x] = find(p)
+		}
+		return parent[x]
+	}
+	union := func(a, b string) bool {
+		ra, rb := find(a), find(b)
+		if ra == rb {
+			return false
+		}
+		parent[ra] = rb
+		return true
+	}
+
+	// Seed the forest with the layered edges so each seed's tree is one component.
+	layeredIDs := make(map[string]struct{}, len(layeredEdges))
+	for _, e := range layeredEdges {
+		layeredIDs[e.ID] = struct{}{}
+		union(e.SourceNodeID, e.DestinationNodeID)
+	}
+
+	// Consider only the dropped (non-layered) induced edges as bridge candidates,
+	// in a deterministic order.
+	bridgeCandidates := make([]*DbEdge, 0, len(candidateEdges))
+	for _, e := range candidateEdges {
+		if _, isLayered := layeredIDs[e.ID]; !isLayered {
+			bridgeCandidates = append(bridgeCandidates, e)
+		}
+	}
+	sort.Slice(bridgeCandidates, func(i, j int) bool {
+		return bridgeCandidates[i].ID < bridgeCandidates[j].ID
+	})
+
+	result := layeredEdges
+	for _, e := range bridgeCandidates {
+		// Keep an edge only when it joins two currently-separate trees, so we add
+		// the fewest edges needed to connect the selected seeds.
+		if union(e.SourceNodeID, e.DestinationNodeID) {
+			result = append(result, e)
+		}
+	}
+	return result
 }
 
 // fetchEdgesByIDs retrieves a specific set of edges by ID, restricted to those
