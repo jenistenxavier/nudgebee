@@ -12,6 +12,10 @@ import slackLogo from '@assets/slack_icon.icon.svg';
 import githubLogo from '@assets/github-icon.icon.svg';
 import pagerdutyLogo from '@assets/auto-pilot/pager-duty.svg';
 import zendutyLogo from '@assets/zenduty.jpeg';
+import servicenowLogo from '@assets/servicenow.icon.svg';
+import gitlabLogo from '@assets/gitlab.svg';
+import jiraLogo from '@assets/jira_icon.icon.svg';
+import msTeamsLogo from '@assets/ms_teams_s.svg';
 
 // Provider display metadata for the Integration Profiles section. Keys match the
 // integration_type values produced by the Identity Sync job.
@@ -20,6 +24,10 @@ const PROVIDER_META = {
   github: { label: 'GitHub', logo: githubLogo },
   pagerduty: { label: 'PagerDuty', logo: pagerdutyLogo },
   zenduty: { label: 'ZenDuty', logo: zendutyLogo },
+  servicenow: { label: 'ServiceNow', logo: servicenowLogo },
+  gitlab: { label: 'GitLab', logo: gitlabLogo },
+  jira: { label: 'Jira', logo: jiraLogo },
+  ms_teams: { label: 'MS Teams', logo: msTeamsLogo },
 };
 const providerLabel = (t) => PROVIDER_META[t]?.label || t;
 const providerLogo = (t) => PROVIDER_META[t]?.logo;

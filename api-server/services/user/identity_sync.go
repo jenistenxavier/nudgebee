@@ -18,7 +18,15 @@ var syncTypes = []string{
 	IdentityTypeZenDuty,
 	IdentityTypeSlack,
 	IdentityTypeGithub,
+	IdentityTypeServiceNow,
+	IdentityTypeGitlab,
+	IdentityTypeJira,
+	IdentityTypeMsTeams,
 }
+
+// resyncInterval skips an integration whose accounts were synced more recently than
+// this, so a manual re-trigger or an overlapping cron tick doesn't redo recent work.
+const resyncInterval = 30 * time.Minute
 
 // RunIdentitySync fetches external integration accounts for each enabled
 // Slack/GitHub/PagerDuty/ZenDuty integration, upserts one row per (account,
@@ -75,18 +83,23 @@ func RunIdentitySync(ctx *security.RequestContext, tenantFilter string) (int, er
 // syncTenant syncs all supported integration types for one tenant and returns the
 // number of account rows upserted.
 func syncTenant(fetchCtx context.Context, tctx *security.RequestContext, db *sqlx.DB, tenantId string) int {
+	log := tctx.GetLogger()
+	log.Info("identity sync: syncing tenant", "tenant_id", tenantId)
 	upserted := 0
 	enabledIntegrationIds := []string{}
 	enumerationOk := true
 	for _, integType := range syncTypes {
+		log.Info("identity sync: enumerating integrations", "integration_type", integType)
 		configs, err := core.ListIntegrationConfigsByTenant(tctx, integType)
 		if err != nil {
 			// A genuine read failure (not "no integrations of this type", which
 			// returns an empty list with no error). Skip the disabled-integration
 			// sweep so a transient DB error can't wipe valid rows.
+			log.Warn("identity sync: enumeration failed", "integration_type", integType, "error", err)
 			enumerationOk = false
 			continue
 		}
+		log.Info("identity sync: enumerated integrations", "integration_type", integType, "enabled_instances", len(configs))
 		for _, intg := range configs {
 			enabledIntegrationIds = append(enabledIntegrationIds, intg.Id)
 			upserted += syncIntegration(fetchCtx, tctx, db, tenantId, integType, intg)
@@ -120,10 +133,21 @@ func syncIntegration(fetchCtx context.Context, tctx *security.RequestContext, db
 		return 0
 	}
 
+	log := tctx.GetLogger().With("integration_type", integType, "integration_id", intg.Id)
+
+	// Skip integrations already refreshed within resyncInterval so a manual
+	// re-trigger or overlapping cron tick doesn't redo recent work. The integration
+	// stays in the caller's enabled set, so its rows are preserved (not swept).
+	if recent, err := integrationRecentlySynced(db, tenantId, intg.Id, resyncInterval); err != nil {
+		log.Warn("identity sync: last-sync lookup failed", "error", err)
+	} else if recent {
+		log.Info("identity sync: skipping, synced within window", "window", resyncInterval.String())
+		return 0
+	}
+
 	accountIds, err := resolveAccountScopes(db, tenantId, integration, intg.Id)
 	if err != nil {
-		tctx.GetLogger().Warn("identity sync: account lookup failed",
-			"integration_type", integType, "integration_id", intg.Id, "error", err)
+		log.Warn("identity sync: account lookup failed", "error", err)
 		return 0
 	}
 	if len(accountIds) == 0 {
@@ -133,49 +157,53 @@ func syncIntegration(fetchCtx context.Context, tctx *security.RequestContext, db
 	// Bound each fetch so one slow/unreachable integration (e.g. a PagerDuty key
 	// pointing at an unresponsive host — the SDK client has no timeout of its own)
 	// cannot stall the whole cross-tenant run. ListUsers implementations honor ctx.
+	log.Info("identity sync: fetching users")
+	fetchStart := time.Now()
 	fetchTimeoutCtx, cancel := context.WithTimeout(fetchCtx, 25*time.Second)
 	defer cancel()
 	accounts, err := lister.ListUsers(fetchTimeoutCtx, intg.Configs)
 	if err != nil {
-		tctx.GetLogger().Warn("identity sync: fetch failed",
-			"integration_type", integType, "integration_id", intg.Id, "error", err)
+		log.Warn("identity sync: fetch failed", "fetch_ms", time.Since(fetchStart).Milliseconds(), "error", err)
 		return 0
 	}
+	log.Info("identity sync: fetched users", "users", len(accounts), "fetch_ms", time.Since(fetchStart).Milliseconds())
 
+	upsertStart := time.Now()
 	upserted, seen := upsertAccounts(tctx, db, tenantId, integType, intg.Id, accountIds, accounts)
+	log.Info("identity sync: upserted accounts", "rows", upserted, "scoped_accounts", len(accountIds), "upsert_ms", time.Since(upsertStart).Milliseconds())
 
 	// Prune accounts removed at source for this integration (manual -> tombstone,
 	// others -> delete). Safe: reconcileIntegration no-ops on an empty fetch, and we
 	// only reach here on a successful fetch.
 	if err := reconcileIntegration(db, tenantId, intg.Id, seen); err != nil {
-		tctx.GetLogger().Warn("identity sync: reconcile failed",
-			"integration_type", integType, "integration_id", intg.Id, "error", err)
+		log.Warn("identity sync: reconcile failed", "error", err)
 	}
 	return upserted
 }
 
-// upsertAccounts writes one row per (account, external user) and returns how many
-// rows were upserted plus the set of external user ids seen (for reconciliation).
+// upsertAccounts writes one row per (account, external user) in a single batched
+// statement and returns how many rows were upserted plus the set of external user
+// ids seen (for reconciliation).
 func upsertAccounts(tctx *security.RequestContext, db *sqlx.DB, tenantId, integType, integrationId string, accountIds []string, accounts []core.ExternalUser) (int, []string) {
-	upserted := 0
 	seen := make([]string, 0, len(accounts))
+	items := make([]syncedAccount, 0, len(accountIds)*len(accounts))
 	for _, acc := range accounts {
-		if acc.ID != "" {
-			seen = append(seen, acc.ID)
+		if acc.ID == "" {
+			continue
+		}
+		seen = append(seen, acc.ID)
+		for _, accountId := range accountIds {
+			items = append(items, syncedAccount{accountId: accountId, acc: acc})
 		}
 	}
-	for _, accountId := range accountIds {
-		for _, acc := range accounts {
-			if acc.ID == "" {
-				continue
-			}
-			if err := upsertSyncedAccount(db, tenantId, accountId, integType, integrationId, acc); err != nil {
-				tctx.GetLogger().Warn("identity sync: upsert failed",
-					"integration_type", integType, "external_user_id", acc.ID, "error", err)
-				continue
-			}
-			upserted++
-		}
+	if len(items) == 0 {
+		return 0, seen
+	}
+
+	upserted, err := upsertSyncedAccounts(db, tenantId, integType, integrationId, items)
+	if err != nil {
+		tctx.GetLogger().Warn("identity sync: upsert failed",
+			"integration_type", integType, "integration_id", integrationId, "error", err)
 	}
 	return upserted, seen
 }
