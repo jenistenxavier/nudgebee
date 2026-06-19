@@ -178,11 +178,16 @@ func (s *ZenDutyService) List(ctx *gin.Context, config models.TicketConfiguratio
 		return nil, fmt.Errorf("failed to list ZenDuty incidents: %w", err)
 	}
 
-	// Client-side pagination since ZenDuty API may not support offset/limit
+	// Client-side pagination since ZenDuty API may not support offset/limit.
+	// Normalize limit/offset in-place (params is passed by value, so this is
+	// safe) so an unset limit returns DefaultListLimit rows instead of an empty
+	// page (incidents[offset:offset]) and the returned ListResult is consistent.
+	params.Limit = normalizeLimit(params.Limit)
+	params.Offset = normalizeOffset(params.Offset)
 	total := len(incidents)
 	end := params.Offset + params.Limit
 	if params.Offset > total {
-		incidents = nil
+		incidents = incidents[:0]
 	} else {
 		if end > total {
 			end = total

@@ -518,19 +518,14 @@ func (s *GitHubService) List(ctx *gin.Context, config models.TicketConfiguration
 	}
 	owner, repo := parts[0], parts[1]
 
-	// Convert offset/limit to page/perPage using local variables to avoid
-	// mutating the caller's struct. GitHub caps PerPage at 100 server-side,
-	// so we cap here too so the page calculation matches what is actually returned.
+	// Normalize offset/limit in-place. params is passed by value, so mutating
+	// its fields is safe and keeps later logic (total estimate and ListResult)
+	// consistent with the page size actually used. GitHub caps PerPage at 100
+	// server-side, so we cap here too so the page calculation matches.
+	params.Limit = normalizeLimit(params.Limit)
+	params.Offset = normalizeOffset(params.Offset)
 	limit := params.Limit
-	if limit <= 0 {
-		limit = 25
-	} else if limit > 100 {
-		limit = 100
-	}
 	offset := params.Offset
-	if offset < 0 {
-		offset = 0
-	}
 	page := (offset / limit) + 1
 
 	opts := &github.IssueListByRepoOptions{
