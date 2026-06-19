@@ -3,6 +3,17 @@ from typing import Dict, Any, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+
+class PlatformInput(BaseModel):
+    platform: str = Field(..., description="Target platform")
+
+
+class HasuraActionPayload(BaseModel):
+    input: PlatformInput
+    session_variables: Dict[str, Any] = Field(default_factory=dict)
+
 
 from notifications_server import engine, sync_engine, slack_app, teams_app
 from notifications_server.configs.settings import settings
@@ -71,14 +82,14 @@ async def send_message(payload: SendMessageRequest) -> List[PlatformResponse]:
 
 
 @router.post("/channels/list", dependencies=[Depends(verify_action_token)])
-async def list_channels(request: Request, body: Dict[Any, Any]):
+async def list_channels(request: Request, body: HasuraActionPayload):
     try:
-        session_variables = body.get("session_variables", {})
+        session_variables = body.session_variables
         tenant = session_variables.get("tenant_id") or request.headers.get("tenant")
         if not tenant:
             return JSONResponse({"error": {"message": ERROR_TENANT_NOT_FOUND}})
 
-        platform = body.get("input", {}).get("platform")
+        platform = body.input.platform
 
         with CommonService(engine=sync_engine, slack_app=slack_app, teams_app=teams_app) as controller:
             channels = controller.list_channels(platform, tenant)
@@ -88,14 +99,14 @@ async def list_channels(request: Request, body: Dict[Any, Any]):
 
 
 @router.post("/users/list", dependencies=[Depends(verify_action_token)])
-async def list_users(request: Request, body: Dict[Any, Any]):
+async def list_users(request: Request, body: HasuraActionPayload):
     try:
-        session_variables = body.get("session_variables", {})
+        session_variables = body.session_variables
         tenant = session_variables.get("tenant_id") or request.headers.get("tenant")
         if not tenant:
             return JSONResponse({"error": {"message": ERROR_TENANT_NOT_FOUND}})
 
-        platform = body.get("input", {}).get("platform")
+        platform = body.input.platform
 
         with CommonService(engine=sync_engine, slack_app=slack_app, teams_app=teams_app) as controller:
             users = controller.list_users(platform, tenant)
