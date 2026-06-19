@@ -46,9 +46,8 @@ func ExecuteSLO(accountId string) error {
 
 	sloConfigs := make([]DBSLOConfig, 0)
 	if err = dbms.Db.Select(&sloConfigs, `SELECT id, "name", description, "window", goal, schedule, created_by, updated_by, "method",
-			histogram_query, filter_good_query, filter_bad_query, filter_valid_query, start_time,
-			end_time, threshold, created_at, updated_at, cloud_account_id, tenant_id, enabled,
-			workload_name, workload_namespace, workload_id
+			histogram_query, filter_good_query, filter_bad_query, threshold, created_at, updated_at,
+			cloud_account_id, tenant_id, enabled, workload_name, workload_namespace
 		FROM public.slo_config WHERE cloud_account_id=$1 AND enabled = true`, accountId); err != nil {
 		return err
 	}
@@ -136,7 +135,6 @@ func executeSlo(config DBSLOConfig, accountId string) ([]SLOReport, error) {
 		Expression:      config.Expression,
 		FilterGood:      config.FilterGood,
 		FilterBad:       config.FilterBad,
-		FilterValid:     config.FilterValid,
 		Method:          config.Method,
 		ThresholdBucket: config.ThresholdBucket / 1000,
 	}
