@@ -46,6 +46,7 @@ const GET_LLM_CONVERSATION_V3_QUERY = `
         parent_agent_id
         message_config
         ack_message
+        metadata
         attachments {
           id
           mime_type

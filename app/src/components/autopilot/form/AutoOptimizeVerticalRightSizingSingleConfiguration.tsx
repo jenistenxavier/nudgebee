@@ -20,7 +20,7 @@ import { useData } from '@context/DataContext';
 import ActionButtons from './AutoOptimizeActionButtons';
 import NotificationForm from './AutoOptimizeNotificationForm';
 import apiAutoPilot from '@api1/autoPilot';
-import { colors } from 'src/utils/colors';
+import { colors, ds } from 'src/utils/colors';
 import RunbookTargetResource from '@components/runbooks/RunbookTargetResource';
 import { snackbar } from '@shared/snackbarService';
 import { infoIcon } from '@assets';

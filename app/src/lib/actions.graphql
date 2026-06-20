@@ -7461,6 +7461,11 @@ type AiConversationMessage {
   parent_agent_id: String
   message_config: String
   ack_message: String
+  # Per-message jsonb attachment slot, raw JSON text. Namespace-keyed by
+  # subsystem (e.g. `egressfilter`, future `pii_tokenization`). Null when no
+  # subsystem wrote anything for the message. Frontend JSON.parses and
+  # dispatches on whichever top-level keys it understands.
+  metadata: String
   attachments: [AiMessageAttachment!]
 }
 
