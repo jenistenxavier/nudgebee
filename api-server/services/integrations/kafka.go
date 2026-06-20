@@ -112,8 +112,11 @@ func (m Kafka) ValidateConfig(sc *security.SecurityContext, configs []core.Integ
 		return []error{fmt.Errorf("authorization failed: the user lacks permission to read cluster metadata")}
 	}
 
-	// `kcat -L` prints "Metadata for all topics" and "N brokers:" on a successful connection.
-	if strings.Contains(respLower, "metadata for") || strings.Contains(respLower, "broker") {
+	// `kcat -L` prints "Metadata for all topics" only on a successful connection. Check this
+	// positive signal before the generic error check: a loose "broker" match would false-pass
+	// on errors like "broker transport failure" / "all brokers down", while checking for "error"
+	// first would false-fail a healthy cluster that happens to host a topic named "*error*".
+	if strings.Contains(respLower, "metadata for") {
 		return nil
 	}
 
