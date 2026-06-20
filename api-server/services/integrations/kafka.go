@@ -88,6 +88,9 @@ func (m Kafka) ValidateConfig(sc *security.SecurityContext, configs []core.Integ
 		return core.HandleRelayError(err)
 	}
 
+	if resp == nil {
+		return []error{fmt.Errorf("empty response from kafka server")}
+	}
 	respStr, ok := resp["response"].(string)
 	if !ok {
 		return []error{fmt.Errorf("unexpected response format from kafka server: %v", resp)}
