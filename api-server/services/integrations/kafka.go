@@ -29,7 +29,7 @@ func (m Kafka) ConfigSchema() core.IntegrationSchema {
 	return core.IntegrationSchema{
 		Type:     core.ToolSchemaTypeObject,
 		Testable: true,
-		Required: []string{"k8s_secret"},
+		Required: []string{"k8s_secret", "account_id"},
 		Properties: map[string]core.IntegrationSchemaProperty{
 			"k8s_secret": {
 				Type: core.ToolSchemaTypeString,
@@ -42,7 +42,6 @@ func (m Kafka) ConfigSchema() core.IntegrationSchema {
 			"account_id": {
 				Type:             core.ToolSchemaTypeArray,
 				Description:      "Select Account",
-				Default:          "",
 				AutoGenerateFunc: "listAccounts",
 				Priority:         95,
 			},
