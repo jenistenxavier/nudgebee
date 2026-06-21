@@ -59,6 +59,10 @@ func (m Kafka) ConfigSchema() core.IntegrationSchema {
 
 func (m Kafka) ValidateConfig(sc *security.SecurityContext, configs []core.IntegrationConfigValue, accountId string) []error {
 
+	if accountId == "" {
+		return []error{fmt.Errorf("account_id is required")}
+	}
+
 	secretName := ""
 	for _, integrationConfig := range configs {
 		if strings.EqualFold(integrationConfig.Name, "k8s_secret") {
@@ -98,7 +102,16 @@ func (m Kafka) ValidateConfig(sc *security.SecurityContext, configs []core.Integ
 
 	respLower := strings.ToLower(respStr)
 
-	// Check for specific Kafka/kcat error patterns to provide actionable feedback.
+	// `kcat -L` prints "Metadata for all topics" only on a successful connection (kcat does not
+	// emit it on any failure path). Check this positive signal first: the response lists every
+	// topic name, so matching error keywords before confirming success could false-fail a
+	// healthy cluster that happens to host a topic whose name contains one of them (e.g. a topic
+	// named "timeout" or "certificate", or "broker" matching "broker transport failure").
+	if strings.Contains(respLower, "metadata for") {
+		return nil
+	}
+
+	// No success marker: map specific kcat/Kafka error patterns to actionable feedback.
 	switch {
 	case strings.Contains(respLower, "authentication failed") || strings.Contains(respLower, "sasl authentication"):
 		return []error{fmt.Errorf("authentication failed: invalid SASL username or password")}
@@ -113,14 +126,6 @@ func (m Kafka) ValidateConfig(sc *security.SecurityContext, configs []core.Integ
 		return []error{fmt.Errorf("TLS handshake failed: check KAFKA_SECURITY_PROTOCOL and CA/cert configuration")}
 	case strings.Contains(respLower, "topic authorization failed") || strings.Contains(respLower, "not authorized"):
 		return []error{fmt.Errorf("authorization failed: the user lacks permission to read cluster metadata")}
-	}
-
-	// `kcat -L` prints "Metadata for all topics" only on a successful connection. Check this
-	// positive signal before the generic error check: a loose "broker" match would false-pass
-	// on errors like "broker transport failure" / "all brokers down", while checking for "error"
-	// first would false-fail a healthy cluster that happens to host a topic named "*error*".
-	if strings.Contains(respLower, "metadata for") {
-		return nil
 	}
 
 	// Surface any other error indicators.
