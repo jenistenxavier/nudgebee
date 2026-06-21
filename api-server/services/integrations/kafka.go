@@ -75,6 +75,13 @@ func (m Kafka) ValidateConfig(sc *security.SecurityContext, configs []core.Integ
 		return []error{fmt.Errorf("k8s_secret is required")}
 	}
 
+	// Reject a namespace-prefixed secret ("namespace/secret"). relay.CommandExecutor would
+	// otherwise run the test pod against a secret in that namespace; the kafka creds secret is
+	// expected to live in the agent's own namespace, so a prefix should not be accepted here.
+	if strings.Contains(secretName, "/") {
+		return []error{fmt.Errorf("k8s_secret must be a secret name without a namespace prefix")}
+	}
+
 	// Fetch cluster metadata (brokers + topics) as the connection test. The kcat argv is built
 	// via positional params so every secret value is double-quoted, keeping word-splitting /
 	// shell metacharacters in (e.g.) a SASL password from breaking the command. SASL/TLS flags
@@ -118,12 +125,15 @@ func (m Kafka) ValidateConfig(sc *security.SecurityContext, configs []core.Integ
 
 	respLower := strings.ToLower(respStr)
 
-	// `kcat -L` prints "Metadata for all topics" only on a successful connection (kcat does not
-	// emit it on any failure path). Check this positive signal first: the response lists every
-	// topic name, so matching error keywords before confirming success could false-fail a
-	// healthy cluster that happens to host a topic whose name contains one of them (e.g. a topic
-	// named "timeout" or "certificate", or "broker" matching "broker transport failure").
-	if strings.Contains(respLower, "metadata for") {
+	// `kcat -L` prints the exact header "Metadata for all topics" only on a successful connection.
+	// Match the full header (not a bare "metadata for") so a per-topic error such as
+	// "Failed to acquire metadata for topic ..." cannot false-pass. Check this positive signal
+	// before the error patterns below: the response lists every topic name, so matching error
+	// keywords first could false-fail a healthy cluster hosting a topic whose name contains one
+	// (e.g. a topic named "timeout" or "certificate", or "broker" matching "broker transport
+	// failure"). A partially-degraded cluster still prints this header, which is correct — metadata
+	// was acquired, so the connection works.
+	if strings.Contains(respLower, "metadata for all topics") {
 		return nil
 	}
 
