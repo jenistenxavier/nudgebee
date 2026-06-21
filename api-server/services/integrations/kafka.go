@@ -86,7 +86,18 @@ func (m Kafka) ValidateConfig(sc *security.SecurityContext, configs []core.Integ
 		`[ -n "$KAFKA_SASL_USERNAME" ] && set -- "$@" -X "sasl.username=$KAFKA_SASL_USERNAME"; ` +
 		`[ -n "$KAFKA_SASL_PASSWORD" ] && set -- "$@" -X "sasl.password=$KAFKA_SASL_PASSWORD"; ` +
 		`kcat "$@" -L`
-	resp, err := relay.CommandExecutor(accountId, command, secretName, map[string]string{})
+	// Inject the secret's keys as env vars into the script-runner pod. The llm-server MSSQL/Oracle
+	// relay jobs populate this map explicitly for the same pod_script_run_enricher action, so do the
+	// same here rather than rely on implicit wholesale injection. Keys map to themselves because the
+	// secret key names and the env var names referenced in the command above are identical.
+	envFromSecret := map[string]string{
+		"KAFKA_BROKERS":           "KAFKA_BROKERS",
+		"KAFKA_SECURITY_PROTOCOL": "KAFKA_SECURITY_PROTOCOL",
+		"KAFKA_SASL_MECHANISM":    "KAFKA_SASL_MECHANISM",
+		"KAFKA_SASL_USERNAME":     "KAFKA_SASL_USERNAME",
+		"KAFKA_SASL_PASSWORD":     "KAFKA_SASL_PASSWORD",
+	}
+	resp, err := relay.CommandExecutor(accountId, command, secretName, envFromSecret)
 
 	if err != nil {
 		return core.HandleRelayError(err)
