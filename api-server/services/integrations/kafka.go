@@ -80,12 +80,17 @@ func (m Kafka) ValidateConfig(sc *security.SecurityContext, configs []core.Integ
 	// shell metacharacters in (e.g.) a SASL password from breaking the command. SASL/TLS flags
 	// are appended only when the matching secret key is set, so the same command works for
 	// PLAINTEXT and SASL_SSL clusters alike.
+	//
+	// The final `2>&1 || true` redirects kcat's stderr (where it writes connection/auth errors)
+	// into stdout and forces a zero exit, so the relay returns the output for the error-pattern
+	// parsing below instead of surfacing a bare non-zero-exit failure. Connection problems are
+	// still reported — they're matched from the captured text, not the exit code.
 	command := `set -- -b "$KAFKA_BROKERS"; ` +
 		`[ -n "$KAFKA_SECURITY_PROTOCOL" ] && set -- "$@" -X "security.protocol=$KAFKA_SECURITY_PROTOCOL"; ` +
 		`[ -n "$KAFKA_SASL_MECHANISM" ] && set -- "$@" -X "sasl.mechanism=$KAFKA_SASL_MECHANISM"; ` +
 		`[ -n "$KAFKA_SASL_USERNAME" ] && set -- "$@" -X "sasl.username=$KAFKA_SASL_USERNAME"; ` +
 		`[ -n "$KAFKA_SASL_PASSWORD" ] && set -- "$@" -X "sasl.password=$KAFKA_SASL_PASSWORD"; ` +
-		`kcat "$@" -L`
+		`kcat "$@" -L 2>&1 || true`
 	// Inject the secret's keys as env vars into the script-runner pod. The llm-server MSSQL/Oracle
 	// relay jobs populate this map explicitly for the same pod_script_run_enricher action, so do the
 	// same here rather than rely on implicit wholesale injection. Keys map to themselves because the
