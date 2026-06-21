@@ -552,6 +552,22 @@ func GenerateAndTrackLLMContent(ctx *security.RequestContext, userId string, acc
 	// RUN ASYNCHRONOUSLY to prevent DB latency from blocking the response
 	bgCtx := security.NewRequestContext(context.Background(), ctx.GetSecurityContext(), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
 	trackFn := func() {
+		// Best-effort background metrics write — never let a panic crash the
+		// process. Guards against a typed-nil DAO (non-nil interface wrapping a
+		// nil concrete, e.g. a test fake embedding a nil IConversationDao swapped
+		// in concurrently) or a partially-initialised DAO during early startup.
+		defer func() {
+			if r := recover(); r != nil {
+				// Fall back to slog.Default() — bgCtx's logger can be nil (some
+				// test contexts pass a nil logger), and logging on it here would
+				// be a second, unrecovered panic.
+				logger := slog.Default()
+				if bgCtx != nil && bgCtx.GetLogger() != nil {
+					logger = bgCtx.GetLogger()
+				}
+				logger.Error("trackTokenUsage: recovered from panic in background token-usage write", "panic", r)
+			}
+		}()
 		trackTokenUsage(
 			bgCtx,
 			conversationId,
@@ -2464,7 +2480,22 @@ func recordTokenUsageFailure(
 	bgCtx := security.NewRequestContext(context.Background(), ctx.GetSecurityContext(), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
 	insertFn := func() {
 		// Best-effort: skip if the DAO is unavailable rather than panicking this
-		// background goroutine on a nil interface (see trackTokenUsage).
+		// background goroutine on a nil interface (see trackTokenUsage). The
+		// recover also covers a typed-nil DAO — a non-nil interface wrapping a
+		// nil concrete (e.g. a test fake embedding a nil IConversationDao) — that
+		// the `== nil` check below cannot catch.
+		defer func() {
+			if r := recover(); r != nil {
+				// Fall back to slog.Default() — bgCtx's logger can be nil (some
+				// test contexts pass a nil logger), and logging on it here would
+				// be a second, unrecovered panic.
+				logger := slog.Default()
+				if bgCtx != nil && bgCtx.GetLogger() != nil {
+					logger = bgCtx.GetLogger()
+				}
+				logger.Error("recordTokenUsageFailure: recovered from panic in background token-usage write", "panic", r)
+			}
+		}()
 		dao := GetConversationDao()
 		if dao == nil {
 			bgCtx.GetLogger().Debug("recordTokenUsageFailure: skipping — conversation DAO unavailable")
