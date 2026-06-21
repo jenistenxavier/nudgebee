@@ -55,9 +55,7 @@ func skipIfNoIntegration(t *testing.T) {
 	if os.Getenv("RUN_MEMORY_INTEGRATION") != "true" {
 		t.Skip("set RUN_MEMORY_INTEGRATION=true to run (needs Postgres with Phase-1 migrations)")
 	}
-	if os.Getenv("LLM_SERVER_DB_URL") == "" {
-		t.Skip("LLM_SERVER_DB_URL not set")
-	}
+	RequireEnv(t, "LLM_SERVER_DB_URL")
 	if _, err := common.GetDatabaseManager(common.Metastore); err != nil {
 		t.Skipf("metastore unreachable: %v", err)
 	}

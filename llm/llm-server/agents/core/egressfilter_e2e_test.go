@@ -145,9 +145,7 @@ func loadE2EEnv(t *testing.T) e2eEnv {
 		model:    os.Getenv("LLM_MODEL_NAME"),
 		apiKey:   os.Getenv("LLM_PROVIDER_API_KEY"),
 	}
-	if env.provider == "" || env.model == "" || env.apiKey == "" {
-		t.Skip("LLM_PROVIDER / LLM_MODEL_NAME / LLM_PROVIDER_API_KEY must be set for e2e tests")
-	}
+	RequireEnv(t, "LLM_PROVIDER", "LLM_MODEL_NAME", "LLM_PROVIDER_API_KEY")
 	t.Logf("e2e config: provider=%s model=%s api_key=<%d bytes>",
 		env.provider, env.model, len(env.apiKey))
 	return env

@@ -33,12 +33,7 @@ func skipIfNoModelConfigIntegration(t *testing.T) {
 	if os.Getenv("RUN_MODEL_CONFIG_INTEGRATION") != "true" {
 		t.Skip("set RUN_MODEL_CONFIG_INTEGRATION=true to run (needs Postgres with V746 applied)")
 	}
-	if os.Getenv("LLM_SERVER_DB_URL") == "" {
-		t.Skip("LLM_SERVER_DB_URL not set")
-	}
-	if os.Getenv("TEST_TENANT") == "" || os.Getenv("TEST_ACCOUNT") == "" || os.Getenv("TEST_USER") == "" {
-		t.Skip("TEST_TENANT, TEST_ACCOUNT, TEST_USER required (must reference existing rows; FK-enforced)")
-	}
+	RequireEnv(t, "LLM_SERVER_DB_URL", "TEST_TENANT", "TEST_ACCOUNT", "TEST_USER")
 	if _, err := common.GetDatabaseManager(common.Metastore); err != nil {
 		t.Skipf("metastore unreachable: %v", err)
 	}

@@ -13,7 +13,8 @@
 //     LLM_PROVIDER_API_KEY)
 //
 // Run:
-//   go test -tags=e2e -v -run TestE2E_EgressFilterChat ./agents/core/...
+//
+//	go test -tags=e2e -v -run TestE2E_EgressFilterChat ./agents/core/...
 //
 // Each test logs the session_id it used so you can look up the conversation
 // in the UI to verify the egressfilter's behavior end-to-end.
@@ -84,9 +85,7 @@ func loadChatE2EEnv(t *testing.T) chatE2EEnv {
 		account: os.Getenv("TEST_ACCOUNT"),
 		user:    os.Getenv("TEST_USER"),
 	}
-	if env.tenant == "" || env.account == "" || env.user == "" {
-		t.Skip("TEST_TENANT / TEST_ACCOUNT / TEST_USER must be set for chat-flow e2e tests")
-	}
+	RequireEnv(t, "TEST_TENANT", "TEST_ACCOUNT", "TEST_USER")
 	// Don't echo the values themselves — just confirm presence.
 	t.Logf("chat e2e env: tenant=<%d bytes> account=<%d bytes> user=<%d bytes>",
 		len(env.tenant), len(env.account), len(env.user))
