@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/wagslane/go-rabbitmq"
 )
 
@@ -497,6 +498,49 @@ func publishToPoisonDLQ(exchangeName string, queueName string, body []byte, orig
 		slog.Info("rbmq: poison message published to DLQ for inspection",
 			"dlq_exchange", dlqExchange, "dlq_queue", dlqQueue, "crash_count", crashCount)
 	}
+}
+
+// MqDeclareDLQ declares a durable dead-letter exchange and queue and binds them
+// together (routing key == queue name). DLQ targets are published to via MqPublish
+// (see sendToDLQWithConfig / publishToPoisonDLQ), which declares only the exchange.
+// RabbitMQ silently discards messages published to an exchange with no bound queue,
+// so without this declaration DLQ messages are lost. Call once at consumer startup.
+// The declaration is idempotent: re-declaring with the same parameters is a no-op.
+func MqDeclareDLQ(exchangeName string, queueName string) error {
+	if exchangeName == "" || queueName == "" {
+		slog.Warn("rbmq: DLQ not configured, skipping DLQ declaration", "dlq_exchange", exchangeName, "dlq_queue", queueName)
+		return nil
+	}
+
+	url := fmt.Sprintf("amqp://%s:%s@%s:%d", config.Config.RabbitMqUsername, config.Config.RabbitMqPassword, config.Config.RabbitMqHost, config.Config.RabbitMqPort)
+	// Use a bounded dial timeout so a slow/unreachable broker can't hang consumer startup.
+	conn, err := amqp.DialConfig(url, amqp.Config{Dial: amqp.DefaultDial(10 * time.Second)})
+	if err != nil {
+		return fmt.Errorf("rbmq: dlq dial failed: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	ch, err := conn.Channel()
+	if err != nil {
+		return fmt.Errorf("rbmq: dlq channel open failed: %w", err)
+	}
+	defer func() { _ = ch.Close() }()
+
+	// Durable direct exchange to match how MqPublish declares exchanges.
+	if err := ch.ExchangeDeclare(exchangeName, amqp.ExchangeDirect, true, false, false, false, nil); err != nil {
+		return fmt.Errorf("rbmq: dlq exchange declare failed: %w", err)
+	}
+	if _, err := ch.QueueDeclare(queueName, true, false, false, false, nil); err != nil {
+		return fmt.Errorf("rbmq: dlq queue declare failed: %w", err)
+	}
+	// Bind with routing key == queue name, matching the routing key used by
+	// sendToDLQWithConfig / publishToPoisonDLQ when publishing to the DLQ.
+	if err := ch.QueueBind(queueName, queueName, exchangeName, false, nil); err != nil {
+		return fmt.Errorf("rbmq: dlq queue bind failed: %w", err)
+	}
+
+	slog.Info("rbmq: dead-letter queue declared and bound", "dlq_exchange", exchangeName, "dlq_queue", queueName)
+	return nil
 }
 
 func MqPublish(exchangeName string, routingKey string, message any, opts ...MqPublishOption) error {
