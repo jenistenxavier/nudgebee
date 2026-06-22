@@ -1,4 +1,6 @@
-package mq
+//go:build e2e
+
+package dbms
 
 import (
 	"log/slog"
@@ -10,9 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestRabbitmqadminTask_Execute(t *testing.T) {
-	testutils.RequireEnv(t, "TEST_TENANT_ID", "TEST_K8S_ACCOUNT_ID", "TEST_USER_ID", "TEST_RABBIT_INTEGRATION_ID")
-	task := &RabbitmqadminCliTask{}
+func TestRedisTask_Execute(t *testing.T) {
+	testutils.RequireEnv(t, "TEST_TENANT_ID", "TEST_K8S_ACCOUNT_ID", "TEST_USER_ID", "TEST_REDIS_INTEGRATION_ID")
+	task := &RedisCliTask{}
 	taskCtx := testutils.NewTestTaskContext(os.Getenv("TEST_TENANT_ID"), os.Getenv("TEST_K8S_ACCOUNT_ID"), os.Getenv("TEST_USER_ID"), slog.Default())
 
 	testCases := []struct {
@@ -25,8 +27,8 @@ func TestRabbitmqadminTask_Execute(t *testing.T) {
 		{
 			name: "Simple Command Execution",
 			params: map[string]any{
-				"command":        "rabbitmqadmin list queues",
-				"integration_id": os.Getenv("TEST_RABBIT_INTEGRATION_ID"),
+				"command":        "INFO",
+				"integration_id": os.Getenv("TEST_REDIS_INTEGRATION_ID"),
 			},
 		},
 	}
@@ -43,7 +45,7 @@ func TestRabbitmqadminTask_Execute(t *testing.T) {
 				}
 			} else {
 				assert.NoError(t, err)
-				assert.True(t, strings.Contains(result.(map[string]any)["data"].(string), "messages"))
+				assert.True(t, strings.Contains(result.(map[string]any)["data"].(string), "redis_version"))
 			}
 		})
 	}

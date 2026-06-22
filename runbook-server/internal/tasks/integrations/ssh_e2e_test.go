@@ -1,18 +1,22 @@
-package cloud
+//go:build e2e
+
+package integrations
 
 import (
+	"fmt"
 	"log/slog"
 	"nudgebee/runbook/internal/tasks/testutils"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
-func TestAzureCliTask_Execute(t *testing.T) {
-	testutils.RequireEnv(t, "TEST_TENANT_ID", "TEST_AZURE_ACCOUNT_ID", "TEST_USER_ID")
-	task := &AzureCliTask{}
-	taskCtx := testutils.NewTestTaskContext(os.Getenv("TEST_TENANT_ID"), os.Getenv("TEST_AZURE_ACCOUNT_ID"), os.Getenv("TEST_USER_ID"), slog.Default())
+func TestSSHCliTask_Execute(t *testing.T) {
+	testutils.RequireEnv(t, "TEST_TENANT_ID", "TEST_K8S_ACCOUNT_ID", "TEST_USER_ID", "TEST_SSH_INTEGRATION_ID")
+	task := &SSHTask{}
+	taskCtx := testutils.NewTestTaskContext(os.Getenv("TEST_TENANT_ID"), os.Getenv("TEST_K8S_ACCOUNT_ID"), os.Getenv("TEST_USER_ID"), slog.Default())
 
 	testCases := []struct {
 		name          string
@@ -24,7 +28,8 @@ func TestAzureCliTask_Execute(t *testing.T) {
 		{
 			name: "Simple Command Execution",
 			params: map[string]any{
-				"command": "az account show",
+				"command":        "ls -al /",
+				"integration_id": os.Getenv("TEST_SSH_INTEGRATION_ID"),
 			},
 		},
 	}
@@ -41,7 +46,8 @@ func TestAzureCliTask_Execute(t *testing.T) {
 				}
 			} else {
 				assert.NoError(t, err)
-				assert.NotNil(t, result.(map[string]any)["data"])
+				assert.True(t, strings.Contains(result.(map[string]any)["data"].(string), "root"))
+				fmt.Println(result.(map[string]any)["data"].(string))
 			}
 		})
 	}

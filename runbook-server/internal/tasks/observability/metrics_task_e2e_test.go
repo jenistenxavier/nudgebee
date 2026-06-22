@@ -1,4 +1,6 @@
-package cloud
+//go:build e2e
+
+package observability
 
 import (
 	"log/slog"
@@ -9,10 +11,10 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestAwsCliTask_Execute(t *testing.T) {
-	testutils.RequireEnv(t, "TEST_TENANT_ID", "TEST_AWS_ACCOUNT_ID", "TEST_USER_ID")
-	task := &AWSCliTask{}
-	taskCtx := testutils.NewTestTaskContext(os.Getenv("TEST_TENANT_ID"), os.Getenv("TEST_AWS_ACCOUNT_ID"), os.Getenv("TEST_USER_ID"), slog.Default())
+func TestMetrics_Query(t *testing.T) {
+	testutils.RequireEnv(t, "TEST_TENANT_ID", "TEST_OBSERVABILITY_ACCOUNT_ID", "TEST_USER_ID")
+	task := &MetricsTask{}
+	taskCtx := testutils.NewTestTaskContext(os.Getenv("TEST_TENANT_ID"), os.Getenv("TEST_OBSERVABILITY_ACCOUNT_ID"), os.Getenv("TEST_USER_ID"), slog.Default())
 
 	testCases := []struct {
 		name          string
@@ -24,14 +26,13 @@ func TestAwsCliTask_Execute(t *testing.T) {
 		{
 			name: "Simple Command Execution",
 			params: map[string]any{
-				"command": "aws sts get-caller-identity",
+				"query": "container_application_type",
 			},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Clean up any potential temporary files from previous runs
 			result, err := task.Execute(taskCtx, tc.params)
 
 			if tc.expectErr {
@@ -41,7 +42,7 @@ func TestAwsCliTask_Execute(t *testing.T) {
 				}
 			} else {
 				assert.NoError(t, err)
-				assert.NotNil(t, result.(map[string]any)["data"])
+				assert.NotNil(t, result.(map[string]any)["metrics"])
 			}
 		})
 	}

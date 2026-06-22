@@ -1,3 +1,5 @@
+//go:build e2e
+
 package cloud
 
 import (
@@ -9,10 +11,10 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestGCPCliTask_Execute(t *testing.T) {
-	testutils.RequireEnv(t, "TEST_TENANT_ID", "TEST_GCP_ACCOUNT_ID", "TEST_USER_ID")
-	task := &GCPCliTask{}
-	taskCtx := testutils.NewTestTaskContext(os.Getenv("TEST_TENANT_ID"), os.Getenv("TEST_GCP_ACCOUNT_ID"), os.Getenv("TEST_USER_ID"), slog.Default())
+func TestAzureCliTask_Execute(t *testing.T) {
+	testutils.RequireEnv(t, "TEST_TENANT_ID", "TEST_AZURE_ACCOUNT_ID", "TEST_USER_ID")
+	task := &AzureCliTask{}
+	taskCtx := testutils.NewTestTaskContext(os.Getenv("TEST_TENANT_ID"), os.Getenv("TEST_AZURE_ACCOUNT_ID"), os.Getenv("TEST_USER_ID"), slog.Default())
 
 	testCases := []struct {
 		name          string
@@ -24,7 +26,7 @@ func TestGCPCliTask_Execute(t *testing.T) {
 		{
 			name: "Simple Command Execution",
 			params: map[string]any{
-				"command": `gcloud auth list --filter=status:ACTIVE --format="value(account)"`,
+				"command": "az account show",
 			},
 		},
 	}
@@ -41,7 +43,7 @@ func TestGCPCliTask_Execute(t *testing.T) {
 				}
 			} else {
 				assert.NoError(t, err)
-				assert.Equal(t, tc.expected, result)
+				assert.NotNil(t, result.(map[string]any)["data"])
 			}
 		})
 	}

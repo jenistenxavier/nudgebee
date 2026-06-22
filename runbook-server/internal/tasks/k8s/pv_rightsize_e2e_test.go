@@ -1,40 +1,44 @@
-package cloud
+//go:build e2e
+
+package k8s
 
 import (
 	"log/slog"
 	"nudgebee/runbook/internal/tasks/testutils"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
-func TestK8sCliTask_Execute(t *testing.T) {
+// TestPVRightsizeTask_Execute_Cluster covers the rows that reach a live
+// relay/cluster (PVC fetch). It requires the cluster env vars to be set.
+func TestPVRightsizeTask_Execute_Cluster(t *testing.T) {
 	testutils.RequireEnv(t, "TEST_TENANT_ID", "TEST_K8S_ACCOUNT_ID", "TEST_USER_ID")
-	task := &K8sCliTask{}
+
+	task := &PVRightsizeTask{}
 	taskCtx := testutils.NewTestTaskContext(os.Getenv("TEST_TENANT_ID"), os.Getenv("TEST_K8S_ACCOUNT_ID"), os.Getenv("TEST_USER_ID"), slog.Default())
 
 	testCases := []struct {
 		name          string
 		params        map[string]any
-		expected      any
 		expectErr     bool
 		expectedError string
 	}{
 		{
-			name: "Simple Command Execution",
-			params: map[string]any{
-				"command": "kubectl get po",
-			},
+			// kind is optional and defaults to PersistentVolumeClaim, so an
+			// omitted kind is valid and the task proceeds to fetch the PVC,
+			// which requires a live relay/cluster.
+			name:          "Missing Kind defaults to PVC and fetches it",
+			params:        map[string]any{"namespace": "default", "name": "test-pvc", "change_to": "1Gi"},
+			expectErr:     true,
+			expectedError: "failed to fetch PVC",
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Clean up any potential temporary files from previous runs
-			result, err := task.Execute(taskCtx, tc.params)
-
+			_, err := task.Execute(taskCtx, tc.params)
 			if tc.expectErr {
 				assert.Error(t, err)
 				if tc.expectedError != "" {
@@ -42,7 +46,6 @@ func TestK8sCliTask_Execute(t *testing.T) {
 				}
 			} else {
 				assert.NoError(t, err)
-				assert.True(t, strings.HasPrefix(result.(string), "NAME"))
 			}
 		})
 	}

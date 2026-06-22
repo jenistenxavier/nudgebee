@@ -1,4 +1,6 @@
-package cicd
+//go:build e2e
+
+package cloud
 
 import (
 	"log/slog"
@@ -10,9 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestArgoCliTask_Execute(t *testing.T) {
-	testutils.RequireEnv(t, "TEST_TENANT_ID", "TEST_K8S_ACCOUNT_ID", "TEST_USER_ID", "TEST_ARGOCD_INTEGRATION_ID")
-	task := &ArgoCDCliTask{}
+func TestK8sCliTask_Execute(t *testing.T) {
+	testutils.RequireEnv(t, "TEST_TENANT_ID", "TEST_K8S_ACCOUNT_ID", "TEST_USER_ID")
+	task := &K8sCliTask{}
 	taskCtx := testutils.NewTestTaskContext(os.Getenv("TEST_TENANT_ID"), os.Getenv("TEST_K8S_ACCOUNT_ID"), os.Getenv("TEST_USER_ID"), slog.Default())
 
 	testCases := []struct {
@@ -25,8 +27,7 @@ func TestArgoCliTask_Execute(t *testing.T) {
 		{
 			name: "Simple Command Execution",
 			params: map[string]any{
-				"command":        "argocd version --client",
-				"integration_id": os.Getenv("TEST_ARGOCD_INTEGRATION_ID"),
+				"command": "kubectl get po",
 			},
 		},
 	}
@@ -43,7 +44,7 @@ func TestArgoCliTask_Execute(t *testing.T) {
 				}
 			} else {
 				assert.NoError(t, err)
-				assert.True(t, strings.HasPrefix(result.(map[string]any)["data"].(string), "argocd"))
+				assert.True(t, strings.HasPrefix(result.(string), "NAME"))
 			}
 		})
 	}
