@@ -263,6 +263,13 @@ type ProviderCapabilities struct {
 	// raw-token field is removed in a later PR.
 	SupportedOperators           []string                   `json:"supported_operators"`
 	SupportedOperatorDescriptors []query.OperatorDescriptor `json:"supported_operator_descriptors"`
+	// LabelMappings is the canonical→provider field map for this provider+account
+	// (e.g. `pod`→`kubernetes.pod_name.keyword`). Lets clients (LLM fetch_logs v2,
+	// future query builders) build a provider-independent where clause using
+	// canonical entity names that FetchLogs resolves server-side. Logs: full
+	// static+tenant+account+dynamic merge. Traces: provider static map. Metrics:
+	// not populated (metric sources have no label mapping). Omitted when empty.
+	LabelMappings map[string]string `json:"label_mappings,omitempty"`
 }
 
 // AvailableProvider is one active observability provider that can serve the

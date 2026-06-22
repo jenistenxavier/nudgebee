@@ -282,7 +282,10 @@ type appConfig struct {
 	LlmServerWorkspaceResourceRequestCpu    string `mapstructure:"llm_server_workspace_resource_request_cpu"`
 	LlmServerWorkspaceResourceRequestMemory string `mapstructure:"llm_server_workspace_resource_request_memory"`
 
-	LlmServerShellToolEnabled              bool   `mapstructure:"llm_server_shell_tool_enabled"`
+	LlmServerShellToolEnabled bool `mapstructure:"llm_server_shell_tool_enabled"`
+	// LogAgentV2Enabled gates the canonical, provider-independent fetch_logs
+	// agent (FetchLogsAgentV2). Global per-deploy toggle; default false.
+	LogAgentV2Enabled                      bool   `mapstructure:"llm_server_log_agent_v2_enabled"`
 	LlmServerWorkspacePort                 int    `mapstructure:"llm_server_workspace_port"`
 	LlmServerWorkspaceLocalUrl             string `mapstructure:"llm_server_workspace_local_url"`
 	LlmServerWorkspaceFileMaxDownloadBytes int    `mapstructure:"llm_server_workspace_file_max_download_bytes"`
@@ -743,6 +746,7 @@ func init() {
 	viper.SetDefault("llm_server_workspace_resource_request_cpu", "250m")
 	viper.SetDefault("llm_server_workspace_resource_request_memory", "256Mi")
 	viper.SetDefault("llm_server_shell_tool_enabled", true)
+	viper.SetDefault("llm_server_log_agent_v2_enabled", false)
 	viper.SetDefault("llm_server_workspace_port", 8080)
 	viper.SetDefault("llm_server_workspace_local_url", "") // e.g. http://localhost:8080 for local dev
 	viper.SetDefault("llm_server_workspace_file_max_download_bytes", 5*1024*1024)

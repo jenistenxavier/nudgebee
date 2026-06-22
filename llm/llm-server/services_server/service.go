@@ -608,6 +608,25 @@ func QueryLogLabels(ctx security.RequestContext, accountId string, provider Obse
 	return core.ObservabilityLogLabelResponse{Labels: response}, nil
 }
 
+// ProviderCapabilities is the subset of get_default_provider's `capabilities`
+// block the llm-server consumes. The backend returns more fields (service map,
+// heatmap, raw query, etc.); only the operator set is parsed here.
+type ProviderCapabilities struct {
+	// SupportedOperators are the backend-authoritative query operators for this
+	// provider+type, runtime-detected per source. Injected into the
+	// log-query-generator prompt so the LLM only emits operators the backend can
+	// actually execute (e.g. Signoz lacks `_ilike`, Pinot lacks `_in`). Empty
+	// when the backend omits the capabilities block — callers fall back to a
+	// static default operator list.
+	SupportedOperators []string `json:"supported_operators"`
+	// LabelMappings is the backend's canonical→provider field map for this
+	// provider+type (e.g. `pod`→`kubernetes.pod_name.keyword`). The canonical
+	// fetch_logs v2 path advertises these canonical entity names to the LLM so it
+	// emits a provider-independent where clause that services-server resolves.
+	// Empty when the backend omits it — callers fall back to provider-native labels.
+	LabelMappings map[string]string `json:"label_mappings"`
+}
+
 type ObservabilityProvider struct {
 	// Wire key must be snake_case to match api-server's DefaultProviderResponse.
 	IntegrationSource string `json:"integration_source"`
@@ -617,6 +636,10 @@ type ObservabilityProvider struct {
 	// have no index concept, e.g. Loki). Surfaced into the query-generator
 	// prompt so the LLM knows what omitting the `index` field resolves to.
 	DefaultIndex string `json:"default_index"`
+	// Capabilities carries the backend's per-provider capability block (the
+	// operator set is the only part consumed today). Empty when get_default_provider
+	// omits it.
+	Capabilities ProviderCapabilities `json:"capabilities"`
 }
 
 func GetObservabilityProvider(ctx security.RequestContext, accountId, provider string) (ObservabilityProvider, error) {

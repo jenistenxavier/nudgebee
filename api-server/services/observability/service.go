@@ -709,7 +709,7 @@ var allProviderCaps = map[string]providerStaticCaps{
 	},
 }
 
-func getProviderCapabilities(provider, integrationSource, providerType string) ProviderCapabilities {
+func getProviderCapabilities(ctx *security.RequestContext, accountId, provider, integrationSource, providerType string) ProviderCapabilities {
 	if provider == "" {
 		return ProviderCapabilities{}
 	}
@@ -731,13 +731,19 @@ func getProviderCapabilities(provider, integrationSource, providerType string) P
 		caps.SupportsLogGroups = true
 	}
 
-	// Interface-derived capabilities: operator list and optional interfaces.
+	// Interface-derived capabilities: operator list, label mapping, optional interfaces.
 	switch providerType {
 	case "logs":
 		source, err := getLogSource(provider, integrationSource)
 		if err == nil {
 			caps.SupportedOperators = source.GetSupportedOperators()
 			_, caps.SupportsAutoQuery = source.(PlaybookQueryGenerator)
+			// Full canonical→provider merge (static ∪ tenant ∪ account ∪ dynamic).
+			// Skip the merge when accountId is empty: with no account the lookup
+			// can only return the static defaults, so there's nothing to merge.
+			if accountId != "" {
+				caps.LabelMappings = getMergedLabelMapping(ctx, accountId, source)
+			}
 		} else {
 			slog.Warn("getProviderCapabilities: failed to get log source", "provider", provider, "error", err)
 		}
@@ -745,6 +751,8 @@ func getProviderCapabilities(provider, integrationSource, providerType string) P
 		source, err := getTraceSource(provider, integrationSource)
 		if err == nil {
 			caps.SupportedOperators = source.GetSupportedOperators()
+			// Static map only — no trace-merge helper exists yet.
+			caps.LabelMappings = source.GetLabelMapping()
 		} else {
 			slog.Warn("getProviderCapabilities: failed to get trace source", "provider", provider, "error", err)
 		}
@@ -752,6 +760,8 @@ func getProviderCapabilities(provider, integrationSource, providerType string) P
 		source, err := getMetricsSource(provider, integrationSource)
 		if err == nil {
 			caps.SupportedOperators = source.GetSupportedOperators()
+			// No metric label mapping today — metric sources don't implement
+			// GetLabelMapping; LabelMappings stays empty for metrics.
 		} else {
 			slog.Warn("getProviderCapabilities: failed to get metrics source", "provider", provider, "error", err)
 		}
@@ -766,7 +776,7 @@ func GetDefaultProvider(context *security.RequestContext, accountId, providerTyp
 	if err != nil {
 		return nil, err
 	}
-	caps := getProviderCapabilities(defaultProvider, integrationSource, providerType)
+	caps := getProviderCapabilities(context, accountId, defaultProvider, integrationSource, providerType)
 	return &DefaultProviderResponse{
 		Provider:           defaultProvider,
 		IntegrationSource:  integrationSource,
@@ -809,7 +819,7 @@ func listAvailableProviders(context *security.RequestContext, accountId, provide
 			return
 		}
 		seen[provider] = true
-		caps := getProviderCapabilities(provider, source, providerType)
+		caps := getProviderCapabilities(context, accountId, provider, source, providerType)
 		available = append(available, AvailableProvider{
 			Provider:                     provider,
 			SupportedOperators:           caps.SupportedOperators,
@@ -907,7 +917,7 @@ func ListProviderCapabilities(ctx *security.RequestContext, accountId string) ([
 		if err != nil || provider == "" {
 			continue
 		}
-		caps := getProviderCapabilities(provider, source, providerType)
+		caps := getProviderCapabilities(ctx, accountId, provider, source, providerType)
 		result = append(result, ProviderCapabilityEntry{
 			Provider:     provider,
 			ProviderType: providerType,
