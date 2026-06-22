@@ -482,15 +482,48 @@ func QueryTraces(ctx security.RequestContext, request core.ObservabilityTracesV3
 		return observabilityResp, fmt.Errorf("services: traces query failed (status %d): %s", resp.StatusCode, string(jsonBody))
 	}
 
-	response := make([]core.ObservabilityTrace, 0, 100)
-	err = common.UnmarshalJson(jsonBody, &response)
-	if err != nil {
+	if err := decodeTraceQueryBody(jsonBody, request.IncludeRawResult, &observabilityResp); err != nil {
 		return observabilityResp, err
 	}
 
-	observabilityResp.Traces = response
-
 	return observabilityResp, nil
+}
+
+// decodeTraceQueryBody fills the trace response from the services-server body, tolerating rollout
+// version skew in both directions. On the free-form ClickHouse path (includeRaw) the upgraded
+// services-server returns the object shape {result:{columns,...}}; an older services-server (or a
+// non-clickhouse provider that fell through) returns the bare []ObservabilityTrace array. The body
+// shape is decided by peeking the first non-whitespace byte ('{' → object, else array) so a large
+// payload is unmarshaled exactly once.
+func decodeTraceQueryBody(jsonBody []byte, includeRaw bool, observabilityResp *core.ObservabilityTraceResponse) error {
+	if includeRaw && firstNonSpaceByte(jsonBody) == '{' {
+		var objResp struct {
+			Result *core.ObservabilityTraceRawTable `json:"result"`
+		}
+		if err := common.UnmarshalJson(jsonBody, &objResp); err != nil {
+			return err
+		}
+		observabilityResp.Result = objResp.Result
+		return nil
+	}
+
+	response := make([]core.ObservabilityTrace, 0, 100)
+	if err := common.UnmarshalJson(jsonBody, &response); err != nil {
+		return err
+	}
+	observabilityResp.Traces = response
+	return nil
+}
+
+// firstNonSpaceByte returns the first non-whitespace byte of b, or 0 if b is empty/all whitespace.
+func firstNonSpaceByte(b []byte) byte {
+	for _, c := range b {
+		if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
+			continue
+		}
+		return c
+	}
+	return 0
 }
 
 func QueryLogLabels(ctx security.RequestContext, accountId string, provider ObservabilityProvider) (core.ObservabilityLogLabelResponse, error) {

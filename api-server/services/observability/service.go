@@ -1072,6 +1072,46 @@ func GetTraces(context *security.RequestContext, fetchTracesRequest TracesV3Requ
 	return source.QueryTraces(context, fetchTracesRequest)
 }
 
+// GetTracesWithRawResult resolves the trace source and, when it is the otel ClickHouse source,
+// returns the raw {columns, column_types, rows} result set instead of the typed span array. This
+// backs the free-form agent trace path (IncludeRawResult) so aggregation / custom-projection
+// queries return their real values rather than being zeroed by MapRowToOpenTelemetryTrace's
+// fixed-schema coercion. A nil Result tells the caller to fall back to the typed GetTraces array
+// (e.g. for a non-clickhouse provider). The underlying query executes exactly once.
+func GetTracesWithRawResult(context *security.RequestContext, fetchTracesRequest TracesV3Request) (TracesQueryResult, error) {
+	if fetchTracesRequest.AccountId == "" {
+		return TracesQueryResult{}, fmt.Errorf("account_id is required")
+	}
+
+	traceProvider, integrationSource, err := GetLogsMetricsTracesProvider(context, fetchTracesRequest.AccountId, fetchTracesRequest.ProviderType, "traces", fetchTracesRequest.ProviderSource)
+	if err != nil {
+		return TracesQueryResult{}, err
+	}
+	if traceProvider == "" {
+		return TracesQueryResult{}, fmt.Errorf("GetTracesWithRawResult trace provider (trace_provider) is required")
+	}
+	source, err := getTraceSource(traceProvider, integrationSource)
+	if err != nil {
+		return TracesQueryResult{}, err
+	}
+
+	// Only the otel ClickHouse source supports raw passthrough. Any other provider → nil Result,
+	// caller falls back to the typed array.
+	clickhouseSource, ok := source.(*OtelClickhouseTraceSource)
+	if !ok {
+		return TracesQueryResult{}, nil
+	}
+
+	filteringMap := source.GetLabelMapping()
+	fetchTracesRequest.QueryRequest.Where = convertWhereClauseWithMApping(fetchTracesRequest.QueryRequest.Where, filteringMap)
+
+	raw, err := clickhouseSource.QueryTracesRaw(context, fetchTracesRequest)
+	if err != nil {
+		return TracesQueryResult{}, err
+	}
+	return TracesQueryResult{Result: &raw}, nil
+}
+
 // Sorting option
 type SortBy string
 

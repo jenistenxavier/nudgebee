@@ -227,6 +227,11 @@ func executeFetchTrace(ctx core.NbToolContext, traceProvider string, traceProvid
 		Offset:         offset,
 		QueryRequest:   queryBuilder,
 		Query:          query,
+		// Only the free-form ClickHouse SQL path (traces_execute) asks for the raw column/row
+		// table, so aggregation / custom-projection queries keep their real values instead of
+		// being zeroed by the fixed span-schema mapping. Other providers and the structured
+		// query-builder path keep the typed span array.
+		IncludeRawResult: traceProvider == "otel_clickhouse" && query != "",
 	}
 	traces, err := services_server.QueryTraces(*ctx.Ctx, traceRequest)
 	if err != nil {

@@ -313,6 +313,30 @@ type TracesV3Request struct {
 	EndTime        int64                     `json:"end_time" mapstructure:"end_time"`
 	Request        map[string]any            `json:"request"`
 	QueryRequest   TracesQueryBuilderRequest `json:"query_request" mapstructure:"query_request"`
+	// IncludeRawResult, when true on a free-form ClickHouse query (Query != ""), makes the
+	// traces_query/traces_list action return the raw {columns, column_types, rows} table
+	// (TracesQueryResult) instead of the typed []OpenTelemetryTrace array. Only the llm-server
+	// agent path sets this; every other caller keeps the bare-array response. The fixed-schema
+	// coercion in MapRowToOpenTelemetryTrace silently zeroes aggregation / custom-projection
+	// columns (e.g. avg(duration_ns), quantile(...)) — the raw table preserves them.
+	IncludeRawResult bool `json:"include_raw_result" mapstructure:"include_raw_result"`
+}
+
+// RawTraceResult carries an arbitrary ClickHouse result set with column order and types preserved.
+// It is the response shape for the free-form agent trace query path (IncludeRawResult) so that
+// aggregations, scalar counts, and custom projections return their real values instead of being
+// coerced into the fixed OpenTelemetryTrace span schema.
+type RawTraceResult struct {
+	Columns     []string `json:"columns"`
+	ColumnTypes []string `json:"column_types"`
+	Rows        [][]any  `json:"rows"`
+}
+
+// TracesQueryResult is the object response returned by traces_query/traces_list ONLY when
+// IncludeRawResult is set. A nil Result signals the caller should fall back to the typed array
+// (e.g. a non-clickhouse provider, or a structured query).
+type TracesQueryResult struct {
+	Result *RawTraceResult `json:"result,omitempty"`
 }
 
 type TracesHeatMapRequest struct {
