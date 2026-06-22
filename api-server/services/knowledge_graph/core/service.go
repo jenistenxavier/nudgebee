@@ -2795,19 +2795,29 @@ func includesPod(nodeTypes []NodeType) bool {
 	return false
 }
 
-// fanOutPodsForNodesAndWorkloads scans the discovered set for k8s_source
-// Node and Workload entities and asks the synthesizer to materialise
-// their Pod neighbors and the corresponding RUNS_ON / MANAGES edges.
+// fanOutPodsForNodesAndWorkloads materialises Pod neighbors (and the
+// corresponding RUNS_ON / MANAGES edges) for the k8s_source Node and
+// Workload entities the caller explicitly seeded.
+//
+// Pods are attached only to nodes whose ID is in seedIDs — i.e. nodes the
+// user expanded directly — NOT to every Node/Workload the BFS happened to
+// reach. Without this restriction, seeding a Namespace pulls in every
+// Workload under it at depth 1 and then every Pod of every Workload,
+// swamping the graph. Restricting to seeds keeps the multi-node and
+// directional-traverse paths consistent with the single-node
+// GetNodeNeighbors path, which only ever fans out from its target node.
+// An empty/nil seedIDs therefore yields no pods.
+//
 // Errors per parent are logged and skipped — one bad parent shouldn't
 // drop the rest of the result.
 //
 // Dedups both nodes and edges by ID: a Deployment-owned Pod whose
-// parent Node AND parent Workload are both in the discovered set would
-// otherwise be emitted twice (once from each parent's fan-out). Synth
-// IDs are deterministic (cloud_resource_id / GenerateEdgeID) so a map
-// keyed on ID is sufficient.
-func (s *Service) fanOutPodsForNodesAndWorkloads(allNodes []*DbNode) ([]*DbNode, []*DbEdge) {
-	if s.podSynth == nil {
+// parent Node AND parent Workload are both seeded would otherwise be
+// emitted twice (once from each parent's fan-out). Synth IDs are
+// deterministic (cloud_resource_id / GenerateEdgeID) so a map keyed on
+// ID is sufficient.
+func (s *Service) fanOutPodsForNodesAndWorkloads(allNodes []*DbNode, seedIDs map[string]struct{}) ([]*DbNode, []*DbEdge) {
+	if s.podSynth == nil || len(seedIDs) == 0 {
 		return nil, nil
 	}
 	var synthPods []*DbNode
@@ -2831,6 +2841,10 @@ func (s *Service) fanOutPodsForNodesAndWorkloads(allNodes []*DbNode) ([]*DbNode,
 		}
 	}
 	for _, n := range allNodes {
+		// Only fan out pods for explicitly-seeded nodes — see doc comment.
+		if _, ok := seedIDs[n.ID]; !ok {
+			continue
+		}
 		switch n.NodeType {
 		case NodeTypeNode:
 			pods, podEdges, err := s.podSynth.PodsForNode(n, 0)
@@ -3040,7 +3054,14 @@ func (s *Service) GetMultipleNodeNeighbors(reqCtx *security.RequestContext, node
 	// nodes + RUNS_ON / MANAGES edges. Honoured only when the caller's
 	// nodeTypes filter is empty or explicitly includes Pod.
 	if s.podSynth != nil && includesPod(nodeTypes) {
-		synthPods, synthEdges := s.fanOutPodsForNodesAndWorkloads(allNodes)
+		// Only the explicitly-requested nodeIDs seed the pod fan-out, so
+		// expanding a Namespace shows its Workloads/Nodes but not every pod
+		// beneath them; the user expands a Workload/Node to see its pods.
+		seedSet := make(map[string]struct{}, len(nodeIDs))
+		for _, id := range nodeIDs {
+			seedSet[id] = struct{}{}
+		}
+		synthPods, synthEdges := s.fanOutPodsForNodesAndWorkloads(allNodes, seedSet)
 		allNodes = append(allNodes, synthPods...)
 		edges = append(edges, synthEdges...)
 	}
@@ -4259,7 +4280,14 @@ func (s *Service) TraverseDirectional(tenantID string, params TraverseParams) (*
 	// fan-out would push us past the cap, truncate and flag the
 	// response accordingly.
 	if s.podSynth != nil && includesPod(params.NodeTypes) {
-		synthPods, synthEdges := s.fanOutPodsForNodesAndWorkloads(preFilterNodes)
+		// Restrict the fan-out to the traversal's seed nodes (explicit
+		// node_ids, or the inline-search matches). Workloads/Nodes merely
+		// reached during BFS don't drag in their pods.
+		seedSet := make(map[string]struct{}, len(seedNodeIDs))
+		for _, id := range seedNodeIDs {
+			seedSet[id] = struct{}{}
+		}
+		synthPods, synthEdges := s.fanOutPodsForNodesAndWorkloads(preFilterNodes, seedSet)
 		if len(synthPods) > 0 {
 			remaining := params.MaxNodes - len(dbNodes)
 			if remaining < 0 {
