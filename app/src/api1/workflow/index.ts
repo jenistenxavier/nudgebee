@@ -1276,7 +1276,8 @@ const apiWorkflow = {
     nextPageToken?: string,
     eventSources?: string[],
     alertNames?: string[],
-    subjectTypes?: string[]
+    subjectTypes?: string[],
+    labels?: string[]
   ) {
     try {
       const request: any = { type: 'system' };
@@ -1287,6 +1288,7 @@ const apiWorkflow = {
       if (eventSources?.length) request.event_sources = eventSources;
       if (alertNames?.length) request.alert_names = alertNames;
       if (subjectTypes?.length) request.subject_types = subjectTypes;
+      if (labels?.length) request.labels = labels;
 
       const response = await queryGraphQL(LIST_WORKFLOW_TEMPLATES, 'ListWorkflowTemplates', { request });
       return {

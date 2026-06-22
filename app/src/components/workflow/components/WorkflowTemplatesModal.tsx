@@ -1,6 +1,7 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { Box } from '@mui/material';
 import { Modal } from '@ui/Modal';
+import { Chip, hashHue } from '@components/common/ds/Chip';
 import Text from '@shared/format/Text';
 import WidgetCard from '@ui/WidgetCard';
 import Tabs from '@shared/navigation/Tabs';
@@ -291,6 +292,17 @@ const TemplateCard = ({ workflow, onUseTemplate }: { workflow: any; onUseTemplat
           }}
         />
 
+        {/* Labels */}
+        {Array.isArray(workflow.tags?.labels) && workflow.tags.labels.length > 0 && (
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--ds-space-1)', mt: 'var(--ds-space-2)' }}>
+            {workflow.tags.labels.map((label: string) => (
+              <Chip key={label} variant='tag' size='xs' hue={hashHue(label)} displayTooltip>
+                {label}
+              </Chip>
+            ))}
+          </Box>
+        )}
+
         {/* Node Icons Row */}
         <Box
           sx={{
@@ -351,7 +363,30 @@ const WorkflowTemplatesModal: React.FC<WorkflowTemplatesModalProps> = ({
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [workflows, setWorkflows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [selectedLabels, setSelectedLabels] = useState<string[]>([]);
   const router = useRouter();
+
+  // Union of labels across the loaded templates, for the filter chip row.
+  const availableLabels = useMemo(() => {
+    const set = new Set<string>();
+    workflows.forEach((w) => (Array.isArray(w?.tags?.labels) ? w.tags.labels : []).forEach((l: string) => set.add(l)));
+    return Array.from(set).sort();
+  }, [workflows]);
+
+  // Templates narrowed by the selected labels (match ANY selected label).
+  const displayedWorkflows = useMemo(() => {
+    if (selectedLabels.length === 0) {
+      return workflows;
+    }
+    return workflows.filter((w) => {
+      const labels: string[] = Array.isArray(w?.tags?.labels) ? w.tags.labels : [];
+      return selectedLabels.some((l) => labels.includes(l));
+    });
+  }, [workflows, selectedLabels]);
+
+  const toggleLabel = useCallback((label: string) => {
+    setSelectedLabels((prev) => (prev.includes(label) ? prev.filter((l) => l !== label) : [...prev, label]));
+  }, []);
 
   const handleUseTemplate = useCallback(
     (workflow: any) => {
@@ -373,6 +408,7 @@ const WorkflowTemplatesModal: React.FC<WorkflowTemplatesModalProps> = ({
   // Fetch templates when modal opens
   const fetchWorkflows = useCallback(async () => {
     setLoading(true);
+    setSelectedLabels([]); // reset label filter when the template set changes
     try {
       const category = selectedCategory === 'all' ? undefined : selectedCategory;
       const response: any = await apiWorkflow.listTemplates(category, undefined, 50, undefined, eventSources, alertNames, subjectTypes);
@@ -429,6 +465,32 @@ const WorkflowTemplatesModal: React.FC<WorkflowTemplatesModalProps> = ({
           />
         </Box>
 
+        {/* Label filter chips */}
+        {availableLabels.length > 0 && (
+          <Box
+            sx={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: 'var(--ds-space-2)',
+              px: 'var(--ds-space-4)',
+              mb: 'var(--ds-space-2)',
+            }}
+          >
+            {availableLabels.map((label) => (
+              <Chip
+                key={label}
+                variant='filter'
+                size='xs'
+                hue={hashHue(label)}
+                pressed={selectedLabels.includes(label)}
+                onClick={() => toggleLabel(label)}
+              >
+                {label}
+              </Chip>
+            ))}
+          </Box>
+        )}
+
         {/* Cards Grid */}
         <Box
           sx={{
@@ -447,7 +509,7 @@ const WorkflowTemplatesModal: React.FC<WorkflowTemplatesModalProps> = ({
             >
               <Loader style={{ height: '100%', width: '100%' }} />
             </Box>
-          ) : workflows.length === 0 ? (
+          ) : displayedWorkflows.length === 0 ? (
             <Box
               sx={{
                 display: 'flex',
@@ -456,7 +518,10 @@ const WorkflowTemplatesModal: React.FC<WorkflowTemplatesModalProps> = ({
                 height: ds.space.mul(3, 25),
               }}
             >
-              <Text value='No templates available' sx={{ color: ds.gray[400] }} />
+              <Text
+                value={selectedLabels.length > 0 ? 'No templates match the selected labels' : 'No templates available'}
+                sx={{ color: ds.gray[400] }}
+              />
             </Box>
           ) : (
             <Box
@@ -476,7 +541,7 @@ const WorkflowTemplatesModal: React.FC<WorkflowTemplatesModalProps> = ({
                 },
               }}
             >
-              {workflows.map((workflow) => (
+              {displayedWorkflows.map((workflow) => (
                 <TemplateCard key={workflow.id} workflow={workflow} onUseTemplate={handleUseTemplate} />
               ))}
             </Box>
