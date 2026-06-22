@@ -56,20 +56,17 @@ func (m Kafka) ConfigSchema() core.IntegrationSchema {
 	}
 }
 
+// ValidateConfig performs structural validation only. The live connectivity probe lives in
+// TestConnection (the TestableIntegration interface) so saving a config is fast and isn't
+// blocked when the cluster is temporarily unreachable; TestIntegrationConnectionByConfig runs
+// TestConnection on top of this when the user explicitly tests the connection.
 func (m Kafka) ValidateConfig(sc *security.SecurityContext, configs []core.IntegrationConfigValue, accountId string) []error {
 
 	if accountId == "" {
 		return []error{fmt.Errorf("account_id is required")}
 	}
 
-	secretName := ""
-	for _, integrationConfig := range configs {
-		if strings.EqualFold(integrationConfig.Name, "k8s_secret") {
-			secretName = integrationConfig.Value
-			break
-		}
-	}
-
+	secretName := kafkaSecretName(configs)
 	if secretName == "" {
 		return []error{fmt.Errorf("k8s_secret is required")}
 	}
@@ -81,22 +78,36 @@ func (m Kafka) ValidateConfig(sc *security.SecurityContext, configs []core.Integ
 		return []error{fmt.Errorf("k8s_secret must be a secret name without a namespace prefix")}
 	}
 
-	// Fetch cluster metadata (brokers + topics) as the connection test. The kcat argv is built
-	// via positional params so every secret value is double-quoted, keeping word-splitting /
-	// shell metacharacters in (e.g.) a SASL password from breaking the command. SASL/TLS flags
-	// are appended only when the matching secret key is set, so the same command works for
-	// PLAINTEXT and SASL_SSL clusters alike.
+	return nil
+}
+
+// TestConnection runs a live connectivity probe: it fetches cluster metadata with `kcat -L`
+// through the relay command executor. ValidateConfig has already passed when this runs, so the
+// structural checks are re-derived only defensively.
+func (m Kafka) TestConnection(sc *security.SecurityContext, configs []core.IntegrationConfigValue, accountId string) error {
+
+	secretName := kafkaSecretName(configs)
+	if secretName == "" {
+		return fmt.Errorf("k8s_secret is required")
+	}
+
+	// The kcat argv is built via positional params so every secret value is double-quoted,
+	// keeping word-splitting / shell metacharacters in (e.g.) a SASL password from breaking the
+	// command. SASL/TLS flags are appended only when the matching secret key is set, so the same
+	// command works for PLAINTEXT and SASL_SSL clusters alike.
 	//
-	// The final `2>&1 || true` redirects kcat's stderr (where it writes connection/auth errors)
-	// into stdout and forces a zero exit, so the relay returns the output for the error-pattern
-	// parsing below instead of surfacing a bare non-zero-exit failure. Connection problems are
-	// still reported — they're matched from the captured text, not the exit code.
+	// socket.timeout.ms / metadata.request.timeout.ms bound the probe at ~5s so an unreachable
+	// broker fails fast instead of hanging the test pod. The trailing `2>&1 || true` redirects
+	// kcat's stderr (where it writes connection/auth errors) into stdout and forces a zero exit,
+	// so the relay returns the output for the error-pattern parsing below instead of surfacing a
+	// bare non-zero-exit failure. Connection problems are still reported — matched from the
+	// captured text, not the exit code.
 	command := `set -- -b "$KAFKA_BROKERS"; ` +
 		`[ -n "$KAFKA_SECURITY_PROTOCOL" ] && set -- "$@" -X "security.protocol=$KAFKA_SECURITY_PROTOCOL"; ` +
 		`[ -n "$KAFKA_SASL_MECHANISM" ] && set -- "$@" -X "sasl.mechanism=$KAFKA_SASL_MECHANISM"; ` +
 		`[ -n "$KAFKA_SASL_USERNAME" ] && set -- "$@" -X "sasl.username=$KAFKA_SASL_USERNAME"; ` +
 		`[ -n "$KAFKA_SASL_PASSWORD" ] && set -- "$@" -X "sasl.password=$KAFKA_SASL_PASSWORD"; ` +
-		`kcat "$@" -L 2>&1 || true`
+		`kcat "$@" -X socket.timeout.ms=5000 -X metadata.request.timeout.ms=5000 -L 2>&1 || true`
 	// Inject the secret's keys as env vars into the script-runner pod. The llm-server MSSQL/Oracle
 	// relay jobs populate this map explicitly for the same pod_script_run_enricher action, so do the
 	// same here rather than rely on implicit wholesale injection. Keys map to themselves because the
@@ -111,15 +122,18 @@ func (m Kafka) ValidateConfig(sc *security.SecurityContext, configs []core.Integ
 	resp, err := relay.CommandExecutor(accountId, command, secretName, envFromSecret)
 
 	if err != nil {
-		return core.HandleRelayError(err)
+		if errs := core.HandleRelayError(err); len(errs) > 0 {
+			return errs[0]
+		}
+		return err
 	}
 
 	if resp == nil {
-		return []error{fmt.Errorf("empty response from kafka server")}
+		return fmt.Errorf("empty response from kafka server")
 	}
 	respStr, ok := resp["response"].(string)
 	if !ok {
-		return []error{fmt.Errorf("unexpected response format from kafka server: %v", resp)}
+		return fmt.Errorf("unexpected response format from kafka server: %v", resp)
 	}
 
 	respLower := strings.ToLower(respStr)
@@ -139,24 +153,34 @@ func (m Kafka) ValidateConfig(sc *security.SecurityContext, configs []core.Integ
 	// No success marker: map specific kcat/Kafka error patterns to actionable feedback.
 	switch {
 	case strings.Contains(respLower, "authentication failed") || strings.Contains(respLower, "sasl authentication"):
-		return []error{fmt.Errorf("authentication failed: invalid SASL username or password")}
+		return fmt.Errorf("authentication failed: invalid SASL username or password")
 	case strings.Contains(respLower, "connection refused"):
-		return []error{fmt.Errorf("connection refused: verify KAFKA_BROKERS host:port is correct and reachable")}
+		return fmt.Errorf("connection refused: verify KAFKA_BROKERS host:port is correct and reachable")
 	case strings.Contains(respLower, "name or service not known") || strings.Contains(respLower, "no such host") ||
 		strings.Contains(respLower, "could not resolve"):
-		return []error{fmt.Errorf("host not found: verify the broker hostnames in KAFKA_BROKERS")}
+		return fmt.Errorf("host not found: verify the broker hostnames in KAFKA_BROKERS")
 	case strings.Contains(respLower, "timed out") || strings.Contains(respLower, "timeout"):
-		return []error{fmt.Errorf("connection timed out: verify the Kafka brokers are reachable")}
+		return fmt.Errorf("connection timed out: verify the Kafka brokers are reachable")
 	case strings.Contains(respLower, "ssl handshake") || strings.Contains(respLower, "certificate"):
-		return []error{fmt.Errorf("TLS handshake failed: check KAFKA_SECURITY_PROTOCOL and CA/cert configuration")}
+		return fmt.Errorf("TLS handshake failed: check KAFKA_SECURITY_PROTOCOL and CA/cert configuration")
 	case strings.Contains(respLower, "topic authorization failed") || strings.Contains(respLower, "not authorized"):
-		return []error{fmt.Errorf("authorization failed: the user lacks permission to read cluster metadata")}
+		return fmt.Errorf("authorization failed: the user lacks permission to read cluster metadata")
 	}
 
 	// Surface any other error indicators.
 	if strings.Contains(respLower, "exit status") || strings.Contains(respLower, "error") {
-		return []error{fmt.Errorf("kafka validation failed: %s", respStr)}
+		return fmt.Errorf("kafka validation failed: %s", respStr)
 	}
 
-	return []error{fmt.Errorf("failed to validate kafka connection - unexpected response: %s", respStr)}
+	return fmt.Errorf("failed to validate kafka connection - unexpected response: %s", respStr)
+}
+
+// kafkaSecretName returns the k8s_secret config value, or "" if absent.
+func kafkaSecretName(configs []core.IntegrationConfigValue) string {
+	for _, c := range configs {
+		if strings.EqualFold(c.Name, "k8s_secret") {
+			return c.Value
+		}
+	}
+	return ""
 }
