@@ -96,7 +96,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/guardduty v1.65.2
 	github.com/aws/aws-sdk-go-v2/service/iam v1.54.4
 	github.com/aws/aws-sdk-go-v2/service/inspector2 v1.45.2
-	github.com/aws/aws-sdk-go-v2/service/kafka v1.53.0
+	github.com/aws/aws-sdk-go-v2/service/kafka v1.54.0
 	github.com/aws/aws-sdk-go-v2/service/kms v1.53.4
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.89.0
 	github.com/aws/aws-sdk-go-v2/service/pi v1.37.3
