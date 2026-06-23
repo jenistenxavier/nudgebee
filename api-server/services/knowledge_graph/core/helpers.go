@@ -676,19 +676,56 @@ func resolveServiceLogoID(nodeType NodeType, source, serviceName, propType strin
 	return serviceName // "" when absent; all other service_name values pass through to LangTypeIcon
 }
 
+// engineLogoID maps a datastore engine string to a LangTypeIcon-compatible logo id.
+// Accepts both managed-DB engine strings (e.g. "aurora-postgresql", "POSTGRES_17") and
+// the canonical in-cluster engines set by the K8s source (e.g. "valkey", "mongodb").
+// Returns "" when there's no matching icon, so callers fall through to other rules.
+func engineLogoID(engine string) string {
+	switch {
+	case strings.Contains(engine, "postgres"), strings.Contains(engine, "cockroach"):
+		return "postgres"
+	case strings.Contains(engine, "mysql"), strings.Contains(engine, "mariadb"), strings.Contains(engine, "percona"):
+		return "mysql"
+	case strings.Contains(engine, "sqlserver"), strings.Contains(engine, "sql_server"):
+		return "sqlserver"
+	case strings.Contains(engine, "mongo"):
+		return "mongodb"
+	case strings.Contains(engine, "clickhouse"):
+		return "clickhouse"
+	case strings.Contains(engine, "scylla"), strings.Contains(engine, "cassandra"):
+		return "cassandra"
+	case strings.Contains(engine, "opensearch"):
+		return "opensearch"
+	case strings.Contains(engine, "elasticsearch"):
+		return "elasticsearch"
+	case strings.Contains(engine, "valkey"), strings.Contains(engine, "keydb"),
+		strings.Contains(engine, "dragonfly"), strings.Contains(engine, "redis"):
+		return "redis"
+	case strings.Contains(engine, "memcached"):
+		return "memcached"
+	case strings.Contains(engine, "rabbitmq"):
+		return "rabbitmq"
+	case strings.Contains(engine, "kafka"):
+		return "kafka"
+	case strings.Contains(engine, "pulsar"):
+		return "pulsar"
+	case strings.Contains(engine, "nats"):
+		return "nats"
+	case strings.Contains(engine, "zookeeper"):
+		return "zookeeper"
+	}
+	return ""
+}
+
 // ComputeLogoID returns the icon identifier for a KG node so the frontend can render the correct logo.
 // source is the node's top-level source field (e.g. "aws", "gcp", "k8s", "trace") — not from properties.
 func ComputeLogoID(nodeType NodeType, source string, properties map[string]interface{}) string {
-	// 1. Database engine (e.g. "POSTGRES_17", "MYSQL_8_0")
-	engine := strings.ToLower(getNodeProp(properties, "engine"))
-	if strings.Contains(engine, "postgres") {
-		return "postgres"
-	}
-	if strings.Contains(engine, "mysql") {
-		return "mysql"
-	}
-	if strings.Contains(engine, "sqlserver") || strings.Contains(engine, "sql_server") {
-		return "sqlserver"
+	// 1. Database/cache/queue engine — handles managed-DB strings ("POSTGRES_17",
+	// "aurora-postgresql") and in-cluster canonical engines ("redis", "valkey", "mongodb").
+	if engine := strings.ToLower(getNodeProp(properties, "engine")); engine != "" {
+		if logo := engineLogoID(engine); logo != "" {
+			return logo
+		}
 	}
 
 	// 1.5 Azure resource-provider types ("microsoft.compute/virtualmachines", ...) match none of
@@ -851,10 +888,14 @@ func ConvertDbEdgesToKgEdges(dbEdges []*DbEdge) []KgEdge {
 // ConvertKgNodeToKgNodeSlim converts a KgNode to KgNodeSlim with only essential fields
 func ConvertKgNodeToKgNodeSlim(kgNode KgNode) KgNodeSlim {
 	name := ""
+	role := ""
+	engine := ""
 	if kgNode.Properties != nil {
 		if nameVal, ok := kgNode.Properties["name"]; ok {
 			name = fmt.Sprintf("%v", nameVal)
 		}
+		role = getNodeProp(kgNode.Properties, "role")
+		engine = getNodeProp(kgNode.Properties, "engine")
 	}
 	return KgNodeSlim{
 		ID:        kgNode.ID,
@@ -865,6 +906,8 @@ func ConvertKgNodeToKgNodeSlim(kgNode KgNode) KgNodeSlim {
 		TenantID:  kgNode.TenantID,
 		UniqueKey: kgNode.UniqueKey,
 		LogoID:    kgNode.LogoID,
+		Role:      role,
+		Engine:    engine,
 	}
 }
 

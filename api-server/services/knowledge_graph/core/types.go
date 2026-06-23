@@ -385,6 +385,8 @@ type KgNodeSlim struct {
 	TenantID  string   `json:"tenant_id"`
 	UniqueKey string   `json:"unique_key"`
 	LogoID    string   `json:"logo_id,omitempty"` // Icon identifier resolved by the backend for UI rendering
+	Role      string   `json:"role,omitempty"`    // Datastore facet: "database"/"cache"/"messagequeue" for in-cluster datastores
+	Engine    string   `json:"engine,omitempty"`  // Canonical engine for datastore nodes (e.g. "postgres", "redis")
 }
 
 // KgEdgeSlim is a lightweight edge for graph traversal API responses
@@ -835,6 +837,7 @@ var QueryablePropertiesMap = map[NodeType][]string{
 		"name", "environment", "namespace", "cluster", "kind",
 		"replica_count", "image", "version", "service_account_name",
 		"last_deployed_time",
+		"role", "engine", // datastore facet for in-cluster databases/caches/queues
 	},
 	NodeTypeJob: {
 		"name", "environment", "namespace", "cluster",
