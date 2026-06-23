@@ -77,6 +77,24 @@ const CATEGORY_FILTER_OPTIONS = [
   { label: 'Spot Instance', value: 'K8sSpotRecommendation' },
 ];
 
+const renderAccountGroupIcon = (provider: string) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
+
+// Hover affordance for clickable summary widgets: the whole card lifts and
+// tints blue on hover so it reads as interactive, not just the cursor.
+const WIDGET_HOVER_SX = {
+  cursor: 'pointer',
+  // Stat paints `cursor: default` over its own content; doubling the card class
+  // (`&&`) wins specificity so the pointer covers the entire card, not just the edge.
+  '&& *': { cursor: 'pointer' },
+  transition: `border-color ${ds.motion.micro} ${ds.motion.ease}, box-shadow ${ds.motion.micro} ${ds.motion.ease}, background-color ${ds.motion.micro} ${ds.motion.ease}, transform ${ds.motion.micro} ${ds.motion.ease}`,
+  '&:hover': {
+    borderColor: ds.blue[300],
+    backgroundColor: ds.blue[100],
+    boxShadow: `0px 6px 16px -2px ${ds.gray.alpha[300]}`,
+    transform: 'translateY(-1px)',
+  },
+};
+
 const WIDGET_CATEGORIES = ['RightSizing', 'InfraUpgrade', 'Configuration', 'K8sSpotRecommendation'] as const;
 
 function sumCategoryRows(rows: any[]): { count: number; savings: number } {
@@ -528,15 +546,15 @@ const OptimizeNewPage = () => {
   // ─── Computed: Summary widget totals ───
 
   // Computed: Account filter options from loaded accounts.
-  // FilterDropdown supports grouped options, but we surface the cloud
-  // provider as a label prefix so the trigger summary stays one-line.
+  // Grouped by cloud provider (AWS / K8S / AZURE / GCP …) so the dropdown
+  // surfaces a collapsible header per provider with the account name underneath.
   const accountFilterOptions = useMemo(
     () =>
-      Object.entries(accounts).map(([id, info]) => {
-        const provider = (info.cloud_provider || '').toUpperCase();
-        const name = info.name || id;
-        return { label: provider ? `${provider} · ${name}` : name, value: id };
-      }),
+      Object.entries(accounts).map(([id, info]) => ({
+        label: info.name || id,
+        value: id,
+        group: (info.cloud_provider || '').toUpperCase() || 'Other',
+      })),
     [accounts]
   );
 
@@ -934,7 +952,7 @@ const OptimizeNewPage = () => {
             minWidth: 0,
             mt: 0,
             padding: `${ds.space[3]} ${ds.space[4]}`,
-            cursor: 'pointer',
+            ...WIDGET_HOVER_SX,
           }}
           onClick={() => handleWidgetCategoryClick(null)}
         >
@@ -980,9 +998,10 @@ const OptimizeNewPage = () => {
                 minWidth: 0,
                 mt: 0,
                 padding: `${ds.space[3]} ${ds.space[4]}`,
-                cursor: 'pointer',
+                ...WIDGET_HOVER_SX,
                 borderColor: isActive ? ds.blue[600] : undefined,
-                transition: `border-color ${ds.motion.micro} ${ds.motion.ease}`,
+                // Keep the strong selected border on hover for the active card.
+                '&:hover': { ...WIDGET_HOVER_SX['&:hover'], ...(isActive ? { borderColor: ds.blue[600] } : {}) },
               }}
               onClick={() => handleWidgetCategoryClick(isActive ? null : cat)}
             >
@@ -1061,6 +1080,8 @@ const OptimizeNewPage = () => {
             id='optimize-account-filter'
             label='Account'
             multiple
+            grouped
+            groupIcon={renderAccountGroupIcon}
             options={accountFilterOptions}
             value={accountFilterOptions.filter((o) => filters.account.includes(o.value))}
             onSelect={(_e: any, items: any) => {
