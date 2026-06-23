@@ -2429,7 +2429,10 @@ query k8s_event_groupings($limit:Int,$offset:Int){
         ...node,
         conditions: typeof node.conditions === 'string' ? safeJSONParse(node.conditions) : node.conditions,
         labels: typeof node.labels === 'string' ? safeJSONParse(node.labels) : node.labels,
-        taints: typeof node.taints === 'string' ? safeJSONParse(node.taints) : node.taints,
+        // `taints` is a flat comma-separated string ("key=value:Effect,..."), NOT JSON — the agent
+        // emits it that way and the node-details renderer splits it itself. Do NOT run safeJSONParse
+        // here: it returns null for any non-{/[ string, which silently blanks the Taints section.
+        taints: node.taints,
         meta: typeof node.meta === 'string' ? safeJSONParse(node.meta) : node.meta,
       }));
       const aggregateRows = response?.data?.data?.k8s_nodes_aggregate?.rows;
