@@ -537,11 +537,30 @@ func (o *NBReActPlanner3) resolveToolResponse(step NBAgentPlannerToolActionStep)
 	return renderObservationWithMetadata(toolResponse, step.Metadata)
 }
 
+// resolveObservation returns the tool response for a step with any structural
+// prefixes applied. Both getToolResponse and prewarmSummaries must call this
+// instead of resolveToolResponse directly so that the prefixes are present in
+// cached CompressedObservation values as well as in-line recent steps.
+func (o *NBReActPlanner3) resolveObservation(step NBAgentPlannerToolActionStep) string {
+	obs := o.resolveToolResponse(step)
+	// For failed tool calls, prepend an explicit directive to prevent the model
+	// from substituting fabricated evidence when a check could not be completed
+	// ("evidence gap confabulation"). The directive must appear in both the
+	// recent-step path and in the prewarm cache so it survives scratchpad compression.
+	if step.Status == ToolStatusFailure {
+		obs = "[TOOL-FAILED] This check did not complete successfully. " +
+			"Do NOT infer, hypothesize, or speculate about what the result would have shown. " +
+			"In your analysis, explicitly state: 'Unable to verify [what you checked]: tool call failed.'\n" +
+			obs
+	}
+	return obs
+}
+
 // getToolResponse processes the observation for a step and applies semantic
 // compression. When summarization is enabled and the step is not recent, it
 // generates an LLM-backed summary instead of blind byte truncation.
 func (o *NBReActPlanner3) getToolResponse(step *NBAgentPlannerToolActionStep, isRecent bool) string {
-	toolResponse := o.resolveToolResponse(*step)
+	toolResponse := o.resolveObservation(*step)
 
 	if isRecent {
 		if len(toolResponse) > getMaxObservationChars() {
@@ -613,7 +632,7 @@ func (o *NBReActPlanner3) prewarmSummaries(intermediateSteps []NBAgentPlannerToo
 			if s.CompressedObservation != "" {
 				continue
 			}
-			obs := o.resolveToolResponse(*s)
+			obs := o.resolveObservation(*s)
 			if len(obs) < minBytes {
 				continue
 			}
