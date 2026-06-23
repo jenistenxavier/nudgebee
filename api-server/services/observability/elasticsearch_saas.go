@@ -499,29 +499,19 @@ func (e *ElasticSaasSource) QueryLabels(ctx *security.RequestContext, fetchLogRe
 		return nil, err
 	}
 
-	resp, err := esRequest("GET", fmt.Sprintf("%s/_cat/indices?format=json", cfg.Url), "", cfg) //nolint:bodyclose
-	if err != nil {
-		return nil, fmt.Errorf("failed to query elasticsearch indices: %w", err)
-	}
-
-	bodyBytes, err := readResponse(resp, "elasticsearch indices query")
+	// List stable data-stream names (logs-*), not the rolled-over ".ds-*" backing
+	// indices that _cat/indices exposes. See listESIndexTargets.
+	indexNames, err := listESIndexTargets("logs", cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	var indices []map[string]any
-	if err := json.Unmarshal(bodyBytes, &indices); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal indices response: %w", err)
-	}
-
-	var output []OutputLogLabel
-	for _, idx := range indices {
-		if indexName, ok := idx["index"].(string); ok && indexName != "" {
-			output = append(output, OutputLogLabel{
-				Label:      indexName,
-				Attributes: map[string]any{},
-			})
-		}
+	output := make([]OutputLogLabel, 0, len(indexNames))
+	for _, indexName := range indexNames {
+		output = append(output, OutputLogLabel{
+			Label:      indexName,
+			Attributes: map[string]any{},
+		})
 	}
 
 	return output, nil
