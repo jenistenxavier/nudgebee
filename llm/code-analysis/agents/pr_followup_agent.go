@@ -187,13 +187,24 @@ func (a *PRFollowupAgent) Execute(ctx context.Context, req PRFollowupRequest) (*
 	replaceTool := tools.NewReplaceToolWithWorkspace(a.workspaceDir)
 	replaceTool.SetEditCorrectionService(tools.NewEditCorrectionService(a.llmClient))
 
+	// The generic CLI tool is the agent's fallback for `gh` commands (e.g. when
+	// it shells out `gh pr edit ...` directly instead of using the dedicated gh
+	// tool). Without the token it runs unauthenticated and fails with
+	// "gh auth login / populate GH_TOKEN". Inject the GitHub token so that
+	// fallback path works. (GitLab uses glab via the provider tool below; the
+	// CLI tool only injects GITHUB_TOKEN, so this is GitHub-only.)
+	cliTool := tools.NewCLITool(a.workspaceDir)
+	if a.provider != gitprovider.GitProviderGitLab {
+		cliTool.SetGitHubToken(a.gitToken)
+	}
+
 	rawTools := []core.NBTool{
 		tools.NewFileViewTool(a.workspaceDir),
 		tools.NewFileFindTool(a.workspaceDir),
 		replaceTool,
 		tools.NewGrepTool(a.workspaceDir),
 		tools.NewRipgrepTool(a.workspaceDir),
-		tools.NewCLITool(a.workspaceDir),
+		cliTool,
 		tools.NewGitTool(a.workspaceDir),
 		a.newProviderCLITool(),
 		tools.NewSubmitAnalysisTool(),
