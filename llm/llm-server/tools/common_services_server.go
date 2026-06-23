@@ -14,6 +14,27 @@ import (
 	"time"
 )
 
+// lokiMaxLogLimit is the per-query cap Loki enforces (HTTP 400 above this).
+// Sourced from the production error string `loki: limit exceeds maximum of 5000`
+// (services-server wrapped) — pin here so the clamp does not lag the upstream
+// reality. If Loki raises its cap, bump this constant.
+const lokiMaxLogLimit = 5000
+
+// clampLogLimitForProvider returns the (possibly capped) limit + a flag that
+// indicates whether a clamp actually happened. Returns (limit, false) for
+// providers without a known cap so the caller logs nothing in the common path.
+// Provider name is normalised (trimmed + lowercased) so accidental whitespace
+// in integration config doesn't bypass the clamp.
+func clampLogLimitForProvider(provider string, limit int) (int, bool) {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "loki":
+		if limit > lokiMaxLogLimit {
+			return lokiMaxLogLimit, true
+		}
+	}
+	return limit, false
+}
+
 func executeFetchLogs(ctx core.NbToolContext, logProvider services_server.ObservabilityProvider, query string, configs map[string]any) (core.ObservabilityLogResponse, error) {
 	if logProvider.Provider == "" {
 		return core.ObservabilityLogResponse{}, errors.New("log_provider is required")
@@ -38,6 +59,20 @@ func executeFetchLogs(ctx core.NbToolContext, logProvider services_server.Observ
 			return core.ObservabilityLogResponse{}, fmt.Errorf("invalid limit value - %v", val)
 
 		}
+	}
+
+	// Defensive per-provider limit clamp. Some backends reject above their
+	// own ceiling (Loki: HTTP 400 `limit exceeds maximum of 5000`); rather
+	// than letting that surface to the LLM as an opaque error, cap the
+	// request and log it. A capped fetch is strictly more useful than a
+	// failed one. Pre-2026-06-22 a stale prompt at agent_log.go:264
+	// instructed agents to request `limit 10000` for second-pass widened
+	// fetches — the prompt has since been corrected to 5000, but the clamp
+	// here also covers any other caller (manual integration, future agent,
+	// raw API hit) that asks above the cap.
+	if newLimit, clamped := clampLogLimitForProvider(logProvider.Provider, limit); clamped {
+		slog.Warn("executeFetchLogs: clamped limit to provider backend cap", "provider", logProvider.Provider, "requested", limit, "capped_to", newLimit)
+		limit = newLimit
 	}
 	endTime := int64(time.Now().UnixMilli())
 	if val, ok := configs["end_time"]; ok {
