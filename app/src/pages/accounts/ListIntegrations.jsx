@@ -223,6 +223,11 @@ const ListIntegrations = ({ integrationName }) => {
     if (item?.source === 'agent' && agentManagedIntegrations.includes(integrationName)) {
       if (status === 'disabled') {
         items.push({ label: 'Enable', id: 'enable' });
+        // Editing a disabled integration is safe: the config-save path carries
+        // no status, so saving keeps it disabled. (The "no Edit when disabled"
+        // gap was inherited when enable/disable was added in #26662, not an
+        // intentional restriction.) Lets users fix a config before re-enabling.
+        items.push({ label: 'Edit', id: 'edit' });
       } else {
         items.push({ label: 'Disable', id: 'disable' });
         items.push({ label: 'Edit', id: 'edit' });
@@ -230,6 +235,11 @@ const ListIntegrations = ({ integrationName }) => {
     } else if (item?.source !== 'agent') {
       if (status === 'disabled') {
         items.push({ label: 'Enable', id: 'enable' });
+        // Editing a disabled integration is safe: the config-save path carries
+        // no status, so saving keeps it disabled. (The "no Edit when disabled"
+        // gap was inherited when enable/disable was added in #26662, not an
+        // intentional restriction.) Lets users fix a config before re-enabling.
+        items.push({ label: 'Edit', id: 'edit' });
       } else {
         items.push({ label: 'Disable', id: 'disable' });
         items.push({ label: 'Edit', id: 'edit' });
