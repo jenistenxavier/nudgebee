@@ -479,6 +479,7 @@ const apiAccount = {
           'Content-Type': 'application/json',
           'tenant-id': localStorage.getItem('tenant_id') || '',
           'x-user-email': localStorage.getItem('email') || '',
+          'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
         },
         body: JSON.stringify({ bot_token: botToken }),
       });

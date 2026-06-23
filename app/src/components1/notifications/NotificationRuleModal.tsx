@@ -565,7 +565,7 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
         ...prev,
         google_chat: true,
       }));
-      apiAccount
+        apiAccount
         .getNotificationChannelList('google_chat')
         .then((res: any) => {
           const teamOptions = res?.data?.data?.map((item: any) => ({ label: item.name, value: item.id })) || [];
@@ -583,11 +583,12 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
         ...prev,
         discord: true,
       }));
-      apiAccount
+        apiAccount
         .getNotificationChannelList('discord')
         .then((res: any) => {
-          const teamOptions = res?.data?.data?.map((item: any) => ({ label: item.name, value: item.id })) || [];
-          setDiscordChannelList(teamOptions || []);
+          const channels = res?.data?.channels || res?.data?.data || [];
+          const teamOptions = channels.map((item: any) => ({ label: item.name, value: item.id }));
+          setDiscordChannelList(teamOptions);
         })
         .finally(() => {
           setLoadingChannelList((prev) => ({

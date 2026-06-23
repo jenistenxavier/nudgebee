@@ -53,7 +53,7 @@ export default function AddAccountForm() {
                 provider='discord'
                 displayName='Discord'
                 installUrl={null}
-                headers={['Installed At', 'Channels', { name: '', width: '20%' }, { name: '', width: '1%' }]}
+                headers={['Installed At', 'Channels', { name: ' ', width: '20%' }, { name: '  ', width: '1%' }]}
                 hasTeamName={false}
               />
             );

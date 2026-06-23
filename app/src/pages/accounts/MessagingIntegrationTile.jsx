@@ -369,7 +369,7 @@ const MessagingIntegrationTile = ({
             label='Discord Bot Token'
             required
             value={botToken}
-            onChange={(e) => setBotToken(e.target.value)}
+            onChange={(val) => setBotToken(val)}
             placeholder='Enter your Discord bot token'
           />
         </Box>
