@@ -80,6 +80,18 @@ func NewRequestContextForTenantAdmin(tenantId string) *RequestContext {
 	return &RequestContext{context: context.Background(), securityContext: sc, logger: slog.Default(), tracer: t, meter: nil}
 }
 
+// NewRequestContextForTenantAdminWithUser builds a tenant-admin request context
+// that also carries a user id. Use it for automated/background flows (e.g. the
+// event-analysis MQ consumer) that have no human user: pass GetSystemUserId()
+// so downstream writes (token usage, conversations) are stamped with the system
+// user instead of an empty string, which a uuid column rejects (SQLSTATE 22P02).
+// Roles and account scope are identical to NewRequestContextForTenantAdmin.
+func NewRequestContextForTenantAdminWithUser(tenantId, userId string) *RequestContext {
+	sc := NewSecurityContextForTenantAccountAdmin(tenantId, userId, nil)
+	t := otel.GetTracerProvider().Tracer("nudgebee-llm")
+	return &RequestContext{context: context.Background(), securityContext: sc, logger: slog.Default(), tracer: t, meter: nil}
+}
+
 // CustomJSONHandler restructures log JSON output.
 type CustomJSONHandler struct {
 	h     slog.Handler
