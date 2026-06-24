@@ -2975,6 +2975,54 @@ func inputsToString(inputValues map[string]any) (map[string]string, error) {
 	return inputs, nil
 }
 
+// validateToolInput checks that every required field in the tool's InputSchema is
+// present in the parsed request before invoking tool.Call(). "command" maps to
+// request.Command; all other required fields are looked up in request.Arguments.
+// Returns a non-nil response (error) when validation fails, nil when the input is valid.
+func validateToolInput(tool toolcore.NBTool, request toolcore.NBToolCallRequest) *toolcore.NBToolResponse {
+	schema := tool.InputSchema()
+	if len(schema.Required) == 0 {
+		return nil
+	}
+	var missing []string
+	for _, field := range schema.Required {
+		switch field {
+		case "command":
+			if strings.TrimSpace(request.Command) == "" {
+				missing = append(missing, field)
+			}
+		default:
+			v := request.Arguments[field]
+			if v == nil {
+				missing = append(missing, field)
+			} else if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+				missing = append(missing, field)
+			}
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	var hints []string
+	for _, name := range missing {
+		hint := name
+		if prop, ok := schema.Properties[name]; ok {
+			if prop.Type != "" {
+				hint += " (" + string(prop.Type) + ")"
+			}
+			if prop.Description != "" {
+				hint += ": " + prop.Description
+			}
+		}
+		hints = append(hints, hint)
+	}
+	resp := toolcore.NBToolResponse{
+		Status: toolcore.NBToolResponseStatusError,
+		Data:   fmt.Sprintf("%s: missing required fields — %s.", tool.Name(), strings.Join(hints, "; ")),
+	}
+	return &resp
+}
+
 func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentRequest, tool toolcore.NBTool, input string, previousHistory []llms.MessageContent, queryContext string, toolId string) (resp toolcore.NBToolResponse, err error) {
 	// Recover from panics and convert to proper error responses
 	defer func() {
@@ -3009,14 +3057,6 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 
 	if queryContext == "" {
 		queryContext = agentRequest.QueryContext
-	}
-
-	if input == "" {
-		nbRequestContext.GetLogger().Error("plannerexecutor: empty tool input", "tool", tool.Name())
-		return toolcore.NBToolResponse{
-			Status: toolcore.NBToolResponseStatusError,
-			Data:   "Empty tool input",
-		}, nil
 	}
 
 	toolContext := toolcore.NewNbToolContext(nbRequestContext, tool, agentRequest.AccountId, agentRequest.UserId, agentRequest.ConversationId, agentRequest.MessageId, agentRequest.AgentId, input, previousHistory, queryContext, agentRequest.QueryConfig, toolId)
@@ -3094,6 +3134,10 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 				request.Arguments = request1
 			}
 		}
+	}
+
+	if resp := validateToolInput(tool, request); resp != nil {
+		return *resp, nil
 	}
 
 	t0 := time.Now()

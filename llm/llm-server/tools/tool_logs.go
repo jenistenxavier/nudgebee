@@ -232,6 +232,13 @@ func (t *NBLogTool) InputSchema() core.ToolSchema {
 }
 
 func (t *NBLogTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
+	if strings.TrimSpace(input.Command) == "" {
+		return core.NBToolResponse{
+			Status: core.NBToolResponseStatusError,
+			Data:   `logs_execute requires a non-empty query. Provide a JSON object with at minimum a "where" clause, e.g. {"where": "app=my-service", "start_time": "1h"}.`,
+		}, nil
+	}
+
 	nbRequestContext.Ctx.GetLogger().Info("logs: executing getLogs tool call", "query", input.Command)
 
 	queryBuilder, err := core.BuildLogQueryBuilder(nbRequestContext, input.Command)
