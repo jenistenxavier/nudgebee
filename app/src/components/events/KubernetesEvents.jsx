@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useRouter } from 'next/router';
 import PropTypes from 'prop-types';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -563,13 +563,18 @@ const KubernetesEventsTable = ({
     });
   }, [tableColumns]);
 
+  const prevDefaultAggregationKeyRef = useRef(defaultQuery?.aggregation_key);
   useEffect(() => {
-    if (defaultQuery?.aggregation_key) {
-      setSelectedAggregationKey((prev) => {
-        const newValue = getInitialAggregationKey();
-        return JSON.stringify(prev) === JSON.stringify(newValue) ? prev : newValue;
-      });
-    }
+    const next = defaultQuery?.aggregation_key;
+    const prev = prevDefaultAggregationKeyRef.current;
+    prevDefaultAggregationKeyRef.current = next;
+    if (JSON.stringify(prev) === JSON.stringify(next)) return;
+    const nextState = next
+      ? (Array.isArray(next) ? next : typeof next === 'string' ? next.split(',') : [next])
+          .filter((v) => v != null && v !== '')
+          .map((v) => ({ value: v }))
+      : [];
+    setSelectedAggregationKey((curr) => (JSON.stringify(curr) === JSON.stringify(nextState) ? curr : nextState));
   }, [JSON.stringify(defaultQuery?.aggregation_key)]);
 
   // --- Filter Handlers ---
