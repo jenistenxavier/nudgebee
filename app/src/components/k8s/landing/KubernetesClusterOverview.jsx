@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import apiKubernetes from '@api1/kubernetes';
 import ClusterViewCard from '@components/k8s/common/ClusterViewCard';
 import KubernetesMemoryCpuOverView from '@components/k8s/common/KubernetesMemoryCpuOverView';
@@ -26,6 +26,33 @@ const KubernetesClusterOverview = () => {
   const [k8sClusters, setK8sClusters] = useState([]);
   const [loading, setLoading] = useState(false);
   const [showAddClusterModal, setShowAddClusterModal] = useState(false);
+
+  const sortedClusters = useMemo(() => {
+    if (!allClusters.length) return allClusters;
+
+    const checkConnections = (clusterEntry) => {
+      const requiredProps = ['logsConnection', 'nodeAgentConnection', 'prometheusConnection', 'relayConnection'];
+      for (const prop of requiredProps) {
+        if (!clusterEntry?.agent?.connection_status?.[prop]) return false;
+      }
+      const connectionStatus = clusterEntry?.agent?.connection_status;
+      return !!(connectionStatus?.opencostConnection || connectionStatus?.opencostServerSide);
+    };
+
+    const getConnectionPriority = (clusterEntry) => {
+      if (clusterEntry?.agent?.status === 'CONNECTED') {
+        return checkConnections(clusterEntry) ? 0 : 1;
+      }
+      return 2;
+    };
+
+    return [...allClusters].sort((a, b) => {
+      const pA = getConnectionPriority(a);
+      const pB = getConnectionPriority(b);
+      if (pA !== pB) return pA - pB;
+      return (a.account_name || '').localeCompare(b.account_name || '', undefined, { numeric: true, sensitivity: 'base' });
+    });
+  }, [allClusters]);
 
   useEffect(() => {
     getClustersData();
@@ -312,7 +339,7 @@ const KubernetesClusterOverview = () => {
         </>
       ) : (
         <>
-          <Box sx={styles.clusterLayout}>{renderClusterOverViewComponents(allClusters)}</Box>
+          <Box sx={styles.clusterLayout}>{renderClusterOverViewComponents(sortedClusters)}</Box>
           {k8sClusters.length > 0 ? (
             <ErrorBoundary>
               <KubernetesDashboardIssues id={'issues'} allClusters={k8sClusters} clusterOption={clusterOption} allNameSpaces={allNameSpaces} />
