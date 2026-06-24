@@ -9,6 +9,7 @@ import { Button as DsButton } from '@components1/ds/Button';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import { BetaIcon, WorkflowIconBlue, AutomateBlue } from '@assets';
 import { ds } from '@utils/colors';
+import TaskRunner from '@components1/workflow/TaskRunner';
 
 import AutoOptimizeTabs from '@components1/autopilot/tables/AutoOptimizeTabs';
 import WorkflowListing from '@components1/workflow/WorkflowListing';
@@ -41,6 +42,13 @@ const AutoPilot = () => {
         { id: 'Optimizations', text: 'Optimizations', value: 0, fragment: 'optimizations' },
         { id: 'approvals', text: 'Approvals', value: 1, fragment: 'approvals' },
       ],
+    },
+    {
+      name: 'Task Runner',
+      value: 2,
+      fragment: 'task-runner',
+      disabled: false,
+      icon: WorkflowIconBlue,
     },
   ];
 
@@ -125,6 +133,7 @@ const AutoPilot = () => {
   return (
     <>
       {getAnchorComponent()}
+
       <ErrorBoundary key={`${selectedFilter}-${subTab}`}>
         <Box>
           <Box>{selectedFilter === 0 && <WorkflowListing accountId={router?.query?.accountId} />}</Box>
@@ -143,6 +152,8 @@ const AutoPilot = () => {
               />
             )}
           </Box>
+
+          <Box>{selectedFilter === 2 && <TaskRunner accountId={router?.query?.accountId} />}</Box>
         </Box>
       </ErrorBoundary>
     </>
