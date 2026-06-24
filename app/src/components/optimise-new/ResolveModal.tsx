@@ -15,13 +15,15 @@ import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
 import AutoOptimizeScheduledConfiguration from '@components/autopilot/form/AutoOptimizeVerticalRightSizingSingleConfiguration';
 import AutoOptimizeContinuousConfiguration from '@components/autopilot/form/AutoOptimizeContinuousVerticalRightSizingSingleConfiguration';
 import { Select } from '@ui/Select';
-import { Switch } from '@ui/Switch';
+import { Checkbox } from '@ui/Checkbox';
 import Tooltip from '@ui/Tooltip';
+import Heading from '@components/common/Heading';
 import { Button } from '@ui/Button';
 import SafeIcon from '@shared/icons/SafeIcon';
-import { BetaIcon } from '@assets';
+import { BetaIcon, ExternalLinkIcon } from '@assets';
 
-const betaBadge = <SafeIcon src={BetaIcon} alt='Beta Icon' width={25} height={20} style={{ marginLeft: ds.space[0] }} />;
+const betaBadge = <SafeIcon src={BetaIcon} alt='Beta Icon' width={16} height={12} style={{ marginLeft: ds.space[0] }} />;
+const externalLinkBadge = <SafeIcon src={ExternalLinkIcon} alt='Open in new tab' width={12} height={12} />;
 
 interface ResolveModalProps {
   open: boolean;
@@ -637,43 +639,81 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
         height: '56px',
         justifyContent: 'space-between',
         alignItems: 'center',
-        gap: ds.space.mul(0, 5),
+        gap: ds.space.mul(0, 3),
         flexShrink: 0,
         paddingX: ds.space.mul(0, 5),
+        '&& button': { minWidth: 'auto' },
       }}
     >
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-        <Button tone='secondary' size='md' onClick={handleClose} disabled={deploying} id='resolve-modal-cancel'>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space.mul(0, 3) }}>
+        <Button tone='secondary' size='sm' onClick={handleClose} disabled={deploying} id='resolve-modal-cancel'>
           Cancel
         </Button>
         <Tooltip title='Resize running pods without a restart on Kubernetes 1.35+. Older clusters automatically fall back to a rolling restart.'>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <Switch
-              checked={inPlace}
-              onChange={(e: any) => setInPlace(e.target.checked)}
-              size='sm'
-              disabled={deploying}
-              aria-label='Apply in place (no restart)'
-              id='resolve-modal-inplace'
-            />
-            <Typography sx={{ color: ds.gray[600], fontSize: 'var(--ds-text-small)' }}>No-restart (in-place)</Typography>
+          <Box
+            component='label'
+            sx={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              boxSizing: 'border-box',
+              px: 'var(--ds-space-3)',
+              height: '28px',
+              border: '1px solid',
+              borderRadius: 'var(--ds-radius-md)',
+              backgroundColor: inPlace ? 'var(--ds-brand-100)' : 'var(--ds-background-100)',
+              borderColor: inPlace ? 'var(--ds-brand-300)' : 'var(--ds-brand-200)',
+              cursor: deploying ? 'not-allowed' : 'pointer',
+              transition: 'border-color var(--ds-motion-micro) var(--ds-motion-ease), background-color var(--ds-motion-micro) var(--ds-motion-ease)',
+              '&:hover': {
+                backgroundColor: 'var(--ds-brand-100)',
+                borderColor: 'var(--ds-brand-300)',
+              },
+            }}
+          >
+            <Checkbox checked={inPlace} onChange={(checked) => setInPlace(checked)} disabled={deploying} label='No-restart (in-place)' />
           </Box>
         </Tooltip>
       </Box>
       <Box sx={{ display: 'flex', gap: ds.space.mul(0, 3), alignItems: 'center' }}>
-        <Button tone='secondary' size='md' onClick={openTicketForm} disabled={ticketExists} id='resolve-modal-ticket'>
+        <Button tone='secondary' size='sm' onClick={openTicketForm} disabled={ticketExists} id='resolve-modal-ticket'>
           Create Ticket
         </Button>
-        <Button tone='secondary' size='md' icon={betaBadge} iconPlacement='end' onClick={openCreatePRModal} id='resolve-modal-pr'>
-          Create Pull Request
+        <Button tone='secondary' size='sm' icon={betaBadge} iconPlacement='end' onClick={openCreatePRModal} id='resolve-modal-pr'>
+          Create PR
         </Button>
-        <Button tone='secondary' size='md' icon={betaBadge} iconPlacement='end' onClick={handleContinuousAutoOptimize} id='resolve-modal-continuous'>
+        <Button
+          tone='secondary'
+          size='sm'
+          icon={recommendation?.continuousAutoPilotId ? externalLinkBadge : betaBadge}
+          iconPlacement='end'
+          tooltip={recommendation?.continuousAutoPilotId ? 'Open the active Continuous Auto Optimize in a new tab' : undefined}
+          onClick={
+            recommendation?.continuousAutoPilotId
+              ? () => window.open(`/auto-pilot/task/${recommendation.continuousAutoPilotId}?accountId=${recommendation.account_id}`, '_blank')
+              : handleContinuousAutoOptimize
+          }
+          disabled={!recommendation?.continuousAutoPilotId && !!recommendation?.scheduledAutoPilotId}
+          id='resolve-modal-continuous'
+        >
           Continuous Auto Optimize
         </Button>
-        <Button tone='secondary' size='md' onClick={handleScheduleAutoOptimize} id='resolve-modal-schedule'>
+        <Button
+          tone='secondary'
+          size='sm'
+          icon={recommendation?.scheduledAutoPilotId ? externalLinkBadge : undefined}
+          iconPlacement='end'
+          tooltip={recommendation?.scheduledAutoPilotId ? 'Open the active Schedule Auto Optimize in a new tab' : undefined}
+          onClick={
+            recommendation?.scheduledAutoPilotId
+              ? () => window.open(`/auto-pilot/task/${recommendation.scheduledAutoPilotId}?accountId=${recommendation.account_id}`, '_blank')
+              : handleScheduleAutoOptimize
+          }
+          disabled={!recommendation?.scheduledAutoPilotId && !!recommendation?.continuousAutoPilotId}
+          id='resolve-modal-schedule'
+        >
           Schedule Auto Optimize
         </Button>
-        <Button tone='secondary' size='md' onClick={submitRecommendation} disabled={deploying} id='resolve-modal-deploy'>
+        <Button tone='secondary' size='sm' onClick={submitRecommendation} disabled={deploying} id='resolve-modal-deploy'>
           {deploying ? 'Deploying...' : 'Deploy Fix'}
         </Button>
       </Box>
@@ -710,7 +750,7 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
             ? Object.keys(updatedData).map((containerName) => (
                 <Box key={containerName} sx={{ display: 'flex', gap: ds.space[4], marginTop: ds.space[4] }}>
                   <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[5], width: '100%' }}>
-                    <Typography>Container Name- {containerName}</Typography>
+                    <Heading value={`Container Name - ${containerName}`} borderColor={ds.blue[500]} borderWidth='sm' />
                     <AutoOptimizeForm
                       handleSelectedAlgo={(buttonId: number, buttonValue: string) => handleSelectedAlgo(buttonId, buttonValue, containerName)}
                       handleSelectedBuffer={(buttonId: number, buttonValue: any) => handleSelectedBuffer(buttonId, buttonValue, containerName)}
