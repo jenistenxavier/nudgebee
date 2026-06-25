@@ -41,8 +41,14 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
       setLoadingTasks(true);
       try {
         const resp = await apiWorkflow.listTaskDefinitions();
-        const tasks: TaskDefinition[] = resp?.data?.workflow_list_taskdefinitions?.tasks || [];
-        setTaskDefinitions(tasks);
+        if (resp instanceof Error) {
+          setError(resp.message || 'Failed to load task definitions.');
+        } else if (resp?.errors?.length) {
+          setError(resp.errors[0]?.message || 'Failed to load task definitions.');
+        } else {
+          const tasks: TaskDefinition[] = resp?.data?.workflow_list_taskdefinitions?.tasks || [];
+          setTaskDefinitions(tasks);
+        }
       } catch (e) {
         setError('Failed to load task definitions.');
       } finally {
@@ -64,13 +70,19 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
   };
 
   const handleRunTask = async () => {
+    if (!accountId) {
+      setError('Account ID is missing.');
+      return;
+    }
     if (!selectedTask) return;
     setRunning(true);
     setResult(null);
     setError(null);
     try {
       const resp = await apiWorkflow.triggerTask(accountId, selectedTask.name, params);
-      if (resp?.errors?.length) {
+      if (resp instanceof Error) {
+        setError(resp.message || 'Task execution failed.');
+      } else if (resp?.errors?.length) {
         setError(resp.errors[0]?.message || 'Task execution failed.');
       } else {
         setResult(resp?.data?.workflow_execute_task ?? resp?.data);
