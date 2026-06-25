@@ -11,6 +11,7 @@ import { LayoutHeaderActionSlot } from './LayoutHeaderActionSlot';
 import CustomButton from '@shared/NewCustomButton';
 import apiAskNudgebee from '@api1/ask-nudgebee';
 import SettingsModal from '@components/llm/SettingsModal';
+import apiHome from '@api1/home';
 import TenantSettings from '@shared/settings/TenantSettings';
 import ApiTokens from '@shared/settings/ApiTokens';
 import { createGetMenuItem, generateMenuItems } from './UserMenuItems';
@@ -148,7 +149,15 @@ const AskNudgebeeLayout = ({
   externalAgentsLoading = false,
 }) => {
   const router = useRouter();
-  const { accountId } = router.query;
+  // On routes that use this global layout the URL carries no `accountId` query
+  // param, so the Settings agent APIs (ListAgents / ListAgentsWithKBCounts /
+  // ListAgentExtensions) were called with accountId=undefined and failed with
+  // "account_id is required". Fall back to the first account the user can
+  // access. We resolve it via getCloudAccounts (works for tenant admins too,
+  // unlike session.accountIds which can be empty for them).
+  const { accountId: accountIdFromUrl } = router.query;
+  const [fallbackAccountId, setFallbackAccountId] = useState(null);
+  const accountId = accountIdFromUrl || fallbackAccountId;
   const { baseTitle } = useTenantBranding();
 
   const [open, setOpen] = useState(false);
@@ -192,6 +201,23 @@ const AskNudgebeeLayout = ({
       }
     });
   };
+
+  // Resolve a default account when the URL doesn't carry one, so account-scoped
+  // requests (and the Settings modal) have a valid account_id. Wait for
+  // router.isReady so we don't fire a redundant lookup during the initial
+  // render where router.query is still empty.
+  useEffect(() => {
+    if (!router.isReady || accountIdFromUrl) {
+      return;
+    }
+    // getCloudAccounts resolves to an Error object on failure (it catches
+    // internally) rather than rejecting, so guard with Array.isArray.
+    apiHome.getCloudAccounts().then((accounts) => {
+      if (Array.isArray(accounts) && accounts.length > 0) {
+        setFallbackAccountId(accounts[0].id);
+      }
+    });
+  }, [router.isReady, accountIdFromUrl]);
 
   useEffect(() => {
     if (accountId && !externalAgents) {
