@@ -4221,10 +4221,14 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
       const timeFieldNames = new Set(hasFullTimeGroup ? ['duration', 'start_time', 'end_time'] : ['start_time', 'end_time']);
       const fullTimeGroupTrigger = hasFullTimeGroup ? fields.find(([n]) => timeFieldNames.has(n))?.[0] : null;
 
-      // Detect paired resize fields (change_by + change_to) — only one is meaningful at a time
+      // Detect paired resize fields (change_by + change_to) — only one is meaningful at a time.
+      // Suppressed when the task also exposes a `scaling_mode` selector (e.g. horizontal_rightsize):
+      // there the backend already gates change_by/change_to via visible_when, so this synthetic
+      // "Resize" dropdown would duplicate the schema's "Scaling Mode" dropdown (issue #32725).
+      const hasScalingMode = fields.some(([name]) => name === 'scaling_mode');
       const hasChangeBy = fields.some(([name]) => name === 'change_by');
       const hasChangeTo = fields.some(([name]) => name === 'change_to');
-      const hasChangeGroup = hasChangeBy && hasChangeTo;
+      const hasChangeGroup = hasChangeBy && hasChangeTo && !hasScalingMode;
       const changeFieldNames = new Set(['change_by', 'change_to']);
       const changeGroupTrigger = hasChangeGroup ? fields.find(([n]) => changeFieldNames.has(n))?.[0] : null;
 
