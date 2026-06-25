@@ -310,7 +310,7 @@ const defaultStyles = {
       fontWeight: 'var(--ds-font-weight-medium)',
       textAlign: 'left',
       fontSize: 'var(--ds-text-body)',
-      overflowWrap: 'break-word',
+      whiteSpace: 'nowrap',
     },
     '& td': {
       padding: 'var(--ds-space-2) var(--ds-space-4)',
@@ -318,7 +318,8 @@ const defaultStyles = {
       color: 'var(--ds-gray-700)',
       fontSize: 'var(--ds-text-body)',
       transition: 'background-color 0.2s ease',
-      overflowWrap: 'break-word',
+      overflowWrap: 'anywhere',
+      wordBreak: 'break-word',
     },
     '& tr:hover td': {
       backgroundColor: 'var(--ds-gray-100)',
