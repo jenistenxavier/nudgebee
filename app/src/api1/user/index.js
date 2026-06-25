@@ -63,6 +63,19 @@ query UserTenant($username:String!){
 }
 `;
 
+// Cross-tenant read — lists ALL tenants in the system (super_admin only;
+// the gateway and the upstream `tenant_list_all` handler both enforce that).
+// Used by the super-admin Switch-Tenant modal to reach tenants the user
+// isn't a member of. Distinct from USER_TENANTS, which is member-scoped.
+export const LIST_ALL_TENANTS = `
+query ListAllTenants {
+  tenant_list_all {
+    id
+    name
+  }
+}
+`;
+
 export const CREATE_USER = `
 mutation CreateUser($username:String!, $firstname:String!, $lastname:String, $role:String){
   users_create(user:{firstname:$firstname, lastname:$lastname, username:$username role:$role}){
@@ -400,6 +413,13 @@ const apiUser = {
     let userResponse = await queryGraphQL(USER_TENANTS, 'UserTenant', { username: username });
     return {
       data: userResponse?.data?.data?.users_list_tenants,
+    };
+  },
+  // Super-admin only: list ALL tenants in the system (see LIST_ALL_TENANTS).
+  listAllTenants: async function () {
+    let response = await queryGraphQL(LIST_ALL_TENANTS, 'ListAllTenants', {});
+    return {
+      data: response?.data?.data?.tenant_list_all,
     };
   },
   updateUserGroup: async function (request) {
