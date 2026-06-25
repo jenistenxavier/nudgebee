@@ -94,6 +94,12 @@ type ReActPlanner struct {
 	executedCallHashes map[string]int // hash -> execution count
 	mu                 sync.Mutex     // Guards executedCallHashes and other shared state
 
+	// runMemory is the per-run working memory shared across all phases of one
+	// /analyze run. When set, identical read-only tool calls are served from its
+	// cache instead of being re-executed and re-appended. nil for legacy callers
+	// (falls back to per-planner behavior). See run_memory.go.
+	runMemory *RunMemory
+
 	// Metacognition state (Goal / Ledger / Reflection). Built per Plan() call,
 	// nil for callers that bypass mode-aware planning (e.g. legacy specialists
 	// invoked without a context-mode). See goal.go, ledger.go, reflection.go.
@@ -351,6 +357,19 @@ func (p *ReActPlanner) SetMaxIterations(n int) {
 	}
 }
 
+// SetRunMemory attaches the per-run working memory shared across phases. When set,
+// identical read-only tool calls are served from its cache instead of re-executing.
+func (p *ReActPlanner) SetRunMemory(rm *RunMemory) {
+	p.runMemory = rm
+}
+
+// EditedFiles returns the authoritative set of files the agent changed through its
+// mutation tools this run (from run memory). Used to stage a PR off exactly the
+// agent's edits rather than whatever is dirty in the tree.
+func (p *ReActPlanner) EditedFiles() []string {
+	return p.runMemory.EditedFiles()
+}
+
 // ResetCallHashes clears the dedup tracker (useful between agent phases).
 func (p *ReActPlanner) ResetCallHashes() {
 	p.mu.Lock()
@@ -556,7 +575,7 @@ func (p *ReActPlanner) Plan(ctx context.Context, query string, systemPrompt stri
 		// Token-aware compaction: compact when estimated tokens exceed 70% of budget
 		// or message count exceeds 40 (fallback for models without token counting).
 		if estimateMessageTokens(llmConversation) > p.maxContextTokens*70/100 || len(llmConversation) > 40 {
-			llmConversation = p.compactConversationWindow(llmConversation)
+			llmConversation = p.compactConversationWindow(ctx, llmConversation)
 		}
 
 		// Step budget awareness: inform the agent when running low on steps
@@ -1171,8 +1190,33 @@ func (p *ReActPlanner) executeStep(ctx context.Context, step *Step) {
 		return
 	}
 
-	// Dedup check: warn on 2nd identical call, block on 3rd+
+	// Read-only capability (capability-driven; no tool-name hardcoding).
+	isReadOnly := false
+	if ro, ok := tool.(core.ReadOnlyTool); ok {
+		isReadOnly = ro.IsReadOnly()
+	}
+
 	hash := p.hashToolCall(step.Action, step.ActionInput)
+
+	// Run-scoped read cache: an identical read-only call already executed earlier in
+	// this run (and not invalidated by a later mutation) is served from memory rather
+	// than re-executed and re-appended. The per-planner dedup below never spans phases
+	// (each phase builds a fresh planner), so this is what actually eliminates the
+	// cross-phase re-reads.
+	if isReadOnly {
+		if obs, firstStep, ok := p.runMemory.LookupRead(hash); ok {
+			step.Status = "completed"
+			step.Observation = fmt.Sprintf("[cached: identical %s call already executed at step %d this run; result unchanged]\n%s", step.Action, firstStep, obs)
+			if p.logger != nil {
+				p.logger.Log(common.EventStepComplete, "Served read-only result from run cache", map[string]any{
+					"tool_name": step.Action, "first_step": firstStep,
+				})
+			}
+			return
+		}
+	}
+
+	// Dedup check: warn on 2nd identical call, block on 3rd+
 	p.mu.Lock()
 	p.executedCallHashes[hash]++
 	cnt := p.executedCallHashes[hash]
@@ -1278,6 +1322,21 @@ func (p *ReActPlanner) executeStep(ctx context.Context, step *Step) {
 	} else {
 		step.Status = "completed"
 		step.Observation = p.formatObservation(tool, result)
+
+		// Run-scoped memory: cache read-only results so an identical later call (in
+		// any phase) is served from memory; a mutating tool invalidates cached reads
+		// so a subsequent identical read re-executes against the changed tree.
+		if isReadOnly {
+			p.runMemory.StoreRead(hash, step.Number, step.Observation)
+		} else {
+			p.runMemory.Invalidate()
+			// Deterministically record files the agent edits (replace/write_file carry
+			// a file_path) so the PR can be staged off this authoritative set instead
+			// of `git add -A` — keeping verify-step side effects out of the commit.
+			if fp, ok := step.ActionInput["file_path"].(string); ok && fp != "" {
+				p.runMemory.RecordEditedFile(fp)
+			}
+		}
 
 		// Append dedup warning if this was 2nd identical call
 		if cnt == 2 {
@@ -1586,13 +1645,58 @@ func (p *ReActPlanner) generateHelpfulGuidance(step Step) string {
 	return "\nAn error occurred. Please analyze the error and try again."
 }
 
+// summarizeMiddle condenses a span of older conversation messages into a compact
+// findings recap via one best-effort LLM call. Returns ("", false) on any failure so
+// the caller falls back to structural truncation — behavior is never worse than before.
+func (p *ReActPlanner) summarizeMiddle(ctx context.Context, middle []llms.MessageContent) (string, bool) {
+	if p.llmClient == nil || len(middle) < 4 {
+		return "", false
+	}
+	var b strings.Builder
+	for _, m := range middle {
+		for _, part := range m.Parts {
+			switch v := part.(type) {
+			case llms.TextContent:
+				fmt.Fprintf(&b, "%s: %s\n", m.Role, v.Text)
+			case llms.ToolCall:
+				if v.FunctionCall != nil {
+					fmt.Fprintf(&b, "tool_call: %s %s\n", v.FunctionCall.Name, v.FunctionCall.Arguments)
+				}
+			case llms.ToolCallResponse:
+				fmt.Fprintf(&b, "tool_result(%s): %s\n", v.Name, v.Content)
+			}
+		}
+	}
+	transcript := strings.TrimSpace(b.String())
+	if transcript == "" {
+		return "", false
+	}
+	const instr = "You are compacting an in-progress code investigation to save context. " +
+		"Summarize the steps below into a terse recap that PRESERVES specifics: files examined (paths), " +
+		"key facts and code locations (file:line), errors seen (verbatim signatures), edits attempted and their outcomes, " +
+		"the current root-cause hypothesis, and what still needs checking. Omit narration; output only the recap.\n\n"
+	msgs := []llms.MessageContent{{
+		Role:  llms.ChatMessageTypeHuman,
+		Parts: []llms.ContentPart{llms.TextPart(instr + transcript)},
+	}}
+	resp, err := p.llmClient.GenerateContent(ctx, msgs)
+	if err != nil || resp == nil || len(resp.Choices) == 0 {
+		return "", false
+	}
+	out := strings.TrimSpace(resp.Choices[0].Content)
+	if out == "" {
+		return "", false
+	}
+	return out, true
+}
+
 // compactConversationWindow applies a sliding window to prevent unbounded conversation growth.
 // It keeps: system prompt (index 0) + initial user query (index 1) + last 12 messages (~6 tool call rounds).
 // Older messages (between index 2 and len-12) are compacted:
 //   - AI messages: keep text (thought) + tool call name only (drop arguments JSON)
 //   - Tool messages: truncate ToolCallResponse content to 1000 chars
 //   - Human nudge messages: drop entirely (these are only used for text-only responses)
-func (p *ReActPlanner) compactConversationWindow(messages []llms.MessageContent) []llms.MessageContent {
+func (p *ReActPlanner) compactConversationWindow(ctx context.Context, messages []llms.MessageContent) []llms.MessageContent {
 	if len(messages) <= 16 {
 		return messages // Nothing to compact
 	}
@@ -1616,6 +1720,26 @@ func (p *ReActPlanner) compactConversationWindow(messages []llms.MessageContent)
 	// (and its preceding AI message) into the recent section to keep them adjacent.
 	for middleEnd > 2 && middleEnd < len(messages) && messages[middleEnd].Role == llms.ChatMessageTypeTool {
 		middleEnd--
+	}
+
+	// Semantic compaction (M4): replace the middle "compress zone" with a single
+	// LLM-generated findings summary so the agent retains what it learned instead of
+	// reading 1000-char fragments and re-investigating. Falls back to the structural
+	// per-message truncation below on any summarizer failure, so behavior is never
+	// worse than before.
+	if summary, ok := p.summarizeMiddle(ctx, messages[2:middleEnd]); ok {
+		compacted = append(compacted, llms.MessageContent{
+			Role:  llms.ChatMessageTypeHuman,
+			Parts: []llms.ContentPart{llms.TextPart("[Earlier investigation summarized to save context]\n<investigation_summary>\n" + summary + "\n</investigation_summary>")},
+		})
+		compacted = append(compacted, messages[middleEnd:]...)
+		if p.logger != nil {
+			p.logger.Log(common.EventPlanningProgress, "Semantically compacted conversation window", map[string]any{
+				"original_messages":  len(messages),
+				"compacted_messages": len(compacted),
+			})
+		}
+		return compacted
 	}
 
 	for i := 2; i < middleEnd; i++ {

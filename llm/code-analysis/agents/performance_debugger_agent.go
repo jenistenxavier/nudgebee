@@ -74,6 +74,7 @@ func (a *PerformanceDebuggerAgent) SetLogger(logger *common.Logger) {
 
 func (a *PerformanceDebuggerAgent) Execute(ctx context.Context, sessionCtx *session.SessionContext) (string, error) {
 	a.planner.SetRepositoryContext(sessionCtx.RepoContext)
+	a.planner.SetRunMemory(sessionCtx.RunMemory)
 
 	// Set credentials for repository operations
 	if sessionCtx.Credentials != nil {

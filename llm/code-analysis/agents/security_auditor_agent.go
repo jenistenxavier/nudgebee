@@ -91,6 +91,7 @@ func (a *SecurityAuditorAgent) SetLogger(logger *common.Logger) {
 
 func (a *SecurityAuditorAgent) Execute(ctx context.Context, sessionCtx *session.SessionContext) (string, error) {
 	a.planner.SetRepositoryContext(sessionCtx.RepoContext)
+	a.planner.SetRunMemory(sessionCtx.RunMemory)
 
 	// Seed repo_clone's default branch from the request's target/base branch so the
 	// clone (and any fix branch cut from it) starts on the branch the PR targets.
