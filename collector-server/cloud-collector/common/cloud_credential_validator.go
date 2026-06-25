@@ -314,16 +314,6 @@ func ValidateGCPCredentials(ctx context.Context, creds GCPCredentials) Validatio
 		}
 	}
 
-	// If billing data fields are provided, also check BigQuery access
-	if strings.TrimSpace(creds.BillingDatasetID) != "" && strings.TrimSpace(creds.BillingTableID) != "" {
-		status := PermissionStatus{Permission: PermissionGCPBigQueryBilling}
-		status.HasAccess = checkGCPBigQueryBillingAccess(ctx, creds, &status)
-		result.PermissionDetails = append(result.PermissionDetails, status)
-		if !status.HasAccess {
-			result.MissingPermissions = append(result.MissingPermissions, PermissionGCPBigQueryBilling)
-		}
-	}
-
 	// Check Cloud Monitoring permission (optional — needed for auto webhook setup)
 	{
 		status := PermissionStatus{Permission: PermissionGCPCloudMonitoring}
@@ -335,12 +325,34 @@ func ValidateGCPCredentials(ctx context.Context, creds GCPCredentials) Validatio
 	}
 
 	// Resource Manager is critical — if we can't list projects, the credentials are broken.
-	// Other permissions (Recommender, BigQuery, Cloud Monitoring) remain non-blocking warnings.
+	// Recommender and Cloud Monitoring remain non-blocking warnings.
 	for _, status := range result.PermissionDetails {
 		if status.Permission == PermissionGCPResourceManager && !status.HasAccess {
 			result.Success = false
 			result.ErrorMessage = fmt.Sprintf("Resource Manager access check failed: %s", status.ErrorDetail)
 			return result
+		}
+	}
+
+	// If billing data fields are provided, BigQuery billing access is also
+	// critical: the daily spends sync is the sole arbiter of an account's
+	// CONNECTED/NOT_CONNECTED status, so an account that can't query its billing
+	// export onboards "successfully" and then sits permanently disconnected.
+	// Hard-block on a definitive access/config failure (permission denied, table
+	// or dataset not found); transient errors stay non-blocking so a BigQuery
+	// outage can't wall off all onboarding.
+	if strings.TrimSpace(creds.BillingDatasetID) != "" && strings.TrimSpace(creds.BillingTableID) != "" {
+		status := PermissionStatus{Permission: PermissionGCPBigQueryBilling}
+		hasAccess, deterministic := checkGCPBigQueryBillingAccess(ctx, creds, &status)
+		status.HasAccess = hasAccess
+		result.PermissionDetails = append(result.PermissionDetails, status)
+		if !hasAccess {
+			result.MissingPermissions = append(result.MissingPermissions, PermissionGCPBigQueryBilling)
+			if deterministic {
+				result.Success = false
+				result.ErrorMessage = fmt.Sprintf("BigQuery billing access check failed: %s", status.ErrorDetail)
+				return result
+			}
 		}
 	}
 
@@ -417,9 +429,21 @@ func checkGCPCloudMonitoringAccess(ctx context.Context, creds GCPCredentials, st
 	return true
 }
 
-// checkGCPBigQueryBillingAccess validates that the BigQuery billing dataset and table exist and are accessible
-func checkGCPBigQueryBillingAccess(ctx context.Context, creds GCPCredentials, status *PermissionStatus) bool {
-	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+// checkGCPBigQueryBillingAccess validates that the SA can actually *query* the
+// configured BigQuery billing export — not merely read its metadata. A metadata
+// read only needs bigquery.tables.get, whereas the daily spends sync issues a
+// query, which needs bigquery.jobs.create + bigquery.tables.getData. An SA with
+// metadata-only access therefore passes a metadata check and then fails at sync
+// time with a 403 accessDenied. To catch that here, we submit a dry-run query
+// (zero bytes scanned, no cost) against the table, exercising the exact
+// permissions the real sync requires.
+//
+// It returns (hasAccess, deterministic). deterministic is true when the failure
+// is a definitive access/config problem (permission denied, table/dataset not
+// found, bad request) rather than a transient error, so callers can decide
+// whether to hard-block onboarding.
+func checkGCPBigQueryBillingAccess(ctx context.Context, creds GCPCredentials, status *PermissionStatus) (hasAccess bool, deterministic bool) {
+	queryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	projectID := creds.BillingProjectID
@@ -434,37 +458,56 @@ func checkGCPBigQueryBillingAccess(ctx context.Context, creds GCPCredentials, st
 	)
 	if err != nil {
 		status.ErrorDetail = fmt.Sprintf("failed to create BigQuery client: %v", err)
-		return false
+		return false, false
 	}
 	defer func() {
 		_ = client.Close()
 	}()
 
-	// Check dataset exists
+	// Check dataset exists first — gives a clearer "billing export not configured"
+	// message than a raw query error when the whole export is missing.
 	dataset := client.Dataset(creds.BillingDatasetID)
-	_, err = dataset.Metadata(queryCtx)
-	if err != nil {
+	if _, err = dataset.Metadata(queryCtx); err != nil {
 		status.ErrorDetail = fmt.Sprintf(
-			"BigQuery dataset '%s' not found in project '%s'. "+
-				"Verify billing export is configured in GCP Console > Billing > Billing export. Error: %v",
+			"BigQuery dataset '%s' not found or not accessible in project '%s'. "+
+				"Verify billing export is configured in GCP Console > Billing > Billing export "+
+				"and that the service account has BigQuery access. Error: %v",
 			creds.BillingDatasetID, projectID, err,
 		)
-		return false
+		return false, isDeterministicGCPError(err)
 	}
 
-	// Check table exists
-	table := dataset.Table(creds.BillingTableID)
-	_, err = table.Metadata(queryCtx)
-	if err != nil {
+	// Dry-run a query against the table. This validates bigquery.jobs.create and
+	// bigquery.tables.getData (the permissions the spends sync actually needs)
+	// without scanning any data or incurring cost.
+	query := client.Query(fmt.Sprintf("SELECT 1 FROM `%s.%s.%s` LIMIT 0", projectID, creds.BillingDatasetID, creds.BillingTableID))
+	query.DryRun = true
+	if _, err = query.Run(queryCtx); err != nil {
 		status.ErrorDetail = fmt.Sprintf(
-			"BigQuery table '%s' not found in dataset '%s' (project '%s'). "+
-				"Verify the table name matches your billing export configuration. Error: %v",
-			creds.BillingTableID, creds.BillingDatasetID, projectID, err,
+			"service account cannot query BigQuery billing table '%s.%s.%s'. "+
+				"Grant roles/bigquery.dataViewer on the dataset and roles/bigquery.jobUser on project '%s', "+
+				"and verify the table name matches your billing export. Error: %v",
+			projectID, creds.BillingDatasetID, creds.BillingTableID, projectID, err,
 		)
-		return false
+		return false, isDeterministicGCPError(err)
 	}
 
-	return true
+	return true, false
+}
+
+// isDeterministicGCPError reports whether a Google API error is a definitive,
+// non-transient failure (permission denied, not found, bad request) as opposed
+// to a transient one (rate limit, server error, timeout). Onboarding hard-blocks
+// only on deterministic failures.
+func isDeterministicGCPError(err error) bool {
+	var gErr *googleapi.Error
+	if errors.As(err, &gErr) {
+		switch gErr.Code {
+		case 400, 401, 403, 404:
+			return true
+		}
+	}
+	return false
 }
 
 // GCPProject represents a discovered GCP project
