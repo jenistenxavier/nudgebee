@@ -502,7 +502,7 @@ const KubernetesEventsTable = ({
     if (Array.isArray(persisted?.source) && persisted.source.length > 0) {
       setSelectedSource((prev) => {
         const next = syncFilterFromQuery(sourceFilter, persisted.source.join(','), (f) => f.value);
-        if (prev.length === 0 && next.length === 0) return prev;
+        if (prev.length === next.length && prev.every((item, i) => item?.value === next[i]?.value)) return prev;
         return next;
       });
     }
@@ -520,7 +520,7 @@ const KubernetesEventsTable = ({
     if (Array.isArray(persisted?.nbStatus) && persisted.nbStatus.length > 0) {
       setSelectedNbStatus((prev) => {
         const next = syncFilterFromQuery(NB_STATUS_FILTER, persisted.nbStatus.join(','), (f) => f.value);
-        if (prev.length === 0 && next.length === 0) return prev;
+        if (prev.length === next.length && prev.every((item, i) => item?.value === next[i]?.value)) return prev;
         return next;
       });
     }

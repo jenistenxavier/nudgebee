@@ -212,7 +212,7 @@ const CloudOptimizeRecommendationsTable = (props: {
   useEffect(() => {
     setSelectedRuleName((prev) => {
       const next = syncFilterFromQuery(ruleNamesFilter as { label: string; value: string }[], router?.query?.ruleName, (f) => f.value);
-      if (prev.length === 0 && next.length === 0) return prev;
+      if (prev.length === next.length && prev.every((item, i) => item?.value === next[i]?.value)) return prev;
       return next;
     });
     setPage(0);
@@ -221,7 +221,7 @@ const CloudOptimizeRecommendationsTable = (props: {
   useEffect(() => {
     setSelectedSeverity((prev) => {
       const next = syncFilterFromQuery(severityFilter, router?.query?.severity);
-      if (prev.length === 0 && next.length === 0) return prev;
+      if (prev.length === next.length && prev.every((item, i) => item === next[i])) return prev;
       return next;
     });
     setPage(0);

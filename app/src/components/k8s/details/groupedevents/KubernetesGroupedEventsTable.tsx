@@ -473,7 +473,7 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
     const raw = accountId || (router.query.accountId as string);
     const next = raw ? raw.split(',').filter(Boolean) : [];
     setSelectedAccountId((prev) => {
-      if (prev.length === 0 && next.length === 0) return prev;
+      if (prev.length === next.length && prev.every((id, i) => id === next[i])) return prev;
       return next;
     });
   }, [accountId, router.query.accountId]);
@@ -481,7 +481,7 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
   useEffect(() => {
     setSelectedAggregationKey((prev) => {
       const next = syncFilterFromQuery(aggregationKeyFilter, router?.query?.eventAggregationKey, (f: any) => f.value);
-      if (prev.length === 0 && next.length === 0) return prev;
+      if (prev.length === next.length && prev.every((item, i) => item?.value === next[i]?.value)) return prev;
       return next;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -490,7 +490,7 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
   useEffect(() => {
     setSelectedSource((prev) => {
       const next = syncFilterFromQuery(sourceFilter, router?.query?.source, (f: any) => f.value);
-      if (prev.length === 0 && next.length === 0) return prev;
+      if (prev.length === next.length && prev.every((item, i) => item?.value === next[i]?.value)) return prev;
       return next;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
