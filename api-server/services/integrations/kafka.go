@@ -102,11 +102,17 @@ func (m Kafka) TestConnection(sc *security.SecurityContext, configs []core.Integ
 	// so the relay returns the output for the error-pattern parsing below instead of surfacing a
 	// bare non-zero-exit failure. Connection problems are still reported — matched from the
 	// captured text, not the exit code.
+	//
+	// The optional SASL/TLS flags use `if [ -n "$VAR" ]; then ... fi` rather than
+	// `[ -n "$VAR" ] && ...`: under `set -e` (common in runner scripts) a standalone
+	// `[ -n "$VAR" ] && set -- ...` whose test is false returns exit status 1 and aborts the
+	// whole script — so a PLAINTEXT cluster (only KAFKA_BROKERS set) would never reach kcat. The
+	// `if` form keeps each optional flag truly optional regardless of the shell's errexit setting.
 	command := `set -- -b "$KAFKA_BROKERS"; ` +
-		`[ -n "$KAFKA_SECURITY_PROTOCOL" ] && set -- "$@" -X "security.protocol=$KAFKA_SECURITY_PROTOCOL"; ` +
-		`[ -n "$KAFKA_SASL_MECHANISM" ] && set -- "$@" -X "sasl.mechanism=$KAFKA_SASL_MECHANISM"; ` +
-		`[ -n "$KAFKA_SASL_USERNAME" ] && set -- "$@" -X "sasl.username=$KAFKA_SASL_USERNAME"; ` +
-		`[ -n "$KAFKA_SASL_PASSWORD" ] && set -- "$@" -X "sasl.password=$KAFKA_SASL_PASSWORD"; ` +
+		`if [ -n "$KAFKA_SECURITY_PROTOCOL" ]; then set -- "$@" -X "security.protocol=$KAFKA_SECURITY_PROTOCOL"; fi; ` +
+		`if [ -n "$KAFKA_SASL_MECHANISM" ]; then set -- "$@" -X "sasl.mechanism=$KAFKA_SASL_MECHANISM"; fi; ` +
+		`if [ -n "$KAFKA_SASL_USERNAME" ]; then set -- "$@" -X "sasl.username=$KAFKA_SASL_USERNAME"; fi; ` +
+		`if [ -n "$KAFKA_SASL_PASSWORD" ]; then set -- "$@" -X "sasl.password=$KAFKA_SASL_PASSWORD"; fi; ` +
 		`kcat "$@" -X socket.timeout.ms=5000 -X metadata.request.timeout.ms=5000 -L 2>&1 || true`
 	// Inject the secret's keys as env vars into the script-runner pod. The llm-server MSSQL/Oracle
 	// relay jobs populate this map explicitly for the same pod_script_run_enricher action, so do the
