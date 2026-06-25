@@ -401,6 +401,13 @@ func ExtractChronosphereParams(request QueryRequest) map[string]any {
 	params["start_time"] = now.Add(-15 * time.Minute).Format(time.RFC3339) // 15 mins ago
 	params["end_time"] = now.Format(time.RFC3339)
 
+	// Propagate the caller's row limit so the source can bound the result set.
+	// Without this, chronosphere trace queries are unbounded and a single
+	// workload query can return tens of thousands of spans.
+	if request.Limit > 0 {
+		params["limit"] = request.Limit
+	}
+
 	// Extract service and other parameters from WHERE clause
 	extractFromBinaryClause := func(binary BinaryWhereClause) {
 		for column, conditions := range binary {
