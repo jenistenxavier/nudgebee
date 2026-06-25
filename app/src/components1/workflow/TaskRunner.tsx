@@ -1,15 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import {
-  Box,
-  Typography,
-  TextField,
-  CircularProgress,
-  Accordion,
-  AccordionSummary,
-  AccordionDetails,
-  Chip,
-  Alert,
-} from '@mui/material';
+import { Box, Typography, TextField, CircularProgress, Accordion, AccordionSummary, AccordionDetails, Chip, Alert } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import { Button as DsButton } from '@components1/ds/Button';
 import apiWorkflow from '@api1/workflow';
@@ -113,14 +103,7 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
         <Typography variant='h6' sx={{ mb: 1, fontWeight: 600 }}>
           Task Types
         </Typography>
-        <TextField
-          size='small'
-          fullWidth
-          placeholder='Search tasks...'
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          sx={{ mb: 2 }}
-        />
+        <TextField size='small' fullWidth placeholder='Search tasks...' value={search} onChange={(e) => setSearch(e.target.value)} sx={{ mb: 2 }} />
         {loadingTasks ? (
           <Box sx={{ display: 'flex', justifyContent: 'center', mt: 4 }}>
             <CircularProgress size={24} />

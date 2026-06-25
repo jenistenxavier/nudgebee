@@ -10,9 +10,7 @@ const TaskRunnerPage = () => {
   const accountId = (router?.query?.accountId as string) || '';
 
   const sessionRoles: string[] = getUserSession()?.roles || [];
-  const hasAccess =
-    sessionRoles.includes('tenant_admin') ||
-    sessionRoles.includes('account_admin');
+  const hasAccess = sessionRoles.includes('tenant_admin') || sessionRoles.includes('account_admin');
 
   if (!hasAccess) {
     return (
@@ -36,4 +34,8 @@ const TaskRunnerPage = () => {
   );
 };
 
+<<<<<<< HEAD
 export default withAuth(TaskRunnerPage);
+=======
+export default withAuth(TaskRunnerPage);
+>>>>>>> fix/task-runner-clean
