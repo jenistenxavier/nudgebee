@@ -1329,7 +1329,31 @@ func truncateStringToMaxBytes(s string, maxBytes int) string {
 	return s[:i-1]
 }
 
-func InsertEvent(event Event, id string) (string, error) {
+// insertConfig holds optional InsertEvent behavior toggles.
+type insertConfig struct {
+	skipWorkflowRefire bool
+}
+
+// InsertOption configures InsertEvent.
+type InsertOption func(*insertConfig)
+
+// WithoutWorkflowRefire disables the event-trigger workflow re-fire that
+// InsertEvent otherwise enqueues when it UPDATES an existing FIRING event.
+// Use it for callers that re-persist an event for a reason OTHER than a fresh
+// occurrence — e.g. UpdateEvent's user-facing metadata edits (urgency/subject) —
+// where re-running matched event-trigger workflows would be spurious. Genuine
+// occurrence/ingestion paths (alert webhooks, anomaly/SLO detection) must NOT
+// pass this, so repeat firings keep matching workflows (issue #25251).
+func WithoutWorkflowRefire() InsertOption {
+	return func(c *insertConfig) { c.skipWorkflowRefire = true }
+}
+
+func InsertEvent(event Event, id string, opts ...InsertOption) (string, error) {
+	var cfg insertConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	// Validate required UUID fields to prevent DB errors from invalid values
 	if event.Tenant == "" {
 		return "", fmt.Errorf("event: tenant is required")
@@ -1430,7 +1454,24 @@ func InsertEvent(event Event, id string) (string, error) {
 		_ = common.MqPublish(
 			config.Config.RabbitMqEventPostProcessExchange,
 			config.Config.RabbitMqEventPostProcessQueue,
-			map[string]string{"event_id": id},
+			map[string]any{"event_id": id},
+			common.MqPublishWithExpiration(1*time.Hour),
+			common.MqPublishWithBackgroundRetry(),
+		)
+	} else if !cfg.skipWorkflowRefire && strings.EqualFold(string(event.Status), string(EventStatusFiring)) {
+		// Re-fire of an existing event: ON CONFLICT updated an already-present row.
+		// The post-process pipeline (triage/llm/notification) only runs on first
+		// insert, so without this an event-trigger workflow would never see repeat
+		// occurrences — and a workflow created AFTER the event first appeared would
+		// never fire at all. Re-deliver to the runbook workflow exchange ONLY
+		// (workflow_only), so workflows match each FIRING occurrence with no
+		// duplicate notifications or investigations. Gated to FIRING so resolve/
+		// close updates don't spuriously trigger, and skipped for non-occurrence
+		// re-persists (WithoutWorkflowRefire, e.g. UpdateEvent metadata edits).
+		_ = common.MqPublish(
+			config.Config.RabbitMqEventPostProcessExchange,
+			config.Config.RabbitMqEventPostProcessQueue,
+			map[string]any{"event_id": id, "workflow_only": true},
 			common.MqPublishWithExpiration(1*time.Hour),
 			common.MqPublishWithBackgroundRetry(),
 		)
@@ -2510,9 +2551,10 @@ func pagerdutyCommentIfNotInvestigated(ctx *security.RequestContext, newEvent ma
 // orchestration (triage → llm → event.created) is unit-testable without a live
 // DB / MQ. Overridden in tests.
 var (
-	triageStep    = processTriage
-	llmStep       = llm.ProcessEvent
-	emitLifecycle = lifecycle.Emit
+	triageStep       = processTriage
+	llmStep          = llm.ProcessEvent
+	emitLifecycle    = lifecycle.Emit
+	emitWorkflowOnly = lifecycle.PublishToWorkflows
 )
 
 func PostProcessEvent(ctx *security.RequestContext, newEvent map[string]any) {
@@ -2546,6 +2588,16 @@ func PostProcessEvent(ctx *security.RequestContext, newEvent map[string]any) {
 	// created-phase hooks (notification, pagerduty-if-not-investigated) and
 	// publishes to the runbook exchange for on=event.created workflows.
 	emitLifecycle(ctx, lifecycle.PhaseEventCreated, newEvent, nil)
+}
+
+// ReEmitForWorkflows re-delivers an already-post-processed event to the runbook
+// workflow exchange so event-trigger workflows fire on repeat occurrences. Unlike
+// PostProcessEvent it deliberately skips triage/llm/notification — those ran on
+// first insert and must not re-run on every re-fire — and only publishes for
+// workflow matching (event.created phase). Invoked by the post-process consumer
+// for workflow_only messages enqueued by InsertEvent on a FIRING re-fire.
+func ReEmitForWorkflows(ctx *security.RequestContext, newEvent map[string]any) {
+	emitWorkflowOnly(ctx, lifecycle.PhaseEventCreated, newEvent)
 }
 
 // runStep runs a single pipeline step (triage / llm), logging any error and
@@ -2617,7 +2669,10 @@ func UpdateEvent(ctx *security.RequestContext, request models.UpdateEventRequest
 		UpdatedAt:        &now,
 		SubjectOwner:     common.StrVal(r.SubjectOwner),
 		SubjectOwnerKind: common.StrVal(r.SubjectOwnerKind),
-	}, request.EventId)
+		// A user metadata edit (urgency/subject) re-persists the row carrying its
+		// existing FIRING status; that is NOT a fresh alert occurrence, so suppress
+		// the event-trigger workflow re-fire to avoid spuriously running workflows.
+	}, request.EventId, WithoutWorkflowRefire())
 
 	if err1 != nil {
 		return models.Event{}, fmt.Errorf("event: failed to insert event: %w", err1)
