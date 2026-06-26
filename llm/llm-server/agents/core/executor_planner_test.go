@@ -1166,12 +1166,35 @@ func TestFormatToolMetadataFooter(t *testing.T) {
 		{"empty result", &toolcore.NBToolResponseMetadata{ExitStatus: 2, ExecutionDurationMs: 8}, "\n[exitStatus: 2 | executionDuration: 8ms]"},
 		{"negative duration clamps to 0", &toolcore.NBToolResponseMetadata{ExitStatus: 0, ExecutionDurationMs: -1}, "\n[exitStatus: 0 | executionDuration: 0ms]"},
 		{"multi-second renders as ms", &toolcore.NBToolResponseMetadata{ExitStatus: 0, ExecutionDurationMs: 3200}, "\n[exitStatus: 0 | executionDuration: 3200ms]"},
+		{
+			"executed command appended",
+			&toolcore.NBToolResponseMetadata{ExitStatus: 0, ExecutionDurationMs: 12, ExecutedCommand: "kubectl get pods -n nudgebee"},
+			"\n[exitStatus: 0 | executionDuration: 12ms | command: kubectl get pods -n nudgebee]",
+		},
+		{
+			"empty executed command omits the command segment",
+			&toolcore.NBToolResponseMetadata{ExitStatus: 0, ExecutionDurationMs: 12, ExecutedCommand: ""},
+			"\n[exitStatus: 0 | executionDuration: 12ms]",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, formatToolMetadataFooter(tc.md))
 		})
 	}
+}
+
+func TestFormatToolMetadataFooter_LongCommandTruncated(t *testing.T) {
+	longCmd := "kubectl get pods -n nudgebee -o json | jq " + strings.Repeat("x", 400)
+	got := formatToolMetadataFooter(&toolcore.NBToolResponseMetadata{
+		ExitStatus:          0,
+		ExecutionDurationMs: 5,
+		ExecutedCommand:     longCmd,
+	})
+	// Full command (>200 chars) must not appear verbatim; head + tail are kept.
+	assert.NotContains(t, got, longCmd)
+	assert.Contains(t, got, "command: kubectl get pods")
+	assert.Less(t, len(got), len(longCmd))
 }
 
 func TestRenderObservationWithMetadata(t *testing.T) {

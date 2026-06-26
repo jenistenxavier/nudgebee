@@ -1535,7 +1535,20 @@ func formatToolMetadataFooter(metadata *toolcore.NBToolResponseMetadata) string 
 	if ms < 0 {
 		ms = 0
 	}
-	return fmt.Sprintf("\n[exitStatus: %d | executionDuration: %dms]", metadata.ExitStatus, ms)
+	footer := fmt.Sprintf("\n[exitStatus: %d | executionDuration: %dms", metadata.ExitStatus, ms)
+	if cmd := metadata.ExecutedCommand; cmd != "" {
+		// Cap the rendered command so a long jq/pipe chain can't bloat every
+		// observation (incl. compressed older turns). Keep both ends: the head
+		// names the binary, the tail carries namespace/region/filters. The full
+		// command is still persisted in the Metadata JSONB column.
+		const maxCmdChars = 200
+		if len(cmd) > maxCmdChars {
+			cmd = TruncateMiddle(cmd, 150, 50)
+		}
+		footer += fmt.Sprintf(" | command: %s", cmd)
+	}
+	footer += "]"
+	return footer
 }
 
 // renderObservationWithMetadata is the single entry point the prompt-assembly

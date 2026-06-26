@@ -98,6 +98,13 @@ type NBToolResponseMetadata struct {
 	// callers can tell the planner how much was dropped.
 	Truncated   bool `json:"truncated,omitempty"`
 	OriginalLen int  `json:"original_len,omitempty"`
+	// ExecutedCommand is the actual command dispatched to the workspace pod,
+	// after the tool's input transforms (e.g. "aws " prefix, --context strip,
+	// profile sourcing). It surfaces the real command behind a sub-agent's
+	// observation so the planner can ground its answer on what was run.
+	// MUST be credential-scrubbed by the tool before it is set (the auth-wrap
+	// form is never stored). Empty for tools that don't shell out.
+	ExecutedCommand string `json:"executed_command,omitempty"`
 }
 
 type ToolSchemaType string
