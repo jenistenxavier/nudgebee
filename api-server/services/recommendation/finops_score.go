@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"nudgebee/services/internal/database"
+	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/security"
 	"time"
 
@@ -315,7 +316,7 @@ func RecomputeAllFinOpsScores(ctx *security.RequestContext) error {
 	}
 
 	rows, err := dbms.Db.Queryx(`
-		SELECT id, category, rule_name, severity, estimated_savings, created_at
+		SELECT id, tenant_id, cloud_account_id, category, rule_name, severity, estimated_savings, created_at, recommendation
 		FROM recommendation
 		WHERE status = 'Open'`)
 	if err != nil {
@@ -337,17 +338,31 @@ func RecomputeAllFinOpsScores(ctx *security.RequestContext) error {
 	}
 	var batch []scoreRow
 
+	// Optional blast-radius annotation (off by default). When enabled, resolve
+	// each k8s recommendation to its knowledge-graph workload and stamp a safety
+	// band into the breakdown JSONB. Memoized per workload so repeated recs on the
+	// same workload don't re-traverse the graph.
+	impactEnabled := impactScoringEnabled()
+	var kgService *core.Service
+	impactCache := map[string]*recommendationImpact{}
+	if impactEnabled {
+		kgService = core.NewService(ctx, ctx.GetLogger(), dbms)
+	}
+
 	errCount := 0
 	for rows.Next() {
 		var (
 			id               string
+			tenantID         string
+			cloudAccountID   *string
 			category         string
 			ruleName         string
 			severity         *string
 			estimatedSavings *float32
 			createdAt        *time.Time
+			recJSON          []byte
 		)
-		if err := rows.Scan(&id, &category, &ruleName, &severity, &estimatedSavings, &createdAt); err != nil {
+		if err := rows.Scan(&id, &tenantID, &cloudAccountID, &category, &ruleName, &severity, &estimatedSavings, &createdAt, &recJSON); err != nil {
 			ctx.GetLogger().Error("error scanning recommendation row", "error", err)
 			errCount++
 			continue
@@ -358,6 +373,15 @@ func RecomputeAllFinOpsScores(ctx *security.RequestContext) error {
 			savings = *estimatedSavings
 		}
 		result := ComputeFinOpsScore(category, ruleName, severity, savings, createdAt)
+
+		accountID := ""
+		if cloudAccountID != nil {
+			accountID = *cloudAccountID
+		}
+		if impactEnabled && len(recJSON) > 0 {
+			annotateBreakdownWithImpact(kgService, tenantID, accountID, recJSON, result.Breakdown, impactCache)
+		}
+
 		breakdownJSON, err := json.Marshal(result.Breakdown)
 		if err != nil {
 			errCount++

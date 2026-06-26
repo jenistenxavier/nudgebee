@@ -4561,6 +4561,10 @@ var table_metadata = map[string]TableDefinition{
 			"finops_score_breakdown": {
 				Type: ColumnDefinitionTypeJson,
 			},
+			"safety_band": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "r1.finops_score_breakdown ->> 'safety_band'",
+			},
 			"deleted_version": {
 				Type: ColumnDefinitionTypeFloat,
 				Def:  "COALESCE(NULLIF(r1.recommendation ->> 'deleted_version', '')::FLOAT, 0)",
