@@ -66,6 +66,7 @@ query list_k8_recommendation($limit:Int, $offset:Int) {
       finops_score
       finops_band
       finops_score_breakdown
+      safety_band
     }
   }
   recommendation_aggregate: recommendation_groupings_v2(where: __WHERE__){

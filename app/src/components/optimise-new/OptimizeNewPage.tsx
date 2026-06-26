@@ -36,6 +36,7 @@ import { Stat } from '@ui/Stat';
 import { CostCallout } from '@ui/CostCallout';
 import { Chip } from '@ui/Chip';
 import CustomSearch from '@shared/CustomSearch';
+import { safetyBandTone, safetyBandLabel } from './safetyBand';
 import FilterDropdown from '@ui/FilterDropdown';
 import { Button } from '@ui/Button';
 import FileDownloadOutlinedIcon from '@mui/icons-material/FileDownloadOutlined';
@@ -144,12 +145,13 @@ const SORT_FIELD_TO_HEADER: Record<SortField, string> = {
 // `sortEnabled` so CustomTable2 renders the sort affordance.
 const TABLE_HEADERS = [
   { name: 'Severity', width: '6%', sortEnabled: true },
-  { name: 'Resource', width: '20%' },
-  { name: 'Recommendation', width: '22%' },
+  { name: 'Safety', width: '7%' },
+  { name: 'Resource', width: '18%' },
+  { name: 'Recommendation', width: '19%' },
   { name: 'Category', width: '9%' },
-  { name: 'Environment', width: '10%' },
+  { name: 'Environment', width: '9%' },
   { name: 'Savings', width: '8%', sortEnabled: true, align: 'left' as const },
-  { name: 'Last Seen', width: '14%', sortEnabled: true, align: 'left' as const },
+  { name: 'Last Seen', width: '12%', sortEnabled: true, align: 'left' as const },
   { name: '', width: '12%', align: 'right' as const },
 ];
 
@@ -494,11 +496,12 @@ const OptimizeNewPage = () => {
       const str = v == null ? '' : String(v);
       return `"${str.replace(/"/g, '""').replace(/[\r\n]+/g, ' ')}"`;
     };
-    const headers = ['Severity', 'Resource', 'Recommendation', 'Category', 'Environment', 'Savings ($/mo)', 'Last Seen'];
+    const headers = ['Severity', 'Safety', 'Resource', 'Recommendation', 'Category', 'Environment', 'Savings ($/mo)', 'Last Seen'];
     const rows = recommendations.map((rec: any) => {
       const accountInfo = accounts[rec.account_id];
       return [
         rec.severity || '',
+        safetyBandLabel(rec.safety_band),
         getResourceDisplayName(rec, ''),
         formatRuleName(rec.rule_name || ''),
         rec.category || '',
@@ -587,6 +590,7 @@ const OptimizeNewPage = () => {
           accountName: accountInfo?.name || '',
           accountCloudProvider: accountInfo?.cloud_provider || '',
           savings: rec.estimated_savings || 0,
+          safetyBand: rec.safety_band || '',
           updatedAt: rec.updated_at || rec.created_at || '',
           ticketId: rec.ticket?.ticket_id || '',
           ticketUrl: rec.ticket?.url || '',
@@ -767,6 +771,14 @@ const OptimizeNewPage = () => {
           {
             drilldownQuery: { rec: row.rec },
             component: <SeverityIcon level={row.severity.toLowerCase() as DsSeverityLevel} size={12} aria-label={row.severity} />,
+          },
+          // Safety band (knowledge-graph blast radius)
+          {
+            component: row.safetyBand ? (
+              <Chip variant='status' size='2xs' tone={safetyBandTone(row.safetyBand)} dot>
+                {safetyBandLabel(row.safetyBand)}
+              </Chip>
+            ) : null,
           },
           // Resource
           {
