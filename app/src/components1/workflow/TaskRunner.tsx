@@ -1,7 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { Box, Typography, TextField, CircularProgress, Accordion, AccordionSummary, AccordionDetails, Chip, Alert } from '@mui/material';
+import { Box, Typography, CircularProgress, Accordion, AccordionSummary, AccordionDetails } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import SearchIcon from '@mui/icons-material/Search';
 import { Button as DsButton } from '@components1/ds/Button';
+import { Input } from '@components1/ds/Input';
+import { Form } from '@components1/ds/Form';
+import { Chip } from '@components1/ds/Chip';
+import { Banner } from '@components1/ds/Banner';
 import apiWorkflow from '@api1/workflow';
 
 interface TaskDefinition {
@@ -60,16 +65,23 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
   };
 
   const handleRunTask = async () => {
-    if (!accountId) {
-      setError('Account ID is missing.');
-      return;
-    }
+    if (!accountId) { setError('Account ID is missing.'); return; }
     if (!selectedTask) return;
     setRunning(true);
     setResult(null);
     setError(null);
     try {
-      const resp = await apiWorkflow.triggerTask(accountId, selectedTask.name, params);
+      // Coerce param types based on input_schema
+      const coercedParams: Record<string, any> = {};
+      Object.entries(params).forEach(([key, value]) => {
+        const fieldSchema = selectedTask.input_schema?.properties?.[key];
+        if (fieldSchema?.type === 'integer') coercedParams[key] = parseInt(value, 10);
+        else if (fieldSchema?.type === 'boolean') coercedParams[key] = value === 'true';
+        else if (fieldSchema?.type === 'number') coercedParams[key] = parseFloat(value);
+        else coercedParams[key] = value;
+      });
+
+      const resp = await apiWorkflow.triggerTask(accountId, selectedTask.name, coercedParams);
       if (resp instanceof Error) {
         setError(resp.message || 'Task execution failed.');
       } else if (resp?.errors?.length) {
@@ -84,11 +96,21 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
     }
   };
 
-  // Group tasks by category (prefix before first underscore, e.g. "http", "k8s")
+  // Fix: handle camelCase names + no-underscore names safely
+  const getCategory = (name: string) => {
+    if (name.includes('')) return name.split('')[0].toUpperCase();
+    const fromCamel = name.replace(/([A-Z])/g, ' $1').split(' ')[0];
+    return (fromCamel || 'OTHER').toUpperCase();
+  };
+
   const grouped = taskDefinitions
-    .filter((t) => t.name.toLowerCase().includes(search.toLowerCase()) || t.description?.toLowerCase().includes(search.toLowerCase()))
+    .filter(
+      (t) =>
+        t.name.toLowerCase().includes(search.toLowerCase()) ||
+        t.description?.toLowerCase().includes(search.toLowerCase())
+    )
     .reduce<Record<string, TaskDefinition[]>>((acc, task) => {
-      const category = task.name.split('_')[0].toUpperCase();
+      const category = getCategory(task.name);
       if (!acc[category]) acc[category] = [];
       acc[category].push(task);
       return acc;
@@ -98,24 +120,47 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
 
   return (
     <Box sx={{ display: 'flex', gap: 3, height: '100%', p: 2 }}>
+
       {/* LEFT PANEL — Task List */}
-      <Box sx={{ width: 320, flexShrink: 0, borderRight: '1px solid #e0e0e0', pr: 2 }}>
-        <Typography variant='h6' sx={{ mb: 1, fontWeight: 600 }}>
+      <Box sx={{ width: 320, flexShrink: 0, borderRight: '1px solid var(--ds-gray-200)', pr: 2 }}>
+        <Typography
+          variant='h6'
+          sx={{ mb: 1, fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}
+        >
           Task Types
         </Typography>
-        <TextField size='small' fullWidth placeholder='Search tasks...' value={search} onChange={(e) => setSearch(e.target.value)} sx={{ mb: 2 }} />
+
+        {/* ✅ Search: use Input with leadingIcon — SearchInput is deleted */}
+        <Box sx={{ mb: 2 }}>
+          <Input
+            size='sm'
+            leadingIcon={<SearchIcon fontSize='small' />}
+            placeholder='Search tasks...'
+            value={search}
+            onChange={(e: any) => setSearch(e?.target?.value ?? e)}
+          />
+        </Box>
+
         {loadingTasks ? (
           <Box sx={{ display: 'flex', justifyContent: 'center', mt: 4 }}>
             <CircularProgress size={24} />
           </Box>
         ) : (
           Object.entries(grouped).map(([category, tasks]) => (
-            <Accordion key={category} disableGutters defaultExpanded={false} sx={{ boxShadow: 'none', border: '1px solid #e0e0e0', mb: 1 }}>
+            <Accordion
+              key={category}
+              disableGutters
+              defaultExpanded={false}
+              sx={{ boxShadow: 'none', border: '1px solid var(--ds-gray-200)', mb: 1 }}
+            >
               <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                <Typography variant='body2' fontWeight={600}>
+                <Typography
+                  variant='body2'
+                  sx={{ fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}
+                >
                   {category}
-                  <Chip label={tasks.length} size='small' sx={{ ml: 1 }} />
                 </Typography>
+                <Chip label={String(tasks.length)} variant='count' size='sm' sx={{ ml: 1 }} />
               </AccordionSummary>
               <AccordionDetails sx={{ p: 0 }}>
                 {tasks.map((task) => (
@@ -123,15 +168,15 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
                     key={task.name}
                     onClick={() => handleSelectTask(task)}
                     sx={{
-                      px: 2,
-                      py: 1,
-                      cursor: 'pointer',
-                      bgcolor: selectedTask?.name === task.name ? '#f0f4ff' : 'transparent',
-                      borderLeft: selectedTask?.name === task.name ? '3px solid #3b5bf5' : '3px solid transparent',
-                      '&:hover': { bgcolor: '#f5f5f5' },
+                      px: 2, py: 1, cursor: 'pointer',
+                      bgcolor: selectedTask?.name === task.name ? 'var(--ds-blue-100)' : 'transparent',
+                      borderLeft: selectedTask?.name === task.name
+                        ? '3px solid var(--ds-brand-600)'
+                        : '3px solid transparent',
+                      '&:hover': { bgcolor: 'var(--ds-gray-100)' },
                     }}
                   >
-                    <Typography variant='body2' fontWeight={500}>
+                    <Typography variant='body2' sx={{ fontWeight: 'var(--ds-font-weight-medium)' }}>
                       {task.name}
                     </Typography>
                     {task.description && (
@@ -155,7 +200,10 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
           </Box>
         ) : (
           <>
-            <Typography variant='h6' fontWeight={600} sx={{ mb: 0.5 }}>
+            <Typography
+              variant='h6'
+              sx={{ mb: 0.5, fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}
+            >
               {selectedTask.name}
             </Typography>
             {selectedTask.description && (
@@ -164,55 +212,67 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
               </Typography>
             )}
 
-            {/* Parameter Form */}
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mb: 3 }}>
+            {/* ✅ Parameter Form: Form.Field owns label, Input has NO label prop */}
+            <Form variant='stacked' density='default'>
               {inputFields.length === 0 ? (
                 <Typography variant='body2' color='text.secondary'>
                   This task requires no input parameters.
                 </Typography>
               ) : (
                 inputFields.map(([key, schema]: [string, any]) => (
-                  <TextField
+                  // ✅ Form.Field owns the label — Input does NOT get a label prop
+                  <Form.Field
                     key={key}
                     label={key}
-                    size='small'
-                    fullWidth
                     required={selectedTask.input_schema?.required?.includes(key)}
                     helperText={schema?.description || ''}
-                    placeholder={schema?.default !== undefined ? String(schema.default) : ''}
-                    value={params[key] || ''}
-                    onChange={(e) => handleParamChange(key, e.target.value)}
-                  />
+                  >
+                    <Input
+                      size='sm'
+                      placeholder={schema?.default !== undefined ? String(schema.default) : ''}
+                      value={params[key] || ''}
+                      onChange={(e) => handleParamChange(key, e.target.value)}
+                      // ✅ NO label prop here — Form.Field owns it
+                    />
+                  </Form.Field>
                 ))
               )}
+            </Form>
+
+            <Box sx={{ mt: 3 }}>
+              <DsButton tone='primary' size='md' onClick={handleRunTask} disabled={running}>
+                {running ? <CircularProgress size={16} sx={{ mr: 1 }} /> : null}
+                {running ? 'Running...' : 'Run Task'}
+              </DsButton>
             </Box>
 
-            <DsButton tone='primary' size='md' onClick={handleRunTask} disabled={running}>
-              {running ? <CircularProgress size={16} sx={{ mr: 1 }} /> : null}
-              {running ? 'Running...' : 'Run Task'}
-            </DsButton>
+            {/* ✅ Error: Banner = persistent inline message (matches this use case) */}
+            {error && (
+              <Box sx={{ mt: 3 }}>
+                <Banner tone='danger' title='Error' description={error} />
+              </Box>
+            )}
 
             {/* Results Panel */}
-            {error && (
-              <Alert severity='error' sx={{ mt: 3 }}>
-                {error}
-              </Alert>
-            )}
             {result !== null && (
               <Box sx={{ mt: 3 }}>
-                <Typography variant='subtitle2' fontWeight={600} sx={{ mb: 1 }}>
+                <Typography
+                  variant='subtitle2'
+                  sx={{ mb: 1, fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}
+                >
                   Execution Output
                 </Typography>
                 <Box
                   component='pre'
                   sx={{
-                    bgcolor: '#f5f5f5',
-                    borderRadius: 1,
+                    bgcolor: 'var(--ds-background-200)',
+                    borderRadius: 'var(--ds-radius-md)',
                     p: 2,
                     overflow: 'auto',
-                    fontSize: 13,
+                    fontSize: 'var(--ds-text-body)',
                     maxHeight: 400,
-                    border: '1px solid #e0e0e0',
+                    border: '1px solid var(--ds-gray-200)',
+                    fontFamily: 'var(--ds-font-mono)',
                   }}
                 >
                   {JSON.stringify(result, null, 2)}
