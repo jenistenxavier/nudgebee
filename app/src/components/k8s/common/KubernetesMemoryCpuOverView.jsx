@@ -3,6 +3,7 @@ import { Grid } from '@mui/material';
 import K8sMemoryCpuIndicator from './K8sMemoryCpuIndicator';
 import PropTypes from 'prop-types';
 import apiKubernetes1 from '@api1/kubernetes1';
+import { buildPromQueries } from '@shared/MetricQueryInfo';
 import { getSpecificTime } from '@lib/datetime';
 import { Skeleton } from '@ui/Skeleton';
 import CustomDateTimeRangePicker from '@shared/widgets/CustomDateTimeRangePicker';
@@ -50,6 +51,9 @@ const KubernetesMemoryCpuOverView = ({
     memory: {},
     percentile: {},
   });
+  // Executed metric queries (keyed by metric, e.g. cpu_real / mem_total) accumulated across the API calls.
+  const [promQueries, setPromQueries] = useState({});
+  const mergePromQueries = (response) => setPromQueries((prev) => ({ ...prev, ...buildPromQueries(response) }));
 
   const [selectedDateRange, setSelectedDateRange] = useState({
     startDate: getSpecificTime(60),
@@ -208,6 +212,7 @@ const KubernetesMemoryCpuOverView = ({
         instant: true,
       });
 
+      mergePromQueries(response);
       const data = extractDataFromResponse(response);
 
       // Update individual data section immediately when available
@@ -246,6 +251,7 @@ const KubernetesMemoryCpuOverView = ({
       memory: {},
       percentile: {},
     });
+    setPromQueries({});
     // Reset memoryCpuData to initial state to prevent stale data
     setMemoryCpuData({
       memory: [
@@ -273,6 +279,7 @@ const KubernetesMemoryCpuOverView = ({
           endDate: selectedDateRange.endDate,
           instant: true,
         });
+        mergePromQueries(response);
         const data = extractDataFromResponse(response);
         if (Object.keys(data).length > 0) {
           const metricsParser = createMetricsParser(data);
@@ -307,6 +314,17 @@ const KubernetesMemoryCpuOverView = ({
     });
   };
 
+  // Split the executed queries per gauge (keys like cpu_real / mem_total / memory_limit).
+  const cpuQueries = {};
+  const memoryQueries = {};
+  Object.entries(promQueries).forEach(([key, q]) => {
+    if (key.startsWith('cpu')) {
+      cpuQueries[key] = q;
+    } else if (key.startsWith('mem')) {
+      memoryQueries[key] = q;
+    }
+  });
+
   return (
     <>
       {updatedOverview ? (
@@ -323,6 +341,7 @@ const KubernetesMemoryCpuOverView = ({
                   key='CPU'
                   unit=''
                   title='CPU'
+                  queries={cpuQueries}
                   data={memoryCpuData?.cpu ?? []}
                   updatedOverview={updatedOverview}
                   showUsage={showUsage}
@@ -361,6 +380,7 @@ const KubernetesMemoryCpuOverView = ({
                   key='Memory'
                   unit=''
                   title='Memory'
+                  queries={memoryQueries}
                   data={memoryCpuData?.memory ?? []}
                   updatedOverview={updatedOverview}
                   showUsage={showUsage}
@@ -446,6 +466,7 @@ const KubernetesMemoryCpuOverView = ({
                 key='CPU'
                 unit=''
                 title='CPU'
+                queries={cpuQueries}
                 data={memoryCpuData?.cpu ?? []}
                 updatedOverview={updatedOverview}
                 hideLabels={hideLabels}
@@ -459,6 +480,7 @@ const KubernetesMemoryCpuOverView = ({
                 key='Memory'
                 unit=''
                 title='Memory'
+                queries={memoryQueries}
                 data={memoryCpuData?.memory ?? []}
                 updatedOverview={updatedOverview}
                 hideLabels={hideLabels}
