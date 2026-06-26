@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	"nudgebee/runbook/config"
@@ -14,6 +15,54 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 )
+
+// resolveTargetVersion picks which snapshot of the callee to run. When the task
+// config carries a positive integer `workflow_version`, it pins to that specific
+// historical version (GetWorkflowVersion); otherwise it follows the callee's
+// floating Live pointer (GetLiveWorkflowVersion). The Live fallback is the
+// backwards-compatible default for every existing Call Workflow action — absent
+// param == today's behavior, so no migration is needed (#282).
+func resolveTargetVersion(ctx context.Context, store model.WorkflowStore, workflowID, workflowName string, params map[string]any) (*model.WorkflowVersion, error) {
+	if pinned, ok := parseWorkflowVersionParam(params["workflow_version"]); ok {
+		v, err := store.GetWorkflowVersion(ctx, workflowID, pinned)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load pinned version v%d of workflow '%s': %w", pinned, workflowName, err)
+		}
+		return v, nil
+	}
+	v, err := store.GetLiveWorkflowVersion(ctx, workflowID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load live version of workflow '%s': %w", workflowName, err)
+	}
+	return v, nil
+}
+
+// parseWorkflowVersionParam coerces the JSON-decoded `workflow_version` task
+// param into a positive version number. Returns (0,false) when absent, zero,
+// negative, fractional, or non-numeric — the caller then falls back to Live.
+// Numbers arrive as float64 from JSON config; we also accept int/int64/json.Number
+// for programmatic or templated callers.
+func parseWorkflowVersionParam(raw any) (int, bool) {
+	switch n := raw.(type) {
+	case int:
+		if n > 0 {
+			return n, true
+		}
+	case int64:
+		if n > 0 {
+			return int(n), true
+		}
+	case float64:
+		if n > 0 && n == math.Trunc(n) {
+			return int(n), true
+		}
+	case json.Number:
+		if i, err := n.Int64(); err == nil && i > 0 {
+			return int(i), true
+		}
+	}
+	return 0, false
+}
 
 // CallWorkflowTask implements the Task interface for executing another workflow.
 type CallWorkflowTask struct {
@@ -110,17 +159,19 @@ func (t *CallWorkflowTask) Execute(taskCtx types.TaskContext, params map[string]
 		)
 	}
 
-	// Look up the target workflow, then resolve its LIVE published version — the
-	// fallback start must also run the callee's live version, not its draft (H2).
+	// Look up the target workflow, then resolve the version to run — the pinned
+	// version when the config specifies one, else the callee's floating LIVE
+	// version (never its draft) (H2, #282). The fallback start must run the same
+	// snapshot the inline child path would have run.
 	targetWf, err := taskCtx.GetStore().FindByName(taskCtx.GetContext(), tenantID, accountID, workflowName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find workflow '%s': %w", workflowName, err)
 	}
-	liveVersion, err := taskCtx.GetStore().GetLiveWorkflowVersion(taskCtx.GetContext(), targetWf.ID)
+	targetVersion, err := resolveTargetVersion(taskCtx.GetContext(), taskCtx.GetStore(), targetWf.ID, workflowName, params)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load live version of workflow '%s': %w", workflowName, err)
+		return nil, err
 	}
-	targetWf.Definition = liveVersion.Definition
+	targetWf.Definition = targetVersion.Definition
 
 	// Override defaults with any provided inputs so the started workflow sees them.
 	providedInputs, ok := params["inputs"].(map[string]any)
@@ -149,10 +200,10 @@ func (t *CallWorkflowTask) Execute(taskCtx types.TaskContext, params map[string]
 	// a `cw-<uuid>` prefix is unique per run and stays well within bounds. Parent
 	// linkage is preserved via the SearchAttributes below.
 	runWfID := fmt.Sprintf("cw-%s", uuid.New().String())
-	// Link the run to the callee's live version (version banner + retryability —
+	// Link the run to the resolved version (version banner + retryability —
 	// this fallback starts a top-level workflow) and carry the recursion-depth
 	// counter forward.
-	memo := model.WorkflowVersionMemo(liveVersion)
+	memo := model.WorkflowVersionMemo(targetVersion)
 	memo[types.MemoKeyCallWorkflowDepth] = callWfDepth + 1
 
 	options := client.StartWorkflowOptions{
@@ -219,6 +270,11 @@ func (t *CallWorkflowTask) InputSchema() *types.Schema {
 				Description: "Inputs to pass to the called workflow.",
 				Required:    false,
 			},
+			"workflow_version": {
+				Type:        "integer",
+				Description: "Pin the call to a specific version number of the target workflow. Omit (or 0) to always run the callee's current Live version.",
+				Required:    false,
+			},
 		},
 	}
 }
@@ -261,18 +317,19 @@ func (t *CallWorkflowTask) GetChildWorkflowDefinition(taskCtx types.TaskContext,
 		return nil, fmt.Errorf("tenantID or accountID missing from TaskContext for core.call-workflow task")
 	}
 
-	// Fetch the workflow row, then resolve its LIVE published version. The child
-	// must run the callee's live version, not its draft (workflows.definition) —
-	// otherwise a published parent silently runs the callee's unpublished edits (H2).
+	// Fetch the workflow row, then resolve the version to run: the pinned version
+	// when the config specifies one (`workflow_version`), else the callee's LIVE
+	// published version — never its draft (workflows.definition), otherwise a
+	// published parent silently runs the callee's unpublished edits (H2, #282).
 	wf, err := taskCtx.GetStore().FindByName(context.TODO(), tenantID, accountID, workflowName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find workflow '%s' referenced by core.call-workflow task: %w", workflowName, err)
 	}
-	liveVersion, err := taskCtx.GetStore().GetLiveWorkflowVersion(context.TODO(), wf.ID)
+	targetVersion, err := resolveTargetVersion(context.TODO(), taskCtx.GetStore(), wf.ID, workflowName, params)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load live version of workflow '%s' for core.call-workflow task: %w", workflowName, err)
+		return nil, err
 	}
-	liveDef := liveVersion.Definition
+	liveDef := targetVersion.Definition
 
 	// Apply provided inputs to the child workflow's definition
 	providedInputs, _ := params["inputs"].(map[string]any) // Can be nil if not provided
