@@ -121,7 +121,14 @@ func getOrCreateAccess(clusterID string) (*costmodel.Accesses, error) {
 	}
 	confManager := occonfig.NewConfigFileManager(nil)
 
+	// Default: reach each cluster's Prometheus through relay-server's /prometheus
+	// facade. When observability-backed metrics are enabled, point OpenCost at the
+	// in-process shim instead, which routes queries through services-server's
+	// observability metrics_query API (see promshim.go).
 	promEndpoint := GetNudgebeeRelayEndpoint() + "/prometheus"
+	if UseObservabilityMetrics() {
+		promEndpoint = "http://" + GetPrometheusShimAddr()
+	}
 	_ = os.Setenv(promenv.PrometheusServerEndpointEnvVar, promEndpoint)
 	prometheusConfig, err := prom.NewOpenCostPrometheusConfigFromEnv()
 	if err != nil {
@@ -214,6 +221,8 @@ func applyClusterLabel(clusterID string, cfg *prom.OpenCostPrometheusConfig) {
 			}
 		}
 	}
+	// Fail open on a row-iteration error: leave the cluster filter unset rather
+	// than apply a half-read label set. (Also satisfies rowserrcheck.)
 	if err := rows.Err(); err != nil {
 		return
 	}
