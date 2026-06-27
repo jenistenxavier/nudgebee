@@ -726,6 +726,13 @@ func isK8sAgentConnected(accountId string) bool {
 	return true
 }
 
+// IsK8sAgentConnected reports whether the account has a connected (non-proxy) k8s agent.
+// Exported wrapper around isK8sAgentConnected so other packages (e.g. triage's threshold
+// apply capability check) can gate agent-dependent writes without duplicating the query.
+func IsK8sAgentConnected(accountId string) bool {
+	return isK8sAgentConnected(accountId)
+}
+
 // Action defines the interface that all playbook actions must implement.
 func ExecutePlaybook(context *security.RequestContext, accountId string, event playbooks.PlaybookEvent) ([]PlaybookActionExecutionResponse, error) {
 	context.GetLogger().Info("eventrule: executing playbook", "event_id", event.EventId, "accountId", accountId, "alertName", event.Name)

@@ -1961,6 +1961,44 @@ actions:
       - role: account_admin_readonly
       - role: account_admin
     comment: List all cached threshold suggestions for a tenant
+  - name: event_get_threshold_apply_options
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/triage'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: tenant_admin_readonly
+      - role: account_admin_readonly
+      - role: account_admin
+    comment: Get available apply methods, risk, and rule preview for a threshold suggestion
+  - name: event_apply_threshold_suggestion
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/triage'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: account_admin
+    comment: Apply a threshold suggestion to the source alert rule (direct or via PR)
+  - name: event_revert_threshold_suggestion
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/triage'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: account_admin
+    comment: Revert a previously applied direct threshold change
   - name: event_get_timeline
     definition:
       kind: synchronous
