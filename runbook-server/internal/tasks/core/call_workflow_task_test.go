@@ -117,7 +117,10 @@ func TestParseWorkflowVersionParam(t *testing.T) {
 		{"zero", float64(0), 0, false},
 		{"negative", float64(-2), 0, false},
 		{"fractional", float64(2.5), 0, false},
-		{"string", "2", 0, false},
+		{"string valid", "2", 2, true},
+		{"string invalid", "abc", 0, false},
+		{"string zero", "0", 0, false},
+		{"string negative", "-2", 0, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

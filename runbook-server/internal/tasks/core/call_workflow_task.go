@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strconv"
 	"time"
 
 	"nudgebee/runbook/config"
@@ -41,7 +42,9 @@ func resolveTargetVersion(ctx context.Context, store model.WorkflowStore, workfl
 // param into a positive version number. Returns (0,false) when absent, zero,
 // negative, fractional, or non-numeric — the caller then falls back to Live.
 // Numbers arrive as float64 from JSON config; we also accept int/int64/json.Number
-// for programmatic or templated callers.
+// for programmatic callers. Strings are coerced too: a templated param
+// (`workflow_version: "{{ Inputs.target_version }}"`) resolves to a string like
+// "3", so without this a pinned call would silently fall back to Live.
 func parseWorkflowVersionParam(raw any) (int, bool) {
 	switch n := raw.(type) {
 	case int:
@@ -59,6 +62,10 @@ func parseWorkflowVersionParam(raw any) (int, bool) {
 	case json.Number:
 		if i, err := n.Int64(); err == nil && i > 0 {
 			return int(i), true
+		}
+	case string:
+		if i, err := strconv.Atoi(n); err == nil && i > 0 {
+			return i, true
 		}
 	}
 	return 0, false
@@ -321,11 +328,11 @@ func (t *CallWorkflowTask) GetChildWorkflowDefinition(taskCtx types.TaskContext,
 	// when the config specifies one (`workflow_version`), else the callee's LIVE
 	// published version — never its draft (workflows.definition), otherwise a
 	// published parent silently runs the callee's unpublished edits (H2, #282).
-	wf, err := taskCtx.GetStore().FindByName(context.TODO(), tenantID, accountID, workflowName)
+	wf, err := taskCtx.GetStore().FindByName(taskCtx.GetContext(), tenantID, accountID, workflowName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find workflow '%s' referenced by core.call-workflow task: %w", workflowName, err)
 	}
-	targetVersion, err := resolveTargetVersion(context.TODO(), taskCtx.GetStore(), wf.ID, workflowName, params)
+	targetVersion, err := resolveTargetVersion(taskCtx.GetContext(), taskCtx.GetStore(), wf.ID, workflowName, params)
 	if err != nil {
 		return nil, err
 	}
