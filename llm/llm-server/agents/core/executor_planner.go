@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/agents"
@@ -1541,8 +1542,8 @@ func formatToolMetadataFooter(metadata *toolcore.NBToolResponseMetadata) string 
 		// observation (incl. compressed older turns). Keep both ends: the head
 		// names the binary, the tail carries namespace/region/filters. The full
 		// command is still persisted in the Metadata JSONB column.
-		const maxCmdChars = 200
-		if len(cmd) > maxCmdChars {
+		const maxCmdRunes = 200
+		if utf8.RuneCountInString(cmd) > maxCmdRunes {
 			cmd = TruncateMiddle(cmd, 150, 50)
 		}
 		footer += fmt.Sprintf(" | command: %s", cmd)
