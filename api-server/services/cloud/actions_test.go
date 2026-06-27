@@ -53,6 +53,58 @@ func TestCloudLogAction(t *testing.T) {
 	assert.Nil(t, err)
 }
 
+// TestGCPEnricherGating covers the region-optional gating and the incident-ID guard
+// for GCP events. Pure unit test — only reads event labels, no cloud/DB access.
+func TestGCPEnricherGating(t *testing.T) {
+	ctxWith := func(source string, labels map[string]string) playbooks.PlaybookActionContext {
+		return playbooks.NewPlaybookActionContext("t", "a", slog.Default(),
+			playbooks.PlaybookEvent{Source: source, Labels: labels})
+	}
+	logAction := cloudLogAction{}
+	resAction := cloudResourceAction{}
+
+	// Cloud Run metric alert: real service_name, NO region -> enrich (region optional).
+	cloudRun := map[string]string{
+		"gcp_account": "live-fullspectrum", "gcp_project_id": "live-fullspectrum",
+		"gcp_service_name": "Cloud Run", "gcp_event_instance": "frontoffice-pre-alpha",
+		"gcp_incident_id": "0.o9i3cz02x353", "gcp_event_resource_type": "cloud_run_revision",
+	}
+	assert.True(t, logAction.CanAutoExecute(ctxWith("GCP_Metric_Alert", cloudRun)),
+		"cloud_logs should enrich a GCP metric alert with a real resource id even without region")
+	assert.True(t, resAction.CanAutoExecute(ctxWith("GCP_Metric_Alert", cloudRun)),
+		"cloud_resources should enrich a GCP metric alert with a real resource id even without region")
+
+	// Incident-ID fallback (gcp_event_instance == gcp_incident_id), plain metric alert
+	// with no log-based metric -> do NOT auto-enrich (filter would match nothing).
+	incidentOnly := map[string]string{
+		"gcp_account": "full-auth", "gcp_project_id": "full-auth",
+		"gcp_service_name":   "Cloud Monitoring",
+		"gcp_event_instance": "0.o9abc", "gcp_incident_id": "0.o9abc",
+	}
+	assert.False(t, logAction.CanAutoExecute(ctxWith("GCP_Metric_Alert", incidentOnly)),
+		"cloud_logs should not enrich when the only identifier is the incident id")
+	assert.False(t, resAction.CanAutoExecute(ctxWith("GCP_Metric_Alert", incidentOnly)),
+		"cloud_resources should not enrich when the only identifier is the incident id")
+
+	// User-defined log-based metric alert (e.g. l7_lb Log4j): no region, no real resource
+	// id, but the metric's own filter scopes the logs -> enrich.
+	logMetric := map[string]string{
+		"gcp_account": "full-auth", "gcp_project_id": "full-auth",
+		"gcp_service_name":   "Cloud Monitoring",
+		"gcp_event_instance": "0.o9def", "gcp_incident_id": "0.o9def",
+		"gcp_metric_type": "logging.googleapis.com/user/log4j_exploits",
+	}
+	assert.True(t, logAction.CanAutoExecute(ctxWith("GCP_Metric_Alert", logMetric)),
+		"cloud_logs should enrich a user-defined log-based metric alert via its filter")
+
+	// Native GCP log alert with no region -> enrich.
+	logAlert := map[string]string{
+		"gcp_account": "full-auth", "gcp_alert_type": "log",
+	}
+	assert.True(t, logAction.CanAutoExecute(ctxWith("GCP_Metric_Alert", logAlert)),
+		"cloud_logs should enrich a native GCP log alert even without region")
+}
+
 func TestCloudServiceMap(t *testing.T) {
 	testenv.RequireEnv(t, testenv.Tenant, "TEST_CLOUD_ACCOUNT", "TEST_AWS_ECS_RESOURCE_ID")
 	cloudServiceMap := cloudServiceMapAction{}

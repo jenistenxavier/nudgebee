@@ -21,14 +21,29 @@ const (
 func queryGcloudLogs(ctx providers.CloudProviderContext, account providers.Account, query providers.QueryLogsRequest) (providers.QueryLogsResponse, error) {
 	logger := ctx.GetLogger()
 
+	// The /v1/cloud/query_logs entry point builds a bare request context without GCP
+	// audit info. Enrich it so permission errors on the log-query path are recorded to
+	// the permission-audit collector (and surfaced as account onboarding errors).
+	ctx = &gcpAuditContextWrapper{
+		CloudProviderContext: ctx,
+		enrichedCtx: WithGCPAuditInfo(ctx.GetContext(), &GCPAuditInfo{
+			TenantID:       extractGcloudTenantID(ctx),
+			CloudAccountID: account.ID,
+			AccountNumber:  account.AccountNumber,
+			ServiceName:    "Cloud Logging",
+		}),
+	}
+
 	session, err := getGcloudSessionFromAccount(ctx, account)
 	if err != nil {
+		RecordGCPPermissionError(ctx, err)
 		logger.Error("failed to get gcloud session for QueryLogs", "error", err, "accountNumber", account.AccountNumber)
 		return providers.QueryLogsResponse{}, fmt.Errorf("failed to get gcloud session: %w", err)
 	}
 
 	client, err := logadmin.NewClient(ctx.GetContext(), session.ProjectId, session.Opts...)
 	if err != nil {
+		RecordGCPPermissionError(ctx, err)
 		logger.Error("failed to create logadmin client", "error", err, "projectId", session.ProjectId)
 		return providers.QueryLogsResponse{}, fmt.Errorf("failed to create logging client: %w", err)
 	}
@@ -90,11 +105,16 @@ func queryGcloudLogs(ctx providers.CloudProviderContext, account providers.Accou
 			break
 		}
 		if err != nil {
+			RecordGCPPermissionError(ctx, err)
 			logger.Error("error reading log entry", "error", err)
 			break
 		}
 		messages = append(messages, logEntryToMessage(entry))
 	}
+
+	// Result count makes a systemically-empty account (wrong scope, no matching logs)
+	// visible in collector logs rather than silently returning nothing.
+	logger.Info("GCP log query complete", "projectId", session.ProjectId, "filter", filter, "results", len(messages))
 
 	return providers.QueryLogsResponse{
 		Status:  "Complete",
