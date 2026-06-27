@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useTenantBranding, DEFAULT_LOGO, DEFAULT_FAVICON } from '@hooks/useTenantBranding';
 import Box from '@mui/material/Box';
 import { Button, Collapse, Container, Typography, Menu, IconButton } from '@mui/material';
@@ -31,6 +31,7 @@ import Tooltip from '@ui/Tooltip';
 import TenantSettings from '@shared/settings/TenantSettings';
 import ApiTokens from '@shared/settings/ApiTokens';
 import { snackbar } from '@shared/snackbarService';
+import { tenantSwitcher } from '@lib/tenantSwitcherService';
 import { createGetMenuItem, generateMenuItems } from './UserMenuItems';
 import { colors } from 'src/utils/colors';
 import { isRenderedInIframe } from 'src/utils/common';
@@ -200,6 +201,13 @@ const PageLayout = ({ children }) => {
   const [openSettings, setOpenSettings] = useState(false);
   const [openApiTokens, setOpenApiTokens] = useState(false);
 
+  // Let any component (e.g. the cross-tenant AccountGuard) request the tenant
+  // switcher open without prop-drilling. subscribe() returns its unsubscribe
+  // fn, which becomes the effect cleanup.
+  useEffect(() => {
+    return tenantSwitcher.subscribe(() => setOpenSwitchAccount(true));
+  }, []);
+
   // Derived Values
   const session = getUserSession();
   const { baseTitle, logoUrl: brandingLogoUrl, faviconUrl: brandingFaviconUrl, loading: brandingLoading } = useTenantBranding();
@@ -306,6 +314,9 @@ const PageLayout = ({ children }) => {
             {!brandingLoading && <link rel='icon' href={favicon} />}
             <title>{baseTitle}</title>
           </Head>
+          {/* Mounted here too so the AccountGuard "Switch Tenant" CTA works
+              on plain-layout pages (e.g. ask-nudgebee). */}
+          <LayoutHeaderActionSlot open={openSwitchAccount} title={'Switch Tenant'} onClose={handleSwitchAccountClose} />
           {children}
         </>
       ) : (

@@ -1,5 +1,6 @@
 import { Box, Typography, Tooltip, Tabs, Tab, Avatar, CircularProgress } from '@mui/material';
 import { useRouter } from 'next/router';
+import { withAccountGuard } from '@shared/AccountGuard';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ds } from 'src/utils/colors';
 import apiKubernetes from '@api1/kubernetes';
@@ -3104,4 +3105,4 @@ const Investigate = () => {
 
 Investigate.propTypes = {};
 
-export default Investigate;
+export default withAccountGuard(Investigate, { hideContent: true });

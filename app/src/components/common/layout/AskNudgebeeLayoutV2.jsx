@@ -9,6 +9,7 @@ import { KeyboardArrowDownRounded } from '@mui/icons-material';
 import { signOut } from 'next-auth/react';
 import { LayoutHeaderActionSlot } from './LayoutHeaderActionSlot';
 import CustomButton from '@shared/NewCustomButton';
+import { tenantSwitcher } from '@lib/tenantSwitcherService';
 import apiAskNudgebee from '@api1/ask-nudgebee';
 import SettingsModal from '@components/llm/SettingsModal';
 import apiHome from '@api1/home';
@@ -170,6 +171,11 @@ const AskNudgebeeLayout = ({
   const [internalAgents, setInternalAgents] = useState([]);
   const [internalLoading, setInternalLoading] = useState(false);
   const [_enabledAgents, setEnabledAgents] = useState([]);
+
+  // Allow the cross-tenant AccountGuard to open the switcher here too.
+  useEffect(() => {
+    return tenantSwitcher.subscribe(() => setOpenSwitchAccount(true));
+  }, []);
 
   const effectiveAgents = externalAgents || internalAgents;
   const effectiveLoading = externalAgents ? externalAgentsLoading : internalLoading;

@@ -1,5 +1,6 @@
 import apiAccount from '@api1/account';
 import apiIntegrations from '@api1/integrations';
+import { withAccountGuard } from '@shared/AccountGuard';
 import k8sApi from '@api1/kubernetes';
 import apiUser from '@api1/user';
 import apiWorkflow from '@api1/workflow';
@@ -928,4 +929,4 @@ const ListIntegrations = ({ integrationName }) => {
   );
 };
 
-export default ListIntegrations;
+export default withAccountGuard(ListIntegrations, { hideContent: true });

@@ -1,5 +1,6 @@
 import { Box, Grid, Typography } from '@mui/material';
 import React, { useEffect, useState } from 'react';
+import { withAccountGuard } from '@shared/AccountGuard';
 import { useRouter } from 'next/router';
 import homeApi from '@api1/home';
 import { v4 as uuidv4 } from 'uuid';
@@ -2384,4 +2385,4 @@ const Home = () => {
   );
 };
 
-export default Home;
+export default withAccountGuard(Home, { hideContent: true });
