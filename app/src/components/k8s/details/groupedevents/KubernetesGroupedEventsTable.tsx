@@ -560,10 +560,19 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
     setTicketData(null);
   }, []);
 
-  const handleTicketSuccess = useCallback(() => {
-    closeTicketCreateForm();
-    fetchTableDataRef.current?.();
-  }, [closeTicketCreateForm]);
+  const handleTicketSuccess = useCallback(
+    ({ ticketId, url }: { ticketId?: string; url?: string } = {}) => {
+      closeTicketCreateForm();
+      const fingerprint = ticketData?.fingerprint;
+      if (!fingerprint) return;
+      setTicketReferenceMap((prev) => {
+        const next = new Map(prev);
+        next.set(fingerprint, { ticket_id: ticketId, url });
+        return next;
+      });
+    },
+    [closeTicketCreateForm, ticketData]
+  );
 
   const handleTicketFailure = useCallback((res: string) => {
     snackbar.error(`Failed! ${res}`);

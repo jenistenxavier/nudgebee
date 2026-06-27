@@ -1266,10 +1266,12 @@ const OptimizeNewPage = () => {
           open={!!ticketModalRec}
           handleClose={() => setTicketModalRec(null)}
           onClose={() => setTicketModalRec(null)}
-          onSuccess={() => {
-            // TicketCreatePopupForm already shows the success toast (with the ticket link); don't fire a second one here.
+          onSuccess={({ ticketId, url }: { ticketId?: string; url?: string } = {}) => {
+            const recId = ticketModalRec?.id;
             setTicketModalRec(null);
-            fetchTableData();
+            if (recId) {
+              setRecommendations((prev) => prev.map((rec: any) => (rec.id === recId ? { ...rec, ticket: { ticket_id: ticketId, url } } : rec)));
+            }
           }}
           onFailure={(error: string) => {
             snackbar.error(error || 'Failed to create ticket');

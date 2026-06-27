@@ -1,5 +1,5 @@
 import { Box } from '@mui/material';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/router';
 import { applyFiltersOnRouter } from '@lib/router';
 import apiCloudAccount from '@api1/cloud-account';
@@ -162,7 +162,7 @@ const CloudAccountEvents = (props: {
   heading?: string;
 }) => {
   const router = useRouter();
-  const [events, setEvents] = useState([]);
+  const [events, setEvents] = useState<ICustomTableRow[][]>([]);
   const [eventsCount, setEventsCount] = useState(0);
   const [selectedSeverity, setSelectedSeverity] = useState(() => getValidParam(router?.query?.eventPriority));
   const [selectedEventName, setSelectedEventName] = useState(() => getValidParam(router?.query?.eventAggregationKey));
@@ -195,6 +195,10 @@ const CloudAccountEvents = (props: {
   const [ticketData, setTicketData] = useState<any>({});
   const [isClassifyModalOpen, setIsClassifyModalOpen] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<any>(null);
+
+  const rawEventsRef = useRef<any[]>([]);
+  const ticketReferenceMapRef = useRef<Map<string, any>>(new Map());
+  const buildRowDataRef = useRef<((evts: any[], map: Map<string, any>) => ICustomTableRow[][]) | null>(null);
 
   const cloudAccountEventsTable = 'cloudaccount-events';
   const _showEllipsis = true;
@@ -524,6 +528,9 @@ const CloudAccountEvents = (props: {
           const ec2ResourceData = events.map((item: any) => mapEventToRow(item, ticketReferenceMap));
 
           // 5. Update State
+          rawEventsRef.current = events;
+          ticketReferenceMapRef.current = ticketReferenceMap;
+          buildRowDataRef.current = (evts: any[], map: Map<string, any>) => evts.map((item: any) => mapEventToRow(item, map));
           setEvents(ec2ResourceData);
           setEventsCount(totalCount);
         } catch (err) {
@@ -585,8 +592,19 @@ const CloudAccountEvents = (props: {
       `;
   };
 
-  const handleTicketSuccess = () => {
-    listCloudAccountEvents();
+  const handleTicketSuccess = ({ ticketId, url }: { ticketId?: string; url?: string } = {}) => {
+    const fingerprint = ticketData?.fingerprint;
+    if (!fingerprint || !buildRowDataRef.current) return;
+    ticketReferenceMapRef.current.set(fingerprint, { ticket_id: ticketId, url });
+    setEvents((prev) => {
+      const next = [...prev];
+      rawEventsRef.current.forEach((e: any, idx: number) => {
+        if (e.fingerprint === fingerprint) {
+          next[idx] = buildRowDataRef.current!([rawEventsRef.current[idx]], ticketReferenceMapRef.current)[0];
+        }
+      });
+      return next;
+    });
   };
 
   const handleTicketFailure = (res: any) => {
