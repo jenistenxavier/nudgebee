@@ -102,8 +102,12 @@ type NBToolResponseMetadata struct {
 	// after the tool's input transforms (e.g. "aws " prefix, --context strip,
 	// profile sourcing). It surfaces the real command behind a sub-agent's
 	// observation so the planner can ground its answer on what was run.
-	// MUST be credential-scrubbed by the tool before it is set (the auth-wrap
-	// form is never stored). Empty for tools that don't shell out.
+	// On paths that inject credentials into the command string (shell, and the
+	// AWS/Azure/GCP workspace-exec paths) the tool MUST credential-scrub the
+	// value before setting it via ScrubCredentials — the auth-wrap form is
+	// never stored. Paths that don't embed secrets in the command (kubectl,
+	// helm, and the cloud.Execute backend paths, where auth is applied server
+	// side) store it as-is. Empty for tools that don't shell out.
 	ExecutedCommand string `json:"executed_command,omitempty"`
 }
 
