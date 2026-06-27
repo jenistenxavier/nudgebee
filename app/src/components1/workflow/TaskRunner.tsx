@@ -35,7 +35,7 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
     const fetchTasks = async () => {
       setLoadingTasks(true);
       try {
-        const resp = await apiWorkflow.listTaskDefinitions();
+        const resp: any = await apiWorkflow.listTaskDefinitions();
         if (resp instanceof Error) {
           setError(resp.message || 'Failed to load task definitions.');
         } else if (resp?.errors?.length) {
@@ -44,7 +44,7 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
           const tasks: TaskDefinition[] = resp?.data?.workflow_list_taskdefinitions?.tasks || [];
           setTaskDefinitions(tasks);
         }
-      } catch (e) {
+      } catch {
         setError('Failed to load task definitions.');
       } finally {
         setLoadingTasks(false);
@@ -65,7 +65,10 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
   };
 
   const handleRunTask = async () => {
-    if (!accountId) { setError('Account ID is missing.'); return; }
+    if (!accountId) {
+      setError('Account ID is missing.');
+      return;
+    }
     if (!selectedTask) return;
     setRunning(true);
     setResult(null);
@@ -75,13 +78,20 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
       const coercedParams: Record<string, any> = {};
       Object.entries(params).forEach(([key, value]) => {
         const fieldSchema = selectedTask.input_schema?.properties?.[key];
-        if (fieldSchema?.type === 'integer') coercedParams[key] = parseInt(value, 10);
-        else if (fieldSchema?.type === 'boolean') coercedParams[key] = value === 'true';
-        else if (fieldSchema?.type === 'number') coercedParams[key] = parseFloat(value);
-        else coercedParams[key] = value;
+        if (fieldSchema?.type === 'integer') {
+          const parsed = parseInt(value, 10);
+          coercedParams[key] = isNaN(parsed) ? value : parsed;
+        } else if (fieldSchema?.type === 'boolean') {
+          coercedParams[key] = value === 'true';
+        } else if (fieldSchema?.type === 'number') {
+          const parsed = parseFloat(value);
+          coercedParams[key] = isNaN(parsed) ? value : parsed;
+        } else {
+          coercedParams[key] = value;
+        }
       });
 
-      const resp = await apiWorkflow.triggerTask(accountId, selectedTask.name, coercedParams);
+      const resp: any = await apiWorkflow.triggerTask(accountId, selectedTask.name, coercedParams);
       if (resp instanceof Error) {
         setError(resp.message || 'Task execution failed.');
       } else if (resp?.errors?.length) {
@@ -98,17 +108,13 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
 
   // Fix: handle camelCase names + no-underscore names safely
   const getCategory = (name: string) => {
-    if (name.includes('')) return name.split('')[0].toUpperCase();
+    if (name.includes('_')) return name.split('_')[0].toUpperCase();
     const fromCamel = name.replace(/([A-Z])/g, ' $1').split(' ')[0];
     return (fromCamel || 'OTHER').toUpperCase();
   };
 
   const grouped = taskDefinitions
-    .filter(
-      (t) =>
-        t.name.toLowerCase().includes(search.toLowerCase()) ||
-        t.description?.toLowerCase().includes(search.toLowerCase())
-    )
+    .filter((t) => t.name.toLowerCase().includes(search.toLowerCase()) || t.description?.toLowerCase().includes(search.toLowerCase()))
     .reduce<Record<string, TaskDefinition[]>>((acc, task) => {
       const category = getCategory(task.name);
       if (!acc[category]) acc[category] = [];
@@ -120,13 +126,9 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
 
   return (
     <Box sx={{ display: 'flex', gap: 3, height: '100%', p: 2 }}>
-
       {/* LEFT PANEL — Task List */}
       <Box sx={{ width: 320, flexShrink: 0, borderRight: '1px solid var(--ds-gray-200)', pr: 2 }}>
-        <Typography
-          variant='h6'
-          sx={{ mb: 1, fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}
-        >
+        <Typography variant='h6' sx={{ mb: 1, fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}>
           Task Types
         </Typography>
 
@@ -154,13 +156,12 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
               sx={{ boxShadow: 'none', border: '1px solid var(--ds-gray-200)', mb: 1 }}
             >
               <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                <Typography
-                  variant='body2'
-                  sx={{ fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}
-                >
+                <Typography variant='body2' sx={{ fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}>
                   {category}
                 </Typography>
-                <Chip label={String(tasks.length)} variant='count' size='sm' sx={{ ml: 1 }} />
+                <Chip variant='count' size='sm' sx={{ ml: 1 }}>
+                  {String(tasks.length)}
+                </Chip>
               </AccordionSummary>
               <AccordionDetails sx={{ p: 0 }}>
                 {tasks.map((task) => (
@@ -168,11 +169,11 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
                     key={task.name}
                     onClick={() => handleSelectTask(task)}
                     sx={{
-                      px: 2, py: 1, cursor: 'pointer',
+                      px: 2,
+                      py: 1,
+                      cursor: 'pointer',
                       bgcolor: selectedTask?.name === task.name ? 'var(--ds-blue-100)' : 'transparent',
-                      borderLeft: selectedTask?.name === task.name
-                        ? '3px solid var(--ds-brand-600)'
-                        : '3px solid transparent',
+                      borderLeft: selectedTask?.name === task.name ? '3px solid var(--ds-brand-600)' : '3px solid transparent',
                       '&:hover': { bgcolor: 'var(--ds-gray-100)' },
                     }}
                   >
@@ -200,10 +201,7 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
           </Box>
         ) : (
           <>
-            <Typography
-              variant='h6'
-              sx={{ mb: 0.5, fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}
-            >
+            <Typography variant='h6' sx={{ mb: 0.5, fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}>
               {selectedTask.name}
             </Typography>
             {selectedTask.description && (
@@ -231,7 +229,7 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
                       size='sm'
                       placeholder={schema?.default !== undefined ? String(schema.default) : ''}
                       value={params[key] || ''}
-                      onChange={(e) => handleParamChange(key, e.target.value)}
+                      onChange={(e: any) => handleParamChange(key, e?.target?.value ?? e)}
                       // ✅ NO label prop here — Form.Field owns it
                     />
                   </Form.Field>
@@ -249,17 +247,14 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
             {/* ✅ Error: Banner = persistent inline message (matches this use case) */}
             {error && (
               <Box sx={{ mt: 3 }}>
-                <Banner tone='danger' title='Error' description={error} />
+                <Banner tone='critical' title='Error' message={error} />
               </Box>
             )}
 
             {/* Results Panel */}
             {result !== null && (
               <Box sx={{ mt: 3 }}>
-                <Typography
-                  variant='subtitle2'
-                  sx={{ mb: 1, fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}
-                >
+                <Typography variant='subtitle2' sx={{ mb: 1, fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}>
                   Execution Output
                 </Typography>
                 <Box

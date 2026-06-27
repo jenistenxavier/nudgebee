@@ -16,6 +16,8 @@ import SafeIcon from '@components1/common/SafeIcon';
 
 const AutoPilot = () => {
   const router = useRouter();
+  const session = getUserSession();
+  const isAdmin = session?.roles?.includes('tenant_admin') || session?.roles?.includes('account_admin');
 
   // 1. Initialize state with defaults (0) instead of router.query
   const [selectedFilter, setSelectedFilter] = React.useState(0);
@@ -46,7 +48,7 @@ const AutoPilot = () => {
       name: 'Task Runner',
       value: 2,
       fragment: 'task-runner',
-      disabled: false,
+      disabled: !isAdmin,
       icon: WorkflowIconBlue,
     },
   ];
@@ -152,7 +154,7 @@ const AutoPilot = () => {
             )}
           </Box>
 
-          <Box>{selectedFilter === 2 && <TaskRunner accountId={router?.query?.accountId} />}</Box>
+          <Box>{selectedFilter === 2 && isAdmin && <TaskRunner accountId={router?.query?.accountId} />}</Box>
         </Box>
       </ErrorBoundary>
     </>
