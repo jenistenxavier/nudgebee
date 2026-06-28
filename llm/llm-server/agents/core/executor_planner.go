@@ -769,8 +769,27 @@ func (e *plannerExecutor) doIteration(
 		}
 		if needsSequential {
 			e.ctx.GetLogger().Info("plannerexecutor: falling back to sequential execution — parallel batch may trigger followups", "agent", e.agent.GetName(), "actionsCount", len(actions))
+			// First-turn fanout observability for React3. Diagnoses whether
+			// the prompt change actually drove a wider turn-1 batch and
+			// whether the executor downgraded it. Scoped to top-level agents
+			// — sub-agent ReAct loops have their own iteration counter and
+			// the metric isn't meaningful there.
+			if isReAct3Planner && e.currentIteration == 0 && (e.agentRequest.ParentAgentId == "" || e.agentRequest.ParentAgentId == e.agentRequest.AgentId) {
+				e.ctx.GetLogger().Info("plannerexecutor: react3 first-turn batch fell back to sequential",
+					"agent", e.agent.GetName(),
+					"batch_size", len(actions),
+					"fell_back_to_sequential", true,
+				)
+			}
 		} else {
 			e.ctx.GetLogger().Info("plannerexecutor: executing actions in parallel", "agent", e.agent.GetName(), "actionsCount", len(actions))
+			if isReAct3Planner && e.currentIteration == 0 && (e.agentRequest.ParentAgentId == "" || e.agentRequest.ParentAgentId == e.agentRequest.AgentId) {
+				e.ctx.GetLogger().Info("plannerexecutor: react3 first-turn batch parallel",
+					"agent", e.agent.GetName(),
+					"batch_size", len(actions),
+					"fell_back_to_sequential", false,
+				)
+			}
 			return e.doIterationParallel(ctx, previousIterationSteps, nameToTool, actions)
 		}
 	}
