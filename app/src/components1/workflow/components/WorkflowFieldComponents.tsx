@@ -469,7 +469,8 @@ export const ArrayEditor: React.FC<ArrayEditorProps> = ({
       const currentVal = fieldValue ?? fieldSchema.default ?? '';
       const stringVal = currentVal === '' ? '' : String(currentVal);
       const hasSuggestions = Array.isArray(suggestedValues) && suggestedValues.length > 0;
-      const isMismatch = hasSuggestions && stringVal.trim() !== '' && !suggestedValues!.includes(stringVal);
+      const isTemplate = /\{\{|\{%/.test(stringVal);
+      const isMismatch = hasSuggestions && stringVal.trim() !== '' && !isTemplate && !suggestedValues!.includes(stringVal);
 
       return (
         <Box>
@@ -478,13 +479,22 @@ export const ArrayEditor: React.FC<ArrayEditorProps> = ({
               freeSolo
               options={suggestedValues!}
               value={stringVal}
-              onChange={(_, newValue) => onFieldChange(newValue ?? '')}
-              onInputChange={(_, newInputValue) => onFieldChange(newInputValue)}
+              onChange={(_, newValue) => {
+                const normalizedValue = typeof newValue === 'object' && newValue !== null ? (newValue as any).value : newValue;
+                onFieldChange(normalizedValue ?? '');
+              }}
               renderInput={(params) => (
                 <TextField
                   {...params}
                   size='small'
                   placeholder='Select or enter value'
+                  inputProps={{
+                    ...params.inputProps,
+                    onBlur: (e: any) => {
+                      params.inputProps.onBlur?.(e);
+                      onFieldChange(e.target.value);
+                    },
+                  }}
                   sx={{
                     '& .MuiInputBase-root': {
                       backgroundColor: 'var(--ds-background-100)',
