@@ -83,6 +83,10 @@ type MetricItem struct {
 	Timestamps  []time.Time `json:"timestamps"`
 	Region      string      `json:"region"`
 	ServiceName string      `json:"service_name"`
+	// Labels carries the metric's own label dimensions (e.g. response_code_class for
+	// Cloud Run request_count) so callers can tell otherwise-identical series apart —
+	// e.g. the 5xx error series that signals an availability breach. Omitted when empty.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 type QueryMetricsResponse struct {

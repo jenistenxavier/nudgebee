@@ -1000,14 +1000,22 @@ func (a *cloudMetricsAction) Execute(ctx playbooks.PlaybookActionContext, rawPar
 	metricGroups := map[string][]any{}
 
 	for _, item := range resourceResp.Items {
+		metricObj := map[string]any{
+			"service_name": item.ServiceName,
+			"region":       item.Region,
+			"resource_id":  item.ResourceId,
+			"name":         item.Name,
+			"statistics":   item.Statistics,
+		}
+		// Surface the metric's own label dimensions (e.g. response_code_class) so the
+		// 5xx series is identifiable rather than collapsing into one request_count line.
+		for k, v := range item.Labels {
+			if _, exists := metricObj[k]; !exists {
+				metricObj[k] = v
+			}
+		}
 		data := map[string]any{
-			"metric": map[string]any{
-				"service_name": item.ServiceName,
-				"region":       item.Region,
-				"resource_id":  item.ResourceId,
-				"name":         item.Name,
-				"statistics":   item.Statistics,
-			},
+			"metric": metricObj,
 			"timestamps": lo.Map(item.Timestamps, func(t time.Time, _ int) int64 {
 				return t.UnixMilli() / 1000
 			}),
@@ -1019,6 +1027,9 @@ func (a *cloudMetricsAction) Execute(ctx playbooks.PlaybookActionContext, rawPar
 		if item.Statistics != "" {
 			metricKey = item.Name + " (" + item.Statistics + ")"
 		}
+		// Same metric+stat stays one chart group; the series' own labels (e.g.
+		// response_code_class) are surfaced in metricObj so the 5xx line renders as a
+		// distinct line within that chart rather than a separate chart.
 		metricGroups[metricKey] = append(metricGroups[metricKey], data)
 	}
 
