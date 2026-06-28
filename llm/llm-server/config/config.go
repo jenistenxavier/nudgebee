@@ -400,9 +400,22 @@ type appConfig struct {
 	LlmServerScratchpadSummaryMinBytes int `mapstructure:"llm_server_scratchpad_summary_min_bytes"`
 	// LlmServerScratchpadSummaryTimeoutMs caps the time allowed for a single observation
 	// summarization call. On timeout, falls back to byte truncation.
-	LlmServerScratchpadSummaryTimeoutMs int  `mapstructure:"llm_server_scratchpad_summary_timeout_ms"`
-	EvaluationEnabled                   bool `mapstructure:"llm_server_evaluation_enabled"`
-	AutoIdentifyAccountEnabled          bool `mapstructure:"llm_server_auto_identify_account_enabled"`
+	LlmServerScratchpadSummaryTimeoutMs int `mapstructure:"llm_server_scratchpad_summary_timeout_ms"`
+	// LlmServerScratchpadMaxObservationChars is the per-observation byte cap applied in the
+	// scratchpad as a hard safety net (single huge tool outputs are middle-truncated to this).
+	// This is intentionally separate from llm_config_auto_selection_max_observation_length,
+	// which governs the lightweight config auto-selection heuristic (default 500) and must not
+	// double as the scratchpad cap. Default 65536; clamped to a 4096 minimum.
+	LlmServerScratchpadMaxObservationChars int `mapstructure:"llm_server_scratchpad_max_observation_chars"`
+	// LlmServerScratchpadCompressionActivationFraction is the fraction of the resolved model
+	// context window at which scratchpad compression activates. Below this the scratchpad is
+	// left uncompressed (subject only to the per-observation hard cap); compression of older
+	// observations only kicks in as the scratchpad approaches the window. Gating on the real
+	// window — instead of a flat step count — stops compression from firing on small
+	// conversations. Default 0.75; values <=0 or >=1 fall back to the default.
+	LlmServerScratchpadCompressionActivationFraction float64 `mapstructure:"llm_server_scratchpad_compression_activation_fraction"`
+	EvaluationEnabled                                bool    `mapstructure:"llm_server_evaluation_enabled"`
+	AutoIdentifyAccountEnabled                       bool    `mapstructure:"llm_server_auto_identify_account_enabled"`
 
 	// Termination cache configs
 	LlmServerMessageTerminationCacheTTLSeconds int `mapstructure:"llm_server_message_termination_cache_ttl_seconds"`
@@ -909,6 +922,8 @@ func init() {
 	viper.SetDefault("llm_productivity_engineer_hourly_rate_usd", 5.0)
 
 	viper.SetDefault("llm_server_scratchpad_summarization_enabled", true)
+	viper.SetDefault("llm_server_scratchpad_max_observation_chars", 65536)
+	viper.SetDefault("llm_server_scratchpad_compression_activation_fraction", 0.75)
 
 	hostName, err := os.Hostname()
 	if err != nil {

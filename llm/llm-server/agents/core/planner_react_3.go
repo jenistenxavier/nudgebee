@@ -262,12 +262,37 @@ func (o *NBReActPlanner3) Unmarshal(data []byte) error {
 // steps before the index are always compressed (truncated), steps after get full context
 // up to the recent-steps window. This ensures the LLM always sees ALL tool observations
 // (even from before critique rejection) while keeping token usage manageable.
+// resolveMaxContextTokens returns the resolved model context window (tokens) for this
+// planner's request, or 0 when it can't be determined. Used to gate scratchpad
+// compression on real window pressure rather than a flat step count.
+func (o *NBReActPlanner3) resolveMaxContextTokens() int {
+	agentName := ""
+	if o.nbAgent != nil {
+		agentName = o.nbAgent.GetName()
+	}
+	return resolveMaxContextTokens(o.ctx, o.request.AccountId, agentName, o.request.ConversationId)
+}
+
 func (o *NBReActPlanner3) buildScratchpad(intermediateSteps []NBAgentPlannerToolActionStep) string {
 	totalSteps := len(intermediateSteps)
 
-	// Parallel prewarm: fire LLM summarizations for non-recent steps concurrently
-	// to avoid a sequential latency spike when compression first kicks in.
-	o.prewarmSummaries(intermediateSteps)
+	// Context-window gating: only compress older observations once the scratchpad
+	// approaches the model's context window. Below that, every step is treated as
+	// "recent" (full observation, subject only to the per-observation hard cap), so we
+	// don't fire LLM summarization / "context_compression" cards without window pressure.
+	totalObsBytes := 0
+	for i := range intermediateSteps {
+		totalObsBytes += len(intermediateSteps[i].Observation)
+	}
+	maxContextTokens := o.resolveMaxContextTokens()
+	activationChars, hardCapChars := scratchpadBudget(maxContextTokens)
+	compressionActive := totalObsBytes > activationChars
+
+	// Parallel prewarm: fire LLM summarizations for non-recent steps concurrently to
+	// avoid a sequential latency spike — but only when compression will actually run.
+	if compressionActive {
+		o.prewarmSummaries(intermediateSteps)
+	}
 
 	var history strings.Builder
 	stepIndex := 0
@@ -276,9 +301,11 @@ func (o *NBReActPlanner3) buildScratchpad(intermediateSteps []NBAgentPlannerTool
 	for i < len(intermediateSteps) {
 		step := intermediateSteps[i]
 		stepIndex++
-		// Steps before postRefinementToolIndex are always compressed (pre-refinement).
-		// Steps after use the standard recent-window heuristic.
-		isRecent := i >= o.postRefinementToolIndex && (totalSteps-stepIndex) < recentStepsFullContext
+		// Steps before postRefinementToolIndex are ALWAYS compressed (pre-refinement —
+		// keep the refined investigation focused), independent of window pressure.
+		// Post-refinement steps keep full observations while compression is inactive
+		// (scratchpad well under the window), and otherwise use the recent-window heuristic.
+		isRecent := i >= o.postRefinementToolIndex && (!compressionActive || (totalSteps-stepIndex) < recentStepsFullContext)
 
 		// Detect parallel group: consecutive steps with the same Log (thought).
 		// When react_3 emits multiple actions, they all share the same thought.
@@ -358,10 +385,10 @@ func (o *NBReActPlanner3) buildScratchpad(intermediateSteps []NBAgentPlannerTool
 		scratchpad = fmt.Sprintf("<scratchpad>\n%s</scratchpad>", history.String())
 	}
 
-	// Aggregate budget: cap total scratchpad size.
-	maxChars := config.Config.LlmServerAgentMaxScratchpadChars
-	if maxChars > 0 && len(scratchpad) > maxChars {
-		scratchpad = o.compressScratchpad(scratchpad, maxChars, intermediateSteps)
+	// Aggregate budget: cap total scratchpad size at the window-derived hard ceiling
+	// (falls back to the legacy char budget when the window is unknown).
+	if hardCapChars > 0 && len(scratchpad) > hardCapChars {
+		scratchpad = o.compressScratchpad(scratchpad, hardCapChars, intermediateSteps)
 	}
 	return scratchpad
 }

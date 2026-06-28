@@ -150,7 +150,7 @@ func SaveCompressionVisibility(
 			truncCount++
 		}
 	}
-	title := fmt.Sprintf("Compressed %d observations to fit context window", len(events))
+	title := fmt.Sprintf("Compressed %d older observation(s) to stay within the context window", len(events))
 
 	err := GetConversationDao().SaveConversationToolCall(
 		request.ConversationId,
@@ -161,7 +161,7 @@ func SaveCompressionVisibility(
 		toolID,
 		compressionVisibilityToolName,
 		title,
-		"Compressing older observations to preserve context quality within token budget",
+		"Older tool observations were summarized/truncated because the conversation approached the model's context window. Recent observations are kept in full.",
 		"", // sqlArgs
 		summary,
 		toolcore.NBToolResponseStatusSuccess,
