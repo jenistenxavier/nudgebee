@@ -51,11 +51,18 @@ const (
 	RelayJobPostgres   RelayJob = "postgres"
 	RelayJobMysql      RelayJob = "mysql"
 	RelayJobRabbitmq   RelayJob = "rabbitmq"
+	RelayJobKafka      RelayJob = "kafka"
 	RelayJobRedis      RelayJob = "redis"
 	RelayJobClickhouse RelayJob = "clickhouse"
 	RelayJobMssql      RelayJob = "mssql"
 	RelayJobOracle     RelayJob = "oracle"
 	RelayJobSSH        RelayJob = "ssh"
+	// RelayJobMongo identifies the MongoDB datasource module. MongoDB is routed
+	// to forager via the proxy-agent path (executeMongoViaProxyAgent in
+	// tool_mongodb.go), NOT through ExecuteContainerJob, so it is intentionally
+	// absent from the ExecuteContainerJob allowlist below. The constant exists
+	// for naming consistency with the other datasource modules.
+	RelayJobMongo RelayJob = "mongo"
 )
 
 // getRelayCommandResponseData extracts the command-execution payload from a
@@ -596,7 +603,7 @@ func parseProxySSHResponse(response map[string]any) (string, error) {
 
 func ExecuteContainerJob(toolContext core.NbToolContext, module RelayJob, query string, accountId string, configs map[string]any, raw bool) (any, error) {
 
-	if !slices.Contains([]RelayJob{RelayJobShell, RelayJobPostgres, RelayJobMysql, RelayJobMssql, RelayJobClickhouse, RelayJobOracle, RelayJobKubectl, RelayJobRabbitmq, RelayJobRedis, RelayJobHelm, RelayJobArgoCD, RelayJobSSH}, module) {
+	if !slices.Contains([]RelayJob{RelayJobShell, RelayJobPostgres, RelayJobMysql, RelayJobMssql, RelayJobClickhouse, RelayJobOracle, RelayJobKubectl, RelayJobRabbitmq, RelayJobRedis, RelayJobHelm, RelayJobArgoCD, RelayJobSSH, RelayJobKafka}, module) {
 		return nil, errors.New("module not supported")
 	}
 
@@ -855,6 +862,20 @@ func ExecuteContainerJob(toolContext core.NbToolContext, module RelayJob, query 
 			query = strings.Replace(query, "curl ", "curl -s -u $RABBITMQ_USER:$RABBITMQ_PASSWORD ", 1)
 			// Normalise any literal management-port placeholder the agent may emit.
 			query = strings.ReplaceAll(query, "$RABBITMQ_PORT", "${RABBITMQ_MGMT_PORT:-15672}")
+		}
+	case RelayJobKafka:
+		// Inject -b $KAFKA_BROKERS plus SASL/TLS -X flags. The SASL/TLS flags use ${VAR:+...}
+		// so they expand to nothing when the key is absent from the secret (PLAINTEXT clusters),
+		// and the value is double-quoted to survive spaces / shell metacharacters.
+		kafkaFlags := `-b "$KAFKA_BROKERS"` +
+			`${KAFKA_SECURITY_PROTOCOL:+ -X security.protocol="$KAFKA_SECURITY_PROTOCOL"}` +
+			`${KAFKA_SASL_MECHANISM:+ -X sasl.mechanism="$KAFKA_SASL_MECHANISM"}` +
+			`${KAFKA_SASL_USERNAME:+ -X sasl.username="$KAFKA_SASL_USERNAME"}` +
+			`${KAFKA_SASL_PASSWORD:+ -X sasl.password="$KAFKA_SASL_PASSWORD"}`
+		if strings.Contains(query, "kcat") {
+			query = strings.Replace(query, "kcat", "kcat "+kafkaFlags, 1)
+		} else {
+			query = "kcat " + kafkaFlags + " " + query
 		}
 	case RelayJobRedis:
 		if strings.Contains(query, "redis-cli") {
