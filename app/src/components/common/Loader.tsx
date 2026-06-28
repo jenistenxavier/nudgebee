@@ -17,7 +17,10 @@ const Loader: React.FC<LoaderProps> = ({ style }) => {
     justifyContent: 'center',
     alignItems: 'center',
     height: '100vh', // Full viewport height
-    width: '100vw', // Full viewport width
+    // Fill the parent canvas, not the viewport: under the zoom-magnify shell, 100vw tracks the
+    // shrunken zoomed viewport and would paint narrower than the floored shell + spawn a competing
+    // horizontal scrollbar. 100% inherits the floored width from whatever container hosts the loader.
+    width: '100%',
     ...style, // Merge with any additional styles passed as props
   };
 

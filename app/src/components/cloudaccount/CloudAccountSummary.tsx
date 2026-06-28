@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Box, Stack, Typography, useMediaQuery } from '@mui/material';
+import { Box, Stack, Typography } from '@mui/material';
+import { useZoomFloorBelow } from '@hooks/useZoomMagnifyFloor';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import { useRouter } from 'next/router';
 // TODO(ds-migration): SummarySkeletonLoader is a page-level loader — replace with composed ds/Skeleton blocks.
@@ -762,7 +763,9 @@ const UtilizationAndHealth = ({ accountId, clusterSummary = {}, serviceName }: a
 };
 
 const CostSummary = ({ clusterSummary = {}, currencySymbol = '$' }: any) => {
-  const smallScreen = useMediaQuery('(max-width:1440px)');
+  // Frozen-floor check (not useMediaQuery): keeps the small-screen card layout on real ≤1440px
+  // screens but doesn't restyle while the user zooms, so the cards magnify uniformly with the page.
+  const smallScreen = useZoomFloorBelow(1440);
 
   // Use gross spend (positive amounts only) for percentage calculations to avoid division by near-zero when credits offset costs
   const currentGrossSpend =
