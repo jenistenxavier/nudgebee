@@ -43,13 +43,14 @@ type QueryMetricsResponse struct {
 }
 
 type MetricItem struct {
-	Name        string      `json:"name"`
-	Statistics  string      `json:"statistics"`
-	ResourceId  string      `json:"resource_id"`
-	Values      []float64   `json:"values"`
-	Timestamps  []time.Time `json:"timestamps"`
-	Region      string      `json:"region"`
-	ServiceName string      `json:"service_name"`
+	Name        string            `json:"name"`
+	Statistics  string            `json:"statistics"`
+	ResourceId  string            `json:"resource_id"`
+	Values      []float64         `json:"values"`
+	Timestamps  []time.Time       `json:"timestamps"`
+	Region      string            `json:"region"`
+	ServiceName string            `json:"service_name"`
+	Labels      map[string]string `json:"labels,omitempty"`
 }
 
 type ListMetricsRequest struct {
@@ -201,9 +202,10 @@ type QueryLogResponse struct {
 }
 
 type LogMessage struct {
-	Message   string     `json:"message"`
-	Timestamp int64      `json:"timestamp"`
-	Labels    []LogLabel `json:"labels"`
+	Message    string         `json:"message"`
+	Timestamp  int64          `json:"timestamp"`
+	Labels     []LogLabel     `json:"labels"`
+	Attributes map[string]any `json:"attributes,omitempty"`
 }
 
 type LogLabel struct {

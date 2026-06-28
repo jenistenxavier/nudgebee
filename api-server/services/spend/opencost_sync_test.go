@@ -2,8 +2,30 @@ package spend
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
+
+// TestActiveAccountQueriesExcludeProxyAgents guards the two account-selection
+// queries against silently dropping the non-proxy filter. A cloud account can
+// carry both a real and a `proxy` agent row (UNIQUE on tenant, cloud_account_id,
+// type); the authoritative opencostConnection lives only on the non-proxy row.
+// Without `a.type != 'proxy'`, a connected proxy row (which has no
+// opencostConnection key) would force-select the account for server-side sync
+// even while the real agent runs its own in-cluster OpenCost — a double-write.
+func TestActiveAccountQueriesExcludeProxyAgents(t *testing.T) {
+	for name, q := range map[string]string{
+		"activeK8sAccountsQuery":     activeK8sAccountsQuery,
+		"activeK8sAccountsByIdQuery": activeK8sAccountsByIdQuery,
+	} {
+		if !strings.Contains(q, "a.type != 'proxy'") {
+			t.Errorf("%s must filter out proxy agent rows (a.type != 'proxy')", name)
+		}
+		if !strings.Contains(q, "'opencostConnection') IS DISTINCT FROM 'true'") {
+			t.Errorf("%s must guard on opencostConnection IS DISTINCT FROM 'true'", name)
+		}
+	}
+}
 
 func TestIsEmptyAllocation(t *testing.T) {
 	empty := []string{"", "null", "[]", "{}", "  []  ", " null "}
