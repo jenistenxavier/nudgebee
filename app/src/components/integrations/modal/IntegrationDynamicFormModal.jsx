@@ -145,12 +145,14 @@ const IntegrationDynamicFormModal = ({
         const updatedConfig = { ...configs };
         // Which integrations may bind to CLOUD accounts (AWS/Azure/GCP/CloudFoundry)?
         // - Webhooks route incoming alerts to any account, so they list everything.
-        // - Otherwise only an explicit allow-list of providers is supported on cloud
-        //   accounts. Most observability providers remain K8s-only by product decision
-        //   (e.g. New Relic — see issue #29403); add a provider here once its cloud
-        //   data path is supported end-to-end. Agent-sourced providers (loki,
-        //   prometheus, otel, ES-agent) are never cloud-eligible, hence !isAgentSource.
-        const CLOUD_CAPABLE_INTEGRATIONS = ['datadog'];
+        // - Otherwise only providers whose log source serves arbitrary cloud-account
+        //   logs (a raw-query pass-through against a generic logs backend) are allowed.
+        //   K8s-only sources whose query is keyed on proprietary k8s columns/paths
+        //   (loggly, pinot, hive, azure_app_insights, signoz) stay K8s-only, as does
+        //   New Relic by product decision (issue #29403) even though it is technically
+        //   capable. Agent-sourced providers (loki, prometheus, otel, ES-agent) are
+        //   never cloud-eligible, hence !isAgentSource.
+        const CLOUD_CAPABLE_INTEGRATIONS = ['datadog', 'observe', 'dynatrace', 'splunk_observability_platform', 'solarwinds', 'elasticsearch'];
         const isWebhook = configs.category === 'incident_webhook' || (integrationName || '').toLowerCase().includes('webhook');
         const showAllAccounts = isWebhook || (!isAgentSource && CLOUD_CAPABLE_INTEGRATIONS.includes((integrationName || '').toLowerCase()));
         for (const key in updatedConfig.properties) {
