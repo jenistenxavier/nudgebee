@@ -807,7 +807,11 @@ def _sweeper_loop():
                 try:
                     rows = (
                         db.query(BenchmarkTestResult.run_id)
-                        .filter(BenchmarkTestResult.status.in_(("waiting", "running", "detached")))
+                        .filter(
+                            BenchmarkTestResult.status.in_(
+                                ("waiting", "running", "detached")
+                            )
+                        )
                         .distinct()
                         .all()
                     )

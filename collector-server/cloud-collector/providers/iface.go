@@ -83,6 +83,10 @@ type MetricItem struct {
 	Timestamps  []time.Time `json:"timestamps"`
 	Region      string      `json:"region"`
 	ServiceName string      `json:"service_name"`
+	// Labels carries the metric's own label dimensions (e.g. response_code_class for
+	// Cloud Run request_count) so callers can tell otherwise-identical series apart —
+	// e.g. the 5xx error series that signals an availability breach. Omitted when empty.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 type QueryMetricsResponse struct {
@@ -362,6 +366,10 @@ type LogMessage struct {
 	Message   string     `json:"message"`
 	Timestamp int64      `json:"timestamp"`
 	Labels    []LogLabel `json:"labels"`
+	// Attributes carries the full structured log record (provider-agnostic, OTel-style
+	// keys) so downstream consumers aren't limited to the hand-picked Message/Labels.
+	// Optional and omitted when empty to stay backward-compatible with existing consumers.
+	Attributes map[string]any `json:"attributes,omitempty"`
 }
 
 // LogQueryStatistics provides statistics about the executed log query.
@@ -520,6 +528,11 @@ type AvailableMetric struct {
 	Namespace  string            `json:"namespace"`
 	Statistics []string          `json:"statistics,omitempty"`
 	Attributes map[string]string `json:"attributes,omitempty"`
+	// Dimensions holds the deduped dimension sets observed for this metric
+	// (each a name->value map). Populated by the dynamic CloudWatch lister so
+	// the metric-query builder can discover dimension keys/values; capped to
+	// keep the response bounded for high-cardinality metrics.
+	Dimensions []map[string]string `json:"dimensions,omitempty"`
 }
 
 type CloudProvider interface {

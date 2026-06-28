@@ -50,9 +50,13 @@ const KubernetesLLMRequestResponse = (props) => {
           if (response.length == 1) {
             setSentFeedback({
               submitted: true,
-              isPositive: response[0].useful ?? null,
+              isPositive: response[0].useful === true,
               message: response[0].additional_notes ?? '',
             });
+          } else {
+            // No feedback for this response — clear any stale highlight a reused
+            // component instance may still be holding (issue #32906).
+            setSentFeedback({});
           }
         });
     }
@@ -874,11 +878,14 @@ const KubernetesLLMRequestResponse = (props) => {
                     paddingRight: `${ds.space.mul(0, 5)} !important`,
                     minHeight: ds.space.mul(0, 10),
                     lineHeight: 1.3,
-                    background: 'var(--ds-blue-100)',
+                    // Green (success) pill — a clear "answer received & processed" signal,
+                    // distinct from the neutral/info blue used elsewhere. CheckIcon below
+                    // inherits this `color`, so the tick turns green too.
+                    background: 'var(--ds-green-100)',
                     borderRadius: ds.radius.pill,
                     fontSize: 'var(--ds-text-small)',
                     fontWeight: 'var(--ds-font-weight-semibold)',
-                    color: 'var(--ds-blue-600)',
+                    color: 'var(--ds-green-600)',
                     flex: '0 1 auto',
                     minWidth: 0,
                     maxWidth: '100%',
@@ -1132,7 +1139,7 @@ const KubernetesLLMRequestResponse = (props) => {
                           borderRadius: ds.radius.sm,
                           transition: 'all 0.2s ease',
                           '&:hover': {
-                            backgroundColor: 'rgba(0, 0, 0, 0.04)',
+                            backgroundColor: 'var(--ds-gray-alpha-100)',
                           },
                         }}
                       >
@@ -1206,7 +1213,7 @@ const KubernetesLLMRequestResponse = (props) => {
                           borderRadius: ds.radius.sm,
                           transition: 'all 0.2s ease',
                           '&:hover': {
-                            backgroundColor: 'rgba(0, 0, 0, 0.04)',
+                            backgroundColor: 'var(--ds-gray-alpha-100)',
                           },
                         }}
                       >

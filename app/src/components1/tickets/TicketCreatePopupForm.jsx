@@ -33,7 +33,6 @@ const AddModalForm = ({
     const { selectedConfig, selectedProject, selectedIssueType, ticketDetails, formData, selectedIssueTypeTicketMetadata } = ticketState;
 
     setError(false);
-    setIsLoading(true);
     let cloneObj = JSON.parse(JSON.stringify(formData));
     delete cloneObj.assignee;
     for (const [_key, value] of Object.entries(selectedIssueTypeTicketMetadata?.[0]?.fields ?? [])) {

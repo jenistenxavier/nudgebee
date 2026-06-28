@@ -58,7 +58,20 @@ func SyncOpenCostSpends(ctx *security.RequestContext, accountIds []string) error
 		// setting feature_flag OPENCOST_SERVER_SIDE_SPEND = 'disabled'.
 		if !tenant.IsFeatureEnabledByDefault(ctx, acc.TenantId, tenant.FEATURE_OPENCOST_SERVER_SIDE_SPEND) {
 			gated++
+			// Kill-switched: clear the marker so the UI no longer claims OpenCost is
+			// handled server-side (with the agent's own OpenCost also off, this cluster
+			// genuinely has no cost source — the UI should surface that).
+			if err := setOpenCostServerSide(ctx, acc.AccountId, false); err != nil {
+				accLogger.Warn("opencost spend sync: failed to clear server-side marker", "error", err)
+			}
 			continue
+		}
+		// Enrollment (passed the gate above) means the server now owns this cluster's
+		// OpenCost. Stamp the marker regardless of this run's outcome — an empty window
+		// or a transient sync failure doesn't change ownership — so the UI reports
+		// "managed server-side" instead of "disconnected".
+		if err := setOpenCostServerSide(ctx, acc.AccountId, true); err != nil {
+			accLogger.Warn("opencost spend sync: failed to set server-side marker", "error", err)
 		}
 		didSync, err := syncAccountSpends(ctx, client, acc.AccountId)
 		switch {
@@ -103,29 +116,67 @@ func listActiveK8sAccounts(ctx context.Context, accountIds []string) ([]k8sAccou
 // signal: disabling OpenCost at the agent turns off both its in-cluster OpenCost and
 // its legacy publish() push, so the server-side sync automatically takes over with
 // no double-write. Clusters still running agent OpenCost are excluded here.
+//
+// The `a.type != 'proxy'` guard is required, not cosmetic: a cloud account may carry
+// more than one agent row (UNIQUE on tenant, cloud_account_id, type), and the
+// authoritative connection_status — the one the agent's telemetry writes and the one
+// setOpenCostServerSide stamps — lives on the non-proxy row. A `proxy` row has no
+// opencostConnection key, so `->>'opencostConnection'` is NULL → IS DISTINCT FROM
+// 'true' is TRUE → without this guard a connected proxy row force-selects the account
+// for server-side sync even when the real agent is running in-cluster OpenCost,
+// re-introducing the exact double-write this query exists to prevent.
 const activeK8sAccountsQuery = `
 	SELECT ca.id::varchar AS cloud_account_id, ca.tenant::varchar AS tenant
 	FROM cloud_accounts ca
 	INNER JOIN agent a ON ca.id = a.cloud_account_id
 	WHERE ca.cloud_provider = 'K8s'
+	  AND a.type != 'proxy'
 	  AND a.status = 'CONNECTED'
 	  AND a.last_connected_at > now() - interval '1 DAY'
 	  AND (a.connection_status->>'opencostConnection') IS DISTINCT FROM 'true'
 	GROUP BY ca.id, ca.tenant`
 
 // activeK8sAccountsByIdQuery is the explicit-account variant (manual cron payload).
-// It intentionally keeps the same opencost-not-active guard so a manual trigger
-// can't double-write a cluster that still runs agent OpenCost.
+// It intentionally keeps the same opencost-not-active guard (including the non-proxy
+// row filter — see activeK8sAccountsQuery) so a manual trigger can't double-write a
+// cluster that still runs agent OpenCost.
 const activeK8sAccountsByIdQuery = `
 	SELECT ca.id::varchar AS cloud_account_id, ca.tenant::varchar AS tenant
 	FROM cloud_accounts ca
 	INNER JOIN agent a ON ca.id = a.cloud_account_id
 	WHERE ca.id = ANY($1::uuid[])
 	  AND ca.cloud_provider = 'K8s'
+	  AND a.type != 'proxy'
 	  AND a.status = 'CONNECTED'
 	  AND a.last_connected_at > now() - interval '1 DAY'
 	  AND (a.connection_status->>'opencostConnection') IS DISTINCT FROM 'true'
 	GROUP BY ca.id, ca.tenant`
+
+// setOpenCostServerSide stamps a server-managed `opencostServerSide` marker on the
+// agent's connection_status so the UI can render OpenCost as "managed server-side"
+// (and keep the cluster healthy) when the agent's own in-cluster OpenCost is off.
+//
+// This is safe to write here even though the agent owns connection_status: the k8s
+// telemetry handler merges (`||`) each heartbeat into connection_status rather than
+// replacing it, and the agent never sends this key, so the server-owned marker
+// survives heartbeats — the same pattern scan_orchestrator uses for `schedule_jobs`.
+//
+// The IS DISTINCT FROM guard makes a steady-state run a no-op (no dead tuples) once
+// the marker matches the desired value.
+func setOpenCostServerSide(ctx *security.RequestContext, accountId string, enabled bool) error {
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return err
+	}
+	const q = `
+		UPDATE agent
+		SET connection_status = COALESCE(connection_status, '{}'::jsonb)
+		                        || jsonb_build_object('opencostServerSide', $2::boolean)
+		WHERE cloud_account_id = $1 AND type != 'proxy'
+		  AND (connection_status->>'opencostServerSide') IS DISTINCT FROM $2::text`
+	_, err = dbms.Db.ExecContext(ctx.GetContext(), q, accountId, enabled)
+	return err
+}
 
 // syncAccountSpends runs one account through the attributes → allocation → store
 // pipeline. Returns (true, nil) when allocations were posted, (false, nil) when
