@@ -271,7 +271,11 @@ const KubernetesLLMResponseGenerator = ({
     ? `${activeWaitingFollowup.response?.message_id || ''}:${activeWaitingFollowup.response?.agent_id || ''}`
     : null;
 
-  const showFollowupSheet = Boolean(activeWaitingFollowup);
+  // Only surface the followup prompt while the conversation itself is still open. The
+  // per-message terminal check above can lag the conversation (a stale followup message can
+  // still read IN_PROGRESS after the run finished), so gate on conversationStatus too —
+  // a COMPLETED conversation must never render an answerable followup sheet.
+  const showFollowupSheet = Boolean(activeWaitingFollowup) && conversationStatus !== 'COMPLETED';
 
   const currentSessionId = router.query.session_id || sessionId;
   const notifyNavigateTo = currentSessionId ? `/ask-nudgebee?accountId=${accountId}&session_id=${currentSessionId}` : '';
