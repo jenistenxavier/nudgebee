@@ -300,7 +300,22 @@ func getWorkflowSchema() string {
 - "manual" - No params required (params must be empty or omitted). User-supplied inputs available as {{ Inputs.<key> }} in tasks.
 - "schedule" - Requires params: {"cron": "0 * * * *" (5-field UTC), "overlap_policy": "Skip|BufferOne|BufferAll|AllowAll|CancelOther|TerminateOther" (optional, default "Skip"), "catchup_window": Go time.ParseDuration string using units ns|us|ms|s|m|h ONLY — day/week units ("7d", "1w") are NOT supported; use hours instead ("168h" = 7 days). Compound durations are allowed ("1h30m", "90m15s"). Examples: "60s", "10m", "1h", "1h30m", "168h"; default "60s"}. Auto-injected: {{ Inputs.workflow_scheduled_time }}, {{ Inputs.workflow_execution_time }}.
 - "webhook" - Requires params: {"integration_name": "string (a workflow_webhook integration name)", "secret": "string (optional)", "filter": "jinja2 (optional, must render to literal \"true\" or \"1\")"}. Filter sees {{ webhook_payload }} at root. Tasks read request body via {{ Inputs.webhook_payload }}.
-- "event" - Requires AT LEAST ONE of: event_type OR filter (both is fine; rejecting both empty). Params: {"event_type": "string or [string,...]", "filter": "jinja2"}. Filter sees {{ event.<field> }} at root — fields: event_type, source, cluster, subject_namespace, subject_name, priority (HIGH|MEDIUM|LOW|INFO|DEBUG), status, labels. Tasks read the event via {{ Inputs.event.<field> }}.
+- "event" - Requires AT LEAST ONE of: event_type OR filter (both is fine; rejecting both empty). Params: {"event_type": "string or [string,...]", "filter": "jinja2", "on": "lifecycle phase (optional, default event.created)"}.
+    - The filter sees the event at ROOT: {{ event.<field> }}. Tasks read the same event via {{ Inputs.event.<field> }}. NEVER use {{ Inputs.event }} inside the filter — the filter context has no "Inputs".
+    - AVAILABLE event.<field> (these are the ONLY top-level fields; do NOT invent others — there is no event.reason and no event.message):
+        event_type, source, title, description, failure, finding_type, category,
+        priority (HIGH|MEDIUM|LOW|INFO|DEBUG — coarse, MOST events are HIGH; a poor severity gate on its own),
+        status (FIRING|RESOLVED|CLOSED), nb_status (OPEN|DUPLICATE|SUPPRESSED|RESOLVED|ACTION_REQUIRED|DROPPED),
+        computed_priority (P0|P1|P2|P3 — the real triage tier; may be ABSENT for un-scored events),
+        computed_score (integer 0-100 — P0>=80, P1 60-79, P2 40-59, P3<40; may be ABSENT),
+        subject_type, subject_name, subject_namespace, subject_node, subject_owner, subject_owner_kind,
+        service_key, cluster (a cluster NAME like "prod-cluster" — NEVER an account/cluster UUID),
+        fingerprint, cloud_resource_id, principal, aggregation_key,
+        labels (a free-form map of alert labels — keys are source-specific, e.g. labels.alertname, labels.severity, labels.summary, labels.namespace; call get_event_trigger_schema to see the REAL keys for this account — do NOT guess label keys).
+    - SEVERITY: to fire on high-severity incidents use computed_priority/computed_score (e.g. {{ event.computed_priority in ['P0','P1'] }} or {{ (event.computed_score | default(0) | int) >= 80 }}), NOT a guessed label. Add {{ event.nb_status == 'OPEN' }} to skip duplicates/suppressed (most events are DUPLICATE).
+    - LLM ANALYSIS / RCA is NOT a field on the event. To include AI analysis, add an "llm.event_investigate" task and reference ITS output — do not read event.labels for a "reason"/"analysis".
+    - "on" (lifecycle phase) selects WHEN the workflow fires: event.created (default), event.triaged, event.updated, investigation.completed (use this when the task needs the LLM RCA, which is only ready by then), event.resolved, event.closed.
+    - BEFORE building an event trigger, call get_event_trigger_schema to confirm the live fields, the real label keys for this account, and a sample event.
 - "optimization" - All params optional (empty = match every recommendation). Params: {"categories": ["PodRightSizing"|"RightSizing"|"K8sInstanceRecommendation"|"K8sSpotRecommendation"|"Configuration"|"Security"|"K8sMissingAttribute"], "rule_names": ["vertical_rightsize"|"horizontal_rightsize"|"pvc_rightsize"|"continuous_rightsize"|"replica_right_sizing"|"Spot instance recommendation"|"Abandoned resource"], "clusters": ["string",...], "filter": "jinja2 (optional)"}. Filter and tasks see the recommendation event — fields: category, rule_name, cluster, resource_id, estimated_savings, severity, recommendation_id. Tasks read it via {{ Inputs.event.<field> }}.
 
 ## INPUT STRUCTURE:
@@ -1166,7 +1181,13 @@ CRITICAL RULES:
 - Manual trigger: NO params (or empty object)
 - Schedule trigger: MUST have "cron" param. catchup_window (if set) uses Go time.ParseDuration syntax — valid units ns|us|ms|s|m|h ONLY; "7d"/"1w" are NOT supported (use "168h" for 7 days); compound values like "1h30m" ARE valid
 - Webhook trigger: MUST have "integration_name". Filter (if any) MUST render to literal "true" or "1" — use {{ <expr> }}, never a raw boolean
-- Event trigger: MUST have AT LEAST ONE of "event_type" OR "filter". event_type may be a string or an array
+- Event trigger: MUST have AT LEAST ONE of "event_type" OR "filter". event_type may be a string or an array. Before authoring an event trigger, CALL get_event_trigger_schema to get the real fields, the live label keys, and a sample event — never guess. Hard rules that cause silently-dead triggers if broken:
+  - Use ONLY documented event.<field> names. There is NO event.reason and NO event.message — for k8s reasons (OOMKilled, CrashLoopBackOff) match event.title / event.description / labels.alertname instead.
+  - The filter references event.<field> at ROOT, NOT {{ Inputs.event.<field> }} (Inputs is task-scope only; using it in a filter never matches).
+  - event.cluster is a cluster NAME (e.g. "prod-cluster"), NEVER an account/cluster UUID — do not compare it to a UUID.
+  - For severity use event.computed_priority (P0|P1|P2|P3) or event.computed_score (0-100), NOT a guessed label like event.labels.nb_triage. Add {{ event.nb_status == 'OPEN' }} to skip duplicates.
+  - For AI analysis/RCA, add an llm.event_investigate task and reference its output — there is no event.labels analysis/reason field.
+  - event_type must be a REAL registered type (confirm via get_event_trigger_schema); do not invent values like "incident.resolved" or "db.connection.spike".
 - Optimization trigger: all params optional (categories[], rule_names[], clusters[], filter). Empty = match every recommendation
 - TRIGGER PAYLOAD ACCESS IN TASKS:
   - Manual/Schedule: user inputs → {{ Inputs.<key> }}
@@ -1282,6 +1303,7 @@ THEN, ALWAYS:
 
 RULES:
 - Change only what is NECESSARY. Preserve existing task IDs, dependencies, and logic that the request does not touch.
+- EVENT TRIGGERS: if the change touches an event trigger or its filter, CALL get_event_trigger_schema first. The filter sees event.<field> at ROOT (never Inputs.event). There is NO event.reason / event.message (use title/description/labels.alertname); event.cluster is a NAME not a UUID; for severity use event.computed_priority/computed_score (+ {{ event.nb_status == 'OPEN' }} to skip duplicates), not a guessed label; for AI analysis add an llm.event_investigate task; never invent event_type or label keys.
 - Jinja2 references: {{ Tasks['task-id'].output.<field> }} — check get_task_schema output_schema for the correct field name.
 - TEMPLATES ARE JINJA2 ONLY: a parse error like invalid expression ... near "*" means a JMESPath/JSONPath construct ([*], [?...], .., @) was used inside {{ }}. Jinja2 has NO list projection. Add an upstream scripting.run_script (python) task that produces the derived scalar, then reference {{ Tasks['<that-task>'].output.data }}.
 - Integration IDs: {{ Configs.<type>_integration_id }}. Integer values: use 5, NOT 5.0.
@@ -2170,7 +2192,7 @@ TRIGGER TYPES AND THEIR REQUIRED PARAMETERS:
 - "manual" → No params allowed. User runs the automation from the UI on demand. User-supplied inputs are read in tasks via {{ Inputs.<key> }}.
 - "schedule" → Requires: cron (5-field UTC string, e.g. "0 9 * * MON-FRI"). Optional: overlap_policy ("Skip"|"BufferOne"|"BufferAll"|"AllowAll"|"CancelOther"|"TerminateOther"; default "Skip"), catchup_window (Go time.ParseDuration syntax; valid units ns|us|ms|s|m|h ONLY; day/week units like "7d" are NOT supported — use hours: "168h" = 7 days; compound durations like "1h30m" ARE valid; default "60s"). IMPORTANT: Always set overlap_policy: "Skip" for monitoring automations to prevent overlapping runs.
 - "webhook" → Requires: integration_name (string — must reference a workflow_webhook integration configured on the account). Optional: secret (string), filter (Jinja2 expression on payload, must render to literal "true" or "1"). Filter context: {{ webhook_payload }} at root. Tasks read the request body via {{ Inputs.webhook_payload }}.
-- "event" → Requires AT LEAST ONE of: event_type (string or [string,...]) OR filter (Jinja2). Filter context: {{ event.<field> }} at root — known fields: event_type, source, cluster, subject_namespace, subject_name, priority (HIGH|MEDIUM|LOW|INFO|DEBUG), status, labels. Tasks read the event via {{ Inputs.event.<field> }}.
+- "event" → Requires AT LEAST ONE of: event_type (string or [string,...]) OR filter (Jinja2); optional "on" lifecycle phase (default event.created). Filter context: {{ event.<field> }} at root (NOT Inputs.event). Real fields: event_type, source, title, description, category, priority (HIGH|MEDIUM|LOW|INFO|DEBUG), status, nb_status (OPEN|DUPLICATE|SUPPRESSED|...), computed_priority (P0-P3, may be absent), computed_score (0-100, may be absent), subject_type/name/namespace/node, cluster (a NAME, not a UUID), fingerprint, cloud_resource_id, labels (free-form alert labels — keys are source-specific, get them from get_event_trigger_schema). NO event.reason/event.message. For severity use computed_priority/computed_score (+ nb_status=='OPEN'); for AI analysis add an llm.event_investigate task. Tasks read the event via {{ Inputs.event.<field> }}.
 - "optimization" → Fires on new K8s/cost optimization recommendations. All params optional (empty = match every recommendation). Optional: categories ([string,...] from: PodRightSizing, RightSizing, K8sInstanceRecommendation, K8sSpotRecommendation, Configuration, Security, K8sMissingAttribute), rule_names ([string,...] from: vertical_rightsize, horizontal_rightsize, pvc_rightsize, continuous_rightsize, replica_right_sizing, "Spot instance recommendation", "Abandoned resource"), clusters ([string,...]), filter (Jinja2). Tasks read the recommendation via {{ Inputs.event.<field> }} — known fields: category, rule_name, cluster, resource_id, estimated_savings, severity, recommendation_id.
 
 COMMON TASK TYPES — WHEN TO USE EACH:
@@ -2618,6 +2640,11 @@ func getWorkflowToolDescriptions() string {
 			Name:        "get_task_schema",
 			Description: "Get the parameter schema for a specific task type. Call this BEFORE adding a task to understand its required and optional parameters.",
 			Params:      `{"task_type": "notifications.im"}`,
+		},
+		{
+			Name:        "get_event_trigger_schema",
+			Description: "Get the real event-trigger field reference for THIS account: the available event.<field> names, lifecycle phases for params.on, severity fields, AND the actual label keys + a sample event observed on recent events. ALWAYS call this BEFORE writing an event trigger or its filter, so you reference real fields/labels instead of guessing (guessed fields make the trigger silently never fire).",
+			Params:      `{}`,
 		},
 		{
 			Name:        "validate",
@@ -3195,6 +3222,206 @@ func (a *WorkflowBuilderAgent) toolGetTaskSchema(args map[string]interface{}, ca
 	return fmt.Sprintf("Task type '%s' not found in available types. Check the type name and try again.", taskType)
 }
 
+// getEventTriggerSchemaReference returns the authoritative, hand-maintained reference for what an
+// event-trigger filter and its tasks can read. It is the single source of truth the builder lacked —
+// the event payload published to the runbook engine is a flat map, so the fields below are exactly
+// the keys an author may reference as event.<field> (filter) / Inputs.event.<field> (tasks). Kept in
+// one place so the tool and tests share it; the get_event_trigger_schema tool appends live, per-account
+// label keys + a sample event on top of this.
+func getEventTriggerSchemaReference() string {
+	return `EVENT TRIGGER FIELD REFERENCE
+
+The filter reads the event at ROOT: {{ event.<field> }}. Tasks read the same event via {{ Inputs.event.<field> }}.
+NEVER use {{ Inputs.event }} inside the FILTER — the filter context has no "Inputs" and will never match.
+
+Top-level event.<field> (these are the ONLY top-level fields — do NOT invent others; there is NO event.reason and NO event.message):
+- event_type            string  — the registered event/aggregation type (match with the trigger's event_type param)
+- source                string  — origin (e.g. prometheus, pagerduty_webhook, github_webhook)
+- title, description, failure, finding_type, category   string — human-readable text; match k8s reasons (OOMKilled, CrashLoopBackOff) here, NOT in a non-existent event.reason
+- priority              HIGH|MEDIUM|LOW|INFO|DEBUG — COARSE; most events are HIGH, so a weak severity gate on its own
+- status                FIRING|RESOLVED|CLOSED
+- nb_status             OPEN|DUPLICATE|SUPPRESSED|RESOLVED|ACTION_REQUIRED|DROPPED — add {{ event.nb_status == 'OPEN' }} to skip duplicates/suppressed
+- computed_priority     P0|P1|P2|P3 — the REAL triage tier (may be ABSENT for un-scored events)
+- computed_score        integer 0-100 — P0>=80, P1 60-79, P2 40-59, P3<40 (may be ABSENT)
+- subject_type, subject_name, subject_namespace, subject_node, subject_owner, subject_owner_kind, service_key  string
+- cluster               string — a cluster NAME (e.g. "prod-cluster"), NEVER an account/cluster UUID
+- fingerprint, cloud_resource_id, principal, aggregation_key  string
+- labels                map — free-form alert labels; keys are source-specific (see LIVE LABELS below). Reference as event.labels.<key>. Do NOT guess keys.
+
+SEVERITY: to fire on high-severity incidents use computed_priority/computed_score, e.g.
+  {{ event.computed_priority in ['P0','P1'] }}   or   {{ (event.computed_score | default(0) | int) >= 80 }}
+NOT a guessed label. There is no numeric triage label.
+
+LLM ANALYSIS / RCA is NOT an event field. To include AI analysis, add an "llm.event_investigate" task and reference its output.
+If the analysis must already be ready, set the trigger's "on" to investigation.completed.
+
+params.on (lifecycle phase — WHEN the workflow fires; default event.created):
+  event.created, event.triaged, event.updated, investigation.completed, event.resolved, event.closed
+
+event_type must be a REAL registered type — confirm it appears in LIVE below; never invent values.`
+}
+
+// toolGetEventTriggerSchema returns the authoritative event-trigger reference plus, best-effort, the
+// real label keys and a sample event observed on recent events for THIS account — so the agent grounds
+// event.<field>/event.labels.<key> references in reality instead of guessing. The live augmentation is
+// best-effort: if the events store is unreachable it degrades to the static reference and never errors.
+func (a *WorkflowBuilderAgent) toolGetEventTriggerSchema(ctx *security.RequestContext) string {
+	var sb strings.Builder
+	sb.WriteString(getEventTriggerSchemaReference())
+
+	if live := a.fetchLiveEventTriggerHints(ctx); live != "" {
+		sb.WriteString("\n\nLIVE — observed on recent events for THIS account (use these real values; do not invent others):\n")
+		sb.WriteString(live)
+	} else {
+		sb.WriteString("\n\nLIVE: (no recent-event sample available — reference only the documented fields above and do not invent label keys.)")
+	}
+	return sb.String()
+}
+
+// fetchLiveEventTriggerHints queries the events store for the real label-key vocabulary, the observed
+// event_type / source / computed_priority values, and one sample event for the current account. The
+// scan is bounded (most-recent 500 events) and account-scoped. Best-effort: any failure returns ""
+// so the build is never blocked.
+func (a *WorkflowBuilderAgent) fetchLiveEventTriggerHints(ctx *security.RequestContext) string {
+	if a.accountId == "" {
+		return ""
+	}
+	dbManager, err := common.GetDatabaseManager(common.Metastore)
+	if err != nil || dbManager == nil || dbManager.Db == nil {
+		if ctx != nil {
+			ctx.GetLogger().Warn("workflow_builder: get_event_trigger_schema live hints unavailable (no metastore)", "error", err)
+		}
+		return ""
+	}
+
+	var sb strings.Builder
+
+	// Top label keys across the most-recent object-typed labels for this account.
+	const labelKeysQuery = `
+SELECT k AS label_key, count(*) AS n
+FROM (
+  SELECT labels FROM events
+  WHERE cloud_account_id = $1 AND jsonb_typeof(labels) = 'object'
+  ORDER BY created_at DESC LIMIT 500
+) e, jsonb_object_keys(e.labels) AS k
+GROUP BY k ORDER BY n DESC LIMIT 40`
+	if rows, qErr := dbManager.Db.Queryx(labelKeysQuery, a.accountId); qErr == nil {
+		var keys []string
+		for rows.Next() {
+			var k string
+			var n int
+			if rows.Scan(&k, &n) == nil {
+				keys = append(keys, k)
+			}
+		}
+		_ = rows.Close()
+		if len(keys) > 0 {
+			fmt.Fprintf(&sb, "Real label keys (reference as event.labels.<key>): %s\n", strings.Join(keys, ", "))
+		}
+	} else if ctx != nil {
+		ctx.GetLogger().Warn("workflow_builder: live label-key query failed", "error", qErr)
+	}
+
+	// Observed event_type / source / computed_priority values (so the agent matches real ones).
+	const distinctValsQuery = `
+SELECT 'event_type' AS field, event_type AS val FROM events WHERE cloud_account_id = $1 AND event_type <> '' GROUP BY event_type ORDER BY count(*) DESC LIMIT 15`
+	if rows, qErr := dbManager.Db.Queryx(distinctValsQuery, a.accountId); qErr == nil {
+		var vals []string
+		for rows.Next() {
+			var field, val string
+			if rows.Scan(&field, &val) == nil && val != "" {
+				vals = append(vals, val)
+			}
+		}
+		_ = rows.Close()
+		if len(vals) > 0 {
+			fmt.Fprintf(&sb, "Real event_type values: %s\n", strings.Join(vals, ", "))
+		}
+	}
+
+	return strings.TrimSpace(sb.String())
+}
+
+// knownEventTriggerFields is the set of top-level event.<field> names an event-trigger filter (and
+// its tasks) may reference — mirrors getEventTriggerSchemaReference and the flat event payload the
+// runbook engine publishes. Used to lint filters for references to fields that do not exist, which is
+// the dominant cause of silently-dead event triggers in real builder output.
+var knownEventTriggerFields = map[string]bool{
+	"event_type": true, "source": true, "title": true, "description": true, "failure": true,
+	"finding_type": true, "category": true, "priority": true, "status": true, "nb_status": true,
+	"computed_priority": true, "computed_score": true, "subject_type": true, "subject_name": true,
+	"subject_namespace": true, "subject_node": true, "subject_owner": true, "subject_owner_kind": true,
+	"service_key": true, "cluster": true, "fingerprint": true, "cloud_resource_id": true,
+	"principal": true, "aggregation_key": true, "labels": true, "finding_id": true, "evidences": true,
+	// triage/score columns that may also be carried on the payload map:
+	"urgency": true, "score_factors": true, "score_confidence": true,
+	// identifiers carried on the payload map though not headline filter fields:
+	"id": true, "account_id": true, "cloud_account_id": true, "tenant": true, "lifecycle_phase": true,
+	"created_at": true, "starts_at": true, "ends_at": true,
+}
+
+// eventFieldRefRegex captures the top-level field in an `event.<field>` reference (the first segment
+// only — for `event.labels.alertname` it captures `labels`, which is correct since label keys are
+// free-form and cannot be linted statically).
+var eventFieldRefRegex = regexp.MustCompile(`\bevent\.([a-zA-Z_][a-zA-Z0-9_]*)`)
+
+// lintEventTriggers inspects each event-trigger filter for the mistakes that make a trigger silently
+// never fire — patterns observed across real builder output: `Inputs.event` used in a filter (filters
+// read `event.*` at root), references to non-existent top-level fields (e.g. event.reason /
+// event.message), and comparing event.cluster (a name) to a UUID. Returns human-readable issues;
+// empty when the event triggers look sound. Non-event triggers are ignored. Label KEYS are not linted
+// (they are free-form; get_event_trigger_schema surfaces the real ones).
+func lintEventTriggers(workflow map[string]interface{}) []string {
+	var triggers []interface{}
+	if def, ok := workflow["definition"].(map[string]interface{}); ok {
+		triggers, _ = def["triggers"].([]interface{})
+	}
+	if triggers == nil {
+		triggers, _ = workflow["triggers"].([]interface{})
+	}
+
+	var issues []string
+	for _, rt := range triggers {
+		t, ok := rt.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if tt, _ := t["type"].(string); tt != "event" {
+			continue
+		}
+		params, _ := t["params"].(map[string]interface{})
+		filter, _ := params["filter"].(string)
+		if strings.TrimSpace(filter) == "" {
+			continue
+		}
+
+		if strings.Contains(filter, "Inputs.event") {
+			issues = append(issues, "trigger filter uses `Inputs.event` — a filter reads the event at root as `event.<field>` (Inputs is task-scope only, so the filter never matches).")
+		}
+		seen := map[string]bool{}
+		for _, m := range eventFieldRefRegex.FindAllStringSubmatch(filter, -1) {
+			field := m[1]
+			if knownEventTriggerFields[field] || seen[field] {
+				continue
+			}
+			seen[field] = true
+			issues = append(issues, fmt.Sprintf("trigger filter references `event.%s`, which is not a real event field — the trigger will never fire. Call get_event_trigger_schema for the available fields (for k8s reasons use event.title / event.description / event.labels.alertname).", field))
+		}
+		if strings.Contains(filter, "event.cluster") && uuidRegex.MatchString(filter) {
+			issues = append(issues, "trigger filter compares `event.cluster` to a UUID — cluster is a NAME (e.g. \"prod-cluster\"), never an account/cluster UUID.")
+		}
+	}
+	return issues
+}
+
+// eventTriggerLintMessage formats lint issues into a validation-style failure the agent must fix
+// before finalizing, so a structurally-valid-but-dead trigger is not saved as ACTIVE.
+func eventTriggerLintMessage(issues []string) string {
+	return "Validation FAILED (event trigger): the structure is valid but the event trigger would never fire as written:\n- " +
+		strings.Join(issues, "\n- ") +
+		"\n\nFix the trigger filter (call get_event_trigger_schema for the real fields and label keys), then call validate again."
+}
+
 // toolValidate validates the current working workflow via the runbook-server API.
 func (a *WorkflowBuilderAgent) toolValidate(ctx *security.RequestContext) string {
 	if a.state.WorkingWorkflow == nil {
@@ -3203,6 +3430,10 @@ func (a *WorkflowBuilderAgent) toolValidate(ctx *security.RequestContext) string
 
 	// Apply type coercion before validation
 	coerceWorkflowTypes(a.state.WorkingWorkflow)
+
+	// Local event-trigger lint: the server validates structure but accepts filters that reference
+	// non-existent fields (which save as ACTIVE-but-dead). Surface those so the agent fixes them.
+	triggerIssues := lintEventTriggers(a.state.WorkingWorkflow)
 
 	_, err := tools.DoRunbookRequest("POST", "workflows/validate", a.state.WorkingWorkflow, a.accountId, ctx.GetSecurityContext().GetTenantId(), ctx.GetSecurityContext().GetUserId())
 	if err != nil {
@@ -3242,11 +3473,17 @@ func (a *WorkflowBuilderAgent) toolValidate(ctx *security.RequestContext) string
 			if isRealTemplateSyntaxError(errMsg) || !referencesRuntimeValue(errMsg) {
 				return fmt.Sprintf("Validation FAILED: %s\n\nThis template expression could not be evaluated and does not clearly reference a runtime value, so it is treated as a real error. Fix the template (check filters, expression syntax, and that any Tasks/Configs/Inputs reference is correct), then call validate again.", errMsg)
 			}
+			if len(triggerIssues) > 0 {
+				return eventTriggerLintMessage(triggerIssues)
+			}
 			return "Validation OK (with template warnings). Some template expressions cannot be evaluated during validation because they reference runtime values (task outputs, configs, inputs). They will resolve correctly at execution time. The automation structure is valid. Proceed to finalize."
 		}
 		return fmt.Sprintf("Validation FAILED: %s", errMsg)
 	}
 
+	if len(triggerIssues) > 0 {
+		return eventTriggerLintMessage(triggerIssues)
+	}
 	return "Validation OK. The automation is valid."
 }
 
@@ -3458,6 +3695,8 @@ func (a *WorkflowBuilderAgent) executeWorkflowTool(ctx *security.RequestContext,
 		return a.toolListTasks(args)
 	case "get_task_schema":
 		return a.toolGetTaskSchema(args, cachedTaskTypes)
+	case "get_event_trigger_schema":
+		return a.toolGetEventTriggerSchema(ctx)
 	case "validate":
 		return a.toolValidate(ctx)
 	case "dry_run":
@@ -3474,7 +3713,7 @@ func (a *WorkflowBuilderAgent) executeWorkflowTool(ctx *security.RequestContext,
 	case "get_execution":
 		return a.toolGetExecution(ctx, args)
 	default:
-		return fmt.Sprintf("Unknown tool: '%s'. Available tools: init_workflow, add_task, get_task, modify_task, delete_task, list_tasks, get_task_schema, validate, dry_run, finalize, list_executions, get_execution", toolName)
+		return fmt.Sprintf("Unknown tool: '%s'. Available tools: init_workflow, add_task, get_task, modify_task, delete_task, list_tasks, get_task_schema, get_event_trigger_schema, validate, dry_run, finalize, list_executions, get_execution", toolName)
 	}
 }
 

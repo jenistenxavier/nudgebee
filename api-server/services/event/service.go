@@ -2418,19 +2418,39 @@ func processTriage(ctx *security.RequestContext, newEvent map[string]any) error 
 		return nil // Don't fail the entire pipeline
 	}
 
-	// Propagate post-triage nb_status back into newEvent so downstream
-	// processors (notably llm.ProcessEvent's suppressed-skip gate) see the
-	// classification triage just applied. triage.ProcessEvent issues a SQL
-	// UPDATE for nb_status without mutating the in-memory event struct, so
-	// we re-read here. Combined with PostProcessEvent running triage before
-	// other processors, this closes the same-batch race where llm could
-	// publish before triage flipped nb_status to SUPPRESSED/DROPPED.
-	var nbStatus sql.NullString
-	if err := dbms.Db.GetContext(ctx.GetContext(), &nbStatus,
-		`SELECT nb_status FROM events WHERE id = $1`, eventId); err != nil {
-		ctx.GetLogger().Warn("triage: failed to refresh post-triage nb_status", "error", err, "event_id", eventId)
-	} else if nbStatus.Valid {
-		newEvent["nb_status"] = nbStatus.String
+	// Propagate post-triage classification back into newEvent so downstream
+	// processors (notably llm.ProcessEvent's suppressed-skip gate) AND event-trigger
+	// workflows see what triage just applied. triage.ProcessEvent issues SQL UPDATEs
+	// without mutating the in-memory event struct, so we re-read here. Combined with
+	// PostProcessEvent running triage before other processors, this closes the
+	// same-batch race where llm could publish before triage flipped nb_status to
+	// SUPPRESSED/DROPPED.
+	//
+	// computed_score / computed_priority are carried so event-trigger workflows can
+	// filter on the triage severity (e.g. {{ event.computed_priority in ['P0','P1'] }}
+	// or {{ event.computed_score | int >= 80 }}). They are the ONLY triage-severity
+	// signal a workflow filter can reach — the event payload published to the runbook
+	// exchange is exactly this map, and these keys were previously absent, which forced
+	// authors to invent non-existent labels like event.labels.nb_triage. They may be
+	// null for un-scored / legacy events, so the keys are set only when present.
+	var triageClassification struct {
+		NbStatus         sql.NullString `db:"nb_status"`
+		ComputedScore    sql.NullInt64  `db:"computed_score"`
+		ComputedPriority sql.NullString `db:"computed_priority"`
+	}
+	if err := dbms.Db.GetContext(ctx.GetContext(), &triageClassification,
+		`SELECT nb_status, computed_score, computed_priority FROM events WHERE id = $1`, eventId); err != nil {
+		ctx.GetLogger().Warn("triage: failed to refresh post-triage classification", "error", err, "event_id", eventId)
+	} else {
+		if triageClassification.NbStatus.Valid {
+			newEvent["nb_status"] = triageClassification.NbStatus.String
+		}
+		if triageClassification.ComputedScore.Valid {
+			newEvent["computed_score"] = triageClassification.ComputedScore.Int64
+		}
+		if triageClassification.ComputedPriority.Valid {
+			newEvent["computed_priority"] = triageClassification.ComputedPriority.String
+		}
 	}
 
 	return nil
