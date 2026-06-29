@@ -362,3 +362,70 @@ func TestAlertFallbackToInstanceID(t *testing.T) {
 	// EventId fingerprint uses the fallback instance_id
 	assert.Equal(t, "projects/test-cluster-dev/alertPolicies/67890:gce_instance:3346138238029787252", event.EventId)
 }
+
+// TestCloudRunResourceIDFromServiceName verifies the resource-type-aware identifier
+// extraction: Cloud Run monitored resources carry service_name (not instance_*/pod_name),
+// which is exactly the label the Cloud Run log filter scopes by. Before the fix this
+// fell back to the incident ID and matched no logs/resources.
+func TestCloudRunResourceIDFromServiceName(t *testing.T) {
+	alertJSON := `{
+		"name": "projects/live-fullspectrum/alerts/0.o9i3cz02x353",
+		"state": "OPEN",
+		"openTime": "2026-06-26T12:37:20Z",
+		"resource": {
+			"type": "cloud_run_revision",
+			"labels": {
+				"project_id": "live-fullspectrum",
+				"location": "us-central1",
+				"service_name": "frontoffice-pre-alpha"
+			}
+		},
+		"policy": {
+			"name": "projects/live-fullspectrum/alertPolicies/9999",
+			"displayName": "Manual_Deployment_Notification"
+		}
+	}`
+
+	var alert Alert
+	require.NoError(t, json.Unmarshal([]byte(alertJSON), &alert))
+
+	account := &providers.Account{AccountNumber: "live-fullspectrum"}
+	event := convertAlertToEvent(nil, nil, &alert, account)
+
+	assert.Equal(t, "frontoffice-pre-alpha", event.Labels["gcp_event_instance"],
+		"Cloud Run resource id should come from resource.labels.service_name, not the incident id")
+	assert.NotEqual(t, event.Labels["gcp_incident_id"], event.Labels["gcp_event_instance"],
+		"resource id must not fall back to the incident id when service_name is present")
+	assert.Equal(t, "Cloud Run", event.Labels["gcp_service_name"])
+	assert.Equal(t, "us-central1", event.Labels["gcp_region"], "location label should populate gcp_region")
+}
+
+// TestResourceIDFallsBackToIncidentWhenNoIdentifier verifies the downstream guard's
+// premise: when the alert payload carries no resource-scoped identifier, gcp_event_instance
+// equals gcp_incident_id, which the enrichers detect and treat as "unknown".
+func TestResourceIDFallsBackToIncidentWhenNoIdentifier(t *testing.T) {
+	alertJSON := `{
+		"name": "projects/full-auth/alerts/0.o9i8yjzr6wbk",
+		"state": "OPEN",
+		"openTime": "2026-06-26T16:42:32Z",
+		"resource": {
+			"type": "cloud_run_revision",
+			"labels": {"project_id": "full-auth"}
+		},
+		"metric": {"type": "logging.googleapis.com/user/log4j_exploits"},
+		"policy": {
+			"name": "projects/full-auth/alertPolicies/6486795358793071263",
+			"displayName": "Log4j Vulnerability Alert"
+		}
+	}`
+
+	var alert Alert
+	require.NoError(t, json.Unmarshal([]byte(alertJSON), &alert))
+
+	account := &providers.Account{AccountNumber: "full-auth"}
+	event := convertAlertToEvent(nil, nil, &alert, account)
+
+	assert.Equal(t, "0.o9i8yjzr6wbk", event.Labels["gcp_incident_id"])
+	assert.Equal(t, event.Labels["gcp_incident_id"], event.Labels["gcp_event_instance"],
+		"with no resource identifier in the payload, gcp_event_instance falls back to the incident id")
+}

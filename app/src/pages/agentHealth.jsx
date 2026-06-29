@@ -40,6 +40,7 @@ const AgentHealth = () => {
     isTracesManagerConnected: false,
     tracesUrl: '',
     isOpenCostConnected: false,
+    isOpenCostServerSide: false,
     opencostUrl: '',
     isNodeAgentConnected: false,
     nodeAgentCount: 0,
@@ -171,6 +172,10 @@ const AgentHealth = () => {
               logsProvider: acc.connection_status?.logsConnectionProvider ?? '',
               logsProviderUrl: acc.connection_status?.logProviderUrl ?? '',
               isOpenCostConnected: (isAgentActive && acc.connection_status?.opencostConnection) ?? false,
+              // opencostServerSide is stamped by the backend spend sync when OpenCost is collected
+              // server-side (post-migration default, agent OpenCost off) — surface that rather than
+              // "Disconnected".
+              isOpenCostServerSide: (isAgentActive && acc.connection_status?.opencostServerSide) ?? false,
               opencostUrl: acc.connection_status?.opencostUrl ?? '',
               isNodeAgentConnected: (isAgentActive && acc.connection_status?.nodeAgentConnection) ?? false,
               nodeAgentCount: acc.connection_status?.nodeAgentCount ?? 0,
@@ -502,8 +507,15 @@ const AgentHealth = () => {
                   <li>
                     <b>OpenCost - </b>
                     <ul>
-                      <li>Status - {agentFeatures.isOpenCostConnected ? 'Connected' : 'Disconnected'}</li>
-                      <li>URL - {agentFeatures.opencostUrl}</li>
+                      <li>
+                        Status -{' '}
+                        {agentFeatures.isOpenCostConnected
+                          ? 'Connected'
+                          : agentFeatures.isOpenCostServerSide
+                          ? 'Managed server-side'
+                          : 'Disconnected'}
+                      </li>
+                      {agentFeatures.isOpenCostConnected && <li>URL - {agentFeatures.opencostUrl}</li>}
                     </ul>
                   </li>
                   <li>

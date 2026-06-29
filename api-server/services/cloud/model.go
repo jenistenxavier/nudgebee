@@ -43,13 +43,14 @@ type QueryMetricsResponse struct {
 }
 
 type MetricItem struct {
-	Name        string      `json:"name"`
-	Statistics  string      `json:"statistics"`
-	ResourceId  string      `json:"resource_id"`
-	Values      []float64   `json:"values"`
-	Timestamps  []time.Time `json:"timestamps"`
-	Region      string      `json:"region"`
-	ServiceName string      `json:"service_name"`
+	Name        string            `json:"name"`
+	Statistics  string            `json:"statistics"`
+	ResourceId  string            `json:"resource_id"`
+	Values      []float64         `json:"values"`
+	Timestamps  []time.Time       `json:"timestamps"`
+	Region      string            `json:"region"`
+	ServiceName string            `json:"service_name"`
+	Labels      map[string]string `json:"labels,omitempty"`
 }
 
 type ListMetricsRequest struct {
@@ -201,9 +202,10 @@ type QueryLogResponse struct {
 }
 
 type LogMessage struct {
-	Message   string     `json:"message"`
-	Timestamp int64      `json:"timestamp"`
-	Labels    []LogLabel `json:"labels"`
+	Message    string         `json:"message"`
+	Timestamp  int64          `json:"timestamp"`
+	Labels     []LogLabel     `json:"labels"`
+	Attributes map[string]any `json:"attributes,omitempty"`
 }
 
 type LogLabel struct {
@@ -315,4 +317,22 @@ type ApplyCommandRequest struct {
 type ApplyCommandResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+}
+
+type ExecuteCloudCommandRequest struct {
+	AccountId        string   `json:"account_id" validate:"required"`
+	Commands         []string `json:"commands" validate:"required,min=1"`
+	RecommendationId string   `json:"recommendation_id"`
+	ResolutionId     string   `json:"resolution_id"`
+}
+
+type CommandResult struct {
+	Command string `json:"command"`
+	Status  string `json:"status"` // SUCCESS | FAILED | NOT_EXECUTED
+	Output  string `json:"output,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+type ExecuteCloudCommandResponse struct {
+	Results []CommandResult `json:"results"`
 }

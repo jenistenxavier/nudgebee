@@ -1,5 +1,7 @@
 import { Box, Typography, Divider, CircularProgress, Table, TableBody, TableCell, TableContainer, TableHead, TableRow } from '@mui/material';
 import { useState, useEffect } from 'react';
+import { useEffectiveRecommendation } from '@hooks/useEffectiveRecommendation';
+import { Select as DsSelect } from '@components1/ds/Select';
 import { ds } from 'src/utils/colors';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
 import DragHandleIcon from '@mui/icons-material/DragHandle';
@@ -11,12 +13,16 @@ import { Label } from '@components1/ds/Label';
 import recommendationApi from '@api1/recommendation';
 import { interpolateMitigations } from '@api1/recommendation/data';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
-import { safeParseJSON, formatRuleName } from './utils';
+import { formatRuleName } from './utils';
+import ApplyMitigationModal from '@components1/cloudaccount/ApplyMitigationModal';
+import { hasWriteAccess } from '@lib/auth';
 
 interface DetailsPanelProps {
   fullRecommendation: any;
-  accounts?: Record<string, { name: string; cloud_provider: string }>;
+  accounts?: Record<string, { name: string; cloud_provider: string; account_access?: string }>;
 }
+
+const RESOLVED_STATUSES = new Set(['Closed', 'Dismissed', 'Archive']);
 
 const DetailsPanel = ({ fullRecommendation: rec, accounts = {} }: DetailsPanelProps) => {
   const [details, setDetails] = useState<any>(null);
@@ -24,7 +30,18 @@ const DetailsPanel = ({ fullRecommendation: rec, accounts = {} }: DetailsPanelPr
 
   const category = rec?.category || '';
   const ruleName = rec?.rule_name || '';
-  const accountName = accounts[rec?.account_id]?.name || '';
+  const accountEntry = accounts[rec?.account_id];
+  const accountName = accountEntry?.name || '';
+  const cloudProvider = accountEntry?.cloud_provider || '';
+
+  const isActionableStatus = !rec?.status || !RESOLVED_STATUSES.has(rec.status);
+  const canExecuteCommand =
+    accountEntry?.account_access !== 'readonly' &&
+    hasWriteAccess(rec?.account_id) &&
+    isActionableStatus &&
+    ['aws', 'azure', 'gcp'].includes(cloudProvider.toLowerCase());
+
+  const { alternateOptions, selectedAlternateType, setSelectedAlternateType, effectiveRecommendation } = useEffectiveRecommendation(rec);
 
   useEffect(() => {
     if (!category || !ruleName) {
@@ -47,9 +64,9 @@ const DetailsPanel = ({ fullRecommendation: rec, accounts = {} }: DetailsPanelPr
     );
   }
 
-  const mitigations = interpolateMitigations(details?.mitigations, rec);
-  const recData = safeParseJSON(rec.recommendation);
-  const fallback = extractFallbackContent(recData, rec);
+  const mitigations = interpolateMitigations(details?.mitigations, effectiveRecommendation);
+  const recData = effectiveRecommendation.recommendation;
+  const fallback = extractFallbackContent(recData, effectiveRecommendation);
 
   // Resolved values — catalog wins, fallback fills the gaps
   const title = details?.title || fallback.title || formatRuleName(ruleName);
@@ -121,9 +138,27 @@ const DetailsPanel = ({ fullRecommendation: rec, accounts = {} }: DetailsPanelPr
         <>
           <Divider />
           <Box>
-            <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700], mb: ds.space[2] }}>
-              Remediation Steps
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: ds.space[2] }}>
+              <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>Remediation Steps</Typography>
+              <ApplyMitigationModal
+                markdowns={mitigations.join('\n\n')}
+                accountId={rec?.account_id}
+                recommendationId={rec?.id}
+                canExecute={canExecuteCommand}
+              />
+            </Box>
+            {alternateOptions.length > 0 && (
+              <Box sx={{ mb: ds.space[3], maxWidth: 360 }}>
+                <DsSelect
+                  id='details-alternate-instance-type-selector'
+                  label='Target Instance Type'
+                  options={alternateOptions}
+                  value={selectedAlternateType}
+                  onChange={(v) => setSelectedAlternateType(v)}
+                  clearable={false}
+                />
+              </Box>
+            )}
             <Box
               sx={{
                 p: '10px',
