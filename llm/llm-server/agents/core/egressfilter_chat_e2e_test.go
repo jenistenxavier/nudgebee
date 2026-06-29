@@ -104,7 +104,7 @@ func enableEgressFilterForTest(t *testing.T, mode egressfilter.Mode) {
 	t.Cleanup(func() {
 		config.Config.LlmServerEgressFilterEnabled = false
 		config.Config.LlmServerEgressFilterSecretsEnabled = false
-		config.Config.LlmServerEgressFilterSecretsMode = string(egressfilter.ModeAudit)
+		config.Config.LlmServerEgressFilterSecretsMode = string(egressfilter.ModeDetect)
 		InvalidateAllLLMClientCache()
 	})
 }
@@ -244,7 +244,7 @@ func TestE2E_EgressFilterChat_CleanQueryPassesThrough(t *testing.T) {
 // This is the safe-rollout mode operators flip to first.
 func TestE2E_EgressFilterChat_AuditMode_RecordsButForwards(t *testing.T) {
 	env := loadChatE2EEnv(t)
-	enableEgressFilterForTest(t, egressfilter.ModeAudit)
+	enableEgressFilterForTest(t, egressfilter.ModeDetect)
 
 	sc := security.NewRequestContextForTenantAccountAdmin(env.tenant, env.user, []string{env.account})
 	agent, ok := GetNBAgent(sc, "LLM", env.account, "")
@@ -289,7 +289,7 @@ func TestE2E_EgressFilterChat_AuditMode_RecordsButForwards(t *testing.T) {
 	}
 	var sawAuditEvent bool
 	for _, e := range events {
-		if e.Mode == egressfilter.ModeAudit {
+		if e.Mode == egressfilter.ModeDetect {
 			sawAuditEvent = true
 			assert.Contains(t, e.RuleIDs, "aws-access-key-id",
 				"audit-mode event must carry the rule that fired")

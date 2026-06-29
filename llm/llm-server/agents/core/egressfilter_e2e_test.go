@@ -173,7 +173,7 @@ func wrapRealProvider(t *testing.T, env e2eEnv, enabled bool, mode egressfilter.
 	t.Cleanup(func() {
 		config.Config.LlmServerEgressFilterEnabled = false
 		config.Config.LlmServerEgressFilterSecretsEnabled = false
-		config.Config.LlmServerEgressFilterSecretsMode = string(egressfilter.ModeAudit)
+		config.Config.LlmServerEgressFilterSecretsMode = string(egressfilter.ModeDetect)
 		InvalidateAllLLMClientCache()
 	})
 	model, err := GetLLMModel(env.provider, env.model, "", false, "")
@@ -270,7 +270,7 @@ func TestE2E_EgressFilter_RealProviderPassesCleanThrough_Enforce(t *testing.T) {
 // output via slog), but DOES NOT block. The real LLM is called.
 func TestE2E_EgressFilter_RealProviderAuditModeForwardsWithSecret(t *testing.T) {
 	env := loadE2EEnv(t)
-	wrapped := wrapRealProvider(t, env, true, egressfilter.ModeAudit)
+	wrapped := wrapRealProvider(t, env, true, egressfilter.ModeDetect)
 
 	msg := []llms.MessageContent{
 		llms.TextParts(llms.ChatMessageTypeHuman,

@@ -653,16 +653,18 @@ func init() {
 	viper.SetDefault("llm_cache_ttl_minutes", 10)
 	viper.SetDefault("llm_enable_caching", true)
 
-	// Outbound egressfilter — entire subsystem disabled by default. The master
-	// switch (llm_server_egressfilter_enabled) gates whether the LLM factory
-	// installs the wrapper at all; per-detector flags (e.g.
-	// llm_server_egressfilter_secrets_enabled) only apply when master is on.
-	// Default mode for any enabled detector is "audit" so a rollout never
-	// causes outage. Flip to "enforce" only after metrics confirm a clean
-	// false-positive baseline.
-	viper.SetDefault("llm_server_egressfilter_enabled", false)
-	viper.SetDefault("llm_server_egressfilter_secrets_enabled", false)
-	viper.SetDefault("llm_server_egressfilter_secrets_mode", "audit")
+	// Outbound egressfilter — wrapper installed and secrets detector on by
+	// default, so `metadata.egressfilter` is populated, the UI chip appears,
+	// and metrics fire out of the box. Mode defaults to "detect" so nothing
+	// is ever blocked; operators flip mode to "enforce" once their audit
+	// metrics show a clean FP baseline. When no ActionGate is registered,
+	// "enforce" silently degrades to "detect" (see
+	// security/egressfilter/action_gate.go). Master switch can still be
+	// flipped off explicitly if an operator doesn't want the wrapper
+	// installed at all.
+	viper.SetDefault("llm_server_egressfilter_enabled", true)
+	viper.SetDefault("llm_server_egressfilter_secrets_enabled", true)
+	viper.SetDefault("llm_server_egressfilter_secrets_mode", "detect")
 	// Required even though "" is the natural zero — viper.Unmarshal skips
 	// fields with no default set, so without this line the env var
 	// LLM_SERVER_EGRESSFILTER_ALLOWLIST is silently ignored in any
