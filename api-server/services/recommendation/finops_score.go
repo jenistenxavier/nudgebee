@@ -315,10 +315,26 @@ func RecomputeAllFinOpsScores(ctx *security.RequestContext) error {
 		return err
 	}
 
+	// resource_name + namespace are derived from the cloud_resourses join (the same
+	// source the recommendations view uses), NOT the raw recommendation JSONB: that
+	// JSONB's shape varies per rule type and usually omits the namespace entirely
+	// (e.g. pod_right_sizing keys by workload name and carries no namespace at all),
+	// so parsing it resolves nothing.
 	rows, err := dbms.Db.Queryx(`
-		SELECT id, tenant_id, cloud_account_id, category, rule_name, severity, estimated_savings, created_at, recommendation
-		FROM recommendation
-		WHERE status = 'Open'`)
+		SELECT
+			r.id, r.tenant_id, r.cloud_account_id, r.category, r.rule_name,
+			r.severity, r.estimated_savings, r.created_at,
+			cr.name AS resource_name,
+			CASE
+				WHEN cr.meta ->> 'namespace' IS NOT NULL THEN cr.meta ->> 'namespace'
+				WHEN cr.meta -> 'config' ->> 'namespace' IS NOT NULL THEN cr.meta -> 'config' ->> 'namespace'
+				WHEN r.recommendation -> 'spec' -> 'claimRef' ->> 'namespace' IS NOT NULL THEN r.recommendation -> 'spec' -> 'claimRef' ->> 'namespace'
+				WHEN r.recommendation -> 'metadata' ->> 'namespace' IS NOT NULL THEN r.recommendation -> 'metadata' ->> 'namespace'
+				ELSE r.recommendation ->> 'namespace'
+			END AS resource_k8s_namespace
+		FROM recommendation r
+		LEFT JOIN cloud_resourses cr ON cr.id = r.resource_id
+		WHERE r.status = 'Open'`)
 	if err != nil {
 		ctx.GetLogger().Error("error querying recommendations for score recompute", "error", err)
 		return err
@@ -348,17 +364,18 @@ func RecomputeAllFinOpsScores(ctx *security.RequestContext) error {
 	errCount := 0
 	for rows.Next() {
 		var (
-			id               string
-			tenantID         string
-			cloudAccountID   *string
-			category         string
-			ruleName         string
-			severity         *string
-			estimatedSavings *float32
-			createdAt        *time.Time
-			recJSON          []byte
+			id                string
+			tenantID          string
+			cloudAccountID    *string
+			category          string
+			ruleName          string
+			severity          *string
+			estimatedSavings  *float32
+			createdAt         *time.Time
+			resourceName      *string
+			resourceNamespace *string
 		)
-		if err := rows.Scan(&id, &tenantID, &cloudAccountID, &category, &ruleName, &severity, &estimatedSavings, &createdAt, &recJSON); err != nil {
+		if err := rows.Scan(&id, &tenantID, &cloudAccountID, &category, &ruleName, &severity, &estimatedSavings, &createdAt, &resourceName, &resourceNamespace); err != nil {
 			ctx.GetLogger().Error("error scanning recommendation row", "error", err)
 			errCount++
 			continue
@@ -374,9 +391,16 @@ func RecomputeAllFinOpsScores(ctx *security.RequestContext) error {
 		if cloudAccountID != nil {
 			accountID = *cloudAccountID
 		}
-		if len(recJSON) > 0 {
-			annotateBreakdownWithImpact(kgService, tenantID, accountID, recJSON, result.Breakdown, impactCache)
+		// Identity comes from the cloud_resourses join above; annotate no-ops
+		// when it's absent (non-k8s recs, or workloads not in the graph).
+		ns, name := "", ""
+		if resourceNamespace != nil {
+			ns = *resourceNamespace
 		}
+		if resourceName != nil {
+			name = *resourceName
+		}
+		annotateBreakdownWithImpact(kgService, tenantID, accountID, ns, name, result.Breakdown, impactCache)
 
 		breakdownJSON, err := json.Marshal(result.Breakdown)
 		if err != nil {
@@ -390,6 +414,10 @@ func RecomputeAllFinOpsScores(ctx *security.RequestContext) error {
 			band:      result.Band,
 			breakdown: string(breakdownJSON),
 		})
+	}
+	if err := rows.Err(); err != nil {
+		ctx.GetLogger().Error("error iterating recommendation rows for score recompute", "error", err)
+		return err
 	}
 
 	// Batch update using unnest — single query for all rows

@@ -1,14 +1,13 @@
 package recommendation
 
 import (
-	"encoding/json"
 	"strings"
 
 	"nudgebee/services/knowledge_graph/core"
 )
 
-// k8sRecRef is the minimal identity extracted from a recommendation needed to
-// locate its workload in the knowledge graph.
+// k8sRecRef is the minimal identity needed to locate a recommendation's workload
+// in the knowledge graph.
 type k8sRecRef struct {
 	Namespace string
 	Workload  string
@@ -20,43 +19,6 @@ type recommendationImpact struct {
 	Band    SafetyBand
 	Reason  string
 	Summary map[string]any
-}
-
-// extractK8sRecRef pulls namespace + workload name from a recommendation's JSONB
-// payload, tolerating the key variations across rule types (controller_name,
-// controllerName, a nested workload{} object, or a bare name). Returns ok=false
-// when identity is incomplete, so the caller degrades to an "unknown" safety band
-// rather than guessing.
-func extractK8sRecRef(rec map[string]any) (k8sRecRef, bool) {
-	ns := firstNonEmptyString(rec, "namespace")
-
-	// Some rules (e.g. health_check) nest a workload object.
-	if wl, ok := rec["workload"].(map[string]any); ok {
-		if ns == "" {
-			ns = firstNonEmptyString(wl, "namespace")
-		}
-		if name := firstNonEmptyString(wl, "name"); ns != "" && name != "" {
-			return k8sRecRef{Namespace: ns, Workload: name}, true
-		}
-	}
-
-	name := firstNonEmptyString(rec, "controller_name", "controllerName", "workload_name", "name")
-	if ns != "" && name != "" {
-		return k8sRecRef{Namespace: ns, Workload: name}, true
-	}
-	return k8sRecRef{}, false
-}
-
-// firstNonEmptyString returns the first key whose value is a non-blank string.
-func firstNonEmptyString(m map[string]any, keys ...string) string {
-	for _, k := range keys {
-		if v, ok := m[k].(string); ok {
-			if trimmed := strings.TrimSpace(v); trimmed != "" {
-				return trimmed
-			}
-		}
-	}
-	return ""
 }
 
 // resolveK8sWorkloadNodeID finds the knowledge-graph Workload node for a k8s
@@ -81,14 +43,10 @@ func resolveK8sWorkloadNodeID(kg *core.Service, tenantID, accountID string, ref 
 	return res.Nodes[0].ID, true
 }
 
-// annotateK8sRecommendationImpact resolves a k8s recommendation to its workload
+// resolveK8sRecommendationImpact resolves a k8s recommendation to its workload
 // node, computes the blast radius, and derives the safety band. ok=false means
 // the recommendation could not be resolved (caller should leave it unannotated).
-func annotateK8sRecommendationImpact(kg *core.Service, tenantID, accountID string, recPayload map[string]any) (recommendationImpact, bool) {
-	ref, ok := extractK8sRecRef(recPayload)
-	if !ok {
-		return recommendationImpact{}, false
-	}
+func resolveK8sRecommendationImpact(kg *core.Service, tenantID, accountID string, ref k8sRecRef) (recommendationImpact, bool) {
 	nodeID, ok := resolveK8sWorkloadNodeID(kg, tenantID, accountID, ref)
 	if !ok {
 		return recommendationImpact{}, false
@@ -112,28 +70,28 @@ func annotateK8sRecommendationImpact(kg *core.Service, tenantID, accountID strin
 }
 
 // annotateBreakdownWithImpact resolves a k8s recommendation's blast radius and
-// stamps safety_band + impact_summary into the score breakdown map. It is a no-op
-// when the recommendation can't be resolved (non-k8s, ambiguous, or absent from
-// the graph). Results are memoized per workload via cache.
-func annotateBreakdownWithImpact(kg *core.Service, tenantID, accountID string, recJSON []byte, breakdown map[string]any, cache map[string]*recommendationImpact) {
+// stamps safety_band + impact_summary into the score breakdown map. namespace and
+// workload are the recommendation's identity as the caller derived it from the
+// cloud_resourses join the recommendations view uses — NOT the raw recommendation
+// JSONB, whose shape varies per rule type and frequently omits the namespace. It
+// is a no-op when identity is incomplete (non-k8s), or the workload is ambiguous /
+// absent from the graph. Results are memoized per workload via cache.
+func annotateBreakdownWithImpact(kg *core.Service, tenantID, accountID, namespace, workload string, breakdown map[string]any, cache map[string]*recommendationImpact) {
 	if kg == nil || breakdown == nil {
 		return
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(recJSON, &payload); err != nil {
+	namespace = strings.TrimSpace(namespace)
+	workload = strings.TrimSpace(workload)
+	if namespace == "" || workload == "" {
 		return
 	}
-	ref, ok := extractK8sRecRef(payload)
-	if !ok {
-		return
-	}
-	key := tenantID + "|" + accountID + "|" + ref.Namespace + "|" + ref.Workload
+	key := tenantID + "|" + accountID + "|" + namespace + "|" + workload
 	imp, seen := cache[key]
 	if !seen {
 		// Cache the negative too (nil): a workload that can't be resolved once
 		// won't resolve for the next recommendation either, so don't re-run the
 		// search + traversal for every rec on the same unresolved workload.
-		if resolved, ok := annotateK8sRecommendationImpact(kg, tenantID, accountID, payload); ok {
+		if resolved, ok := resolveK8sRecommendationImpact(kg, tenantID, accountID, k8sRecRef{Namespace: namespace, Workload: workload}); ok {
 			imp = &resolved
 		}
 		cache[key] = imp
