@@ -1648,8 +1648,18 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 		}
 	}
 
-	// Step 4: Synthesize detailed response combining initial summary + investigation + log analysis.
-	// This is a soft step — failure falls back to initialSummary without failing the whole analysis.
+	// Step 4: synthesize. Skip when COMPLETED unless Regenerate — without
+	// this gate every re-dispatch inserts a duplicate user message (#31422).
+	existingDR, _ := eventAnalysisRepo.GetEventAnalysis(ctx, eventFingerprint, eventAggregationKey, request.AccountId, events.AnalysisTypeDetailedResponse)
+	if existingDR != nil && existingDR.Status == string(events.AnalysisStatusCompleted) && existingDR.Summary != "" && !request.Regenerate {
+		ctx.GetLogger().Info("analyzer: detailed response already completed, skipping synth", "event_id", request.EventId)
+		response.DetailedResponse = existingDR.Summary
+		if response.Investigation == "" {
+			response.Investigation = investigationText
+		}
+		return response, nil
+	}
+
 	ctx.GetLogger().Info("analyzer: synthesizing detailed response", "event_id", request.EventId)
 	detailedResponse, synthErr := synthesizeDetailedResponse(ctx, request, parentConversationId, initialSummary, investigationText, logAnalysisText)
 	if synthErr != nil {
