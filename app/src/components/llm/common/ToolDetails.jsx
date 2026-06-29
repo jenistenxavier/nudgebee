@@ -21,6 +21,7 @@ import FileDownloadIcon from '@mui/icons-material/FileDownload';
 import Chart from '@ui/Chart';
 import Text from '@shared/format/Text';
 import CustomTable from '@shared/tables/CustomTable';
+import CopyButton from '@shared/buttons/CopyButton';
 import { Divider } from '@ui/Divider';
 import KubernetesTable from '@components/k8s/common/KubernetesTable';
 import { mapToTableData } from '@components/k8s/details/KubernetesLogStash';
@@ -742,6 +743,24 @@ const contentBoxSx = {
 };
 
 /**
+ * Section label row with an optional copy-to-clipboard icon aligned to the right.
+ * Used for the Response section so the raw tool output can be copied even when it's
+ * rendered as a table/chart/markdown rather than plain text.
+ */
+const SectionLabel = ({ label, copyText, toastMessage = 'Copied to clipboard' }) => (
+  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: ds.space[1] }}>
+    <Typography sx={{ ...sectionLabelSx, mb: 0 }}>{label}</Typography>
+    {copyText ? <CopyButton text={copyText} size='xs' toastMessage={toastMessage} /> : null}
+  </Box>
+);
+
+SectionLabel.propTypes = {
+  label: PropTypes.string.isRequired,
+  copyText: PropTypes.string,
+  toastMessage: PropTypes.string,
+};
+
+/**
  * Renders a single tool call's thought and response.
  */
 const ToolCallSection = ({ tc, index, accountId }) => {
@@ -826,7 +845,7 @@ const ToolCallSection = ({ tc, index, accountId }) => {
       {/* Response */}
       {responseText && (
         <Box>
-          <Typography sx={sectionLabelSx}>Response</Typography>
+          <SectionLabel label='Response' copyText={responseText} toastMessage='Response copied to clipboard' />
           <Box sx={contentBoxSx}>
             <FormattedToolResponse
               responseText={responseText}
@@ -982,7 +1001,11 @@ const ToolDetails = ({ toolCall, accountId, conversationId }) => {
           )}
           {hasAgentResponse && (
             <Box>
-              <Typography sx={sectionLabelSx}>Response</Typography>
+              <SectionLabel
+                label='Response'
+                copyText={toolCall.response?.text || toolCall.response_text}
+                toastMessage='Response copied to clipboard'
+              />
               <Box sx={contentBoxSx}>
                 <FormattedToolResponse
                   responseText={toolCall.response?.text || toolCall.response_text}
