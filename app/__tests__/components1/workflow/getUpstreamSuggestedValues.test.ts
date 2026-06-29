@@ -106,4 +106,19 @@ describe('getUpstreamSuggestedValues', () => {
     const res = getUpstreamSuggestedValues("{{ Tasks['approval-1'].output.status | upper }}", nodes);
     expect(res?.values).toEqual(['YES', 'NO', 'NEEDS INFO']);
   });
+
+  it('flags expression as complex when task ref has literal prefix text', () => {
+    const res = getUpstreamSuggestedValues("prefix-{{ Tasks['approval-1'].output.status }}", nodes);
+    expect(res).toEqual({ isComplexExpression: true });
+  });
+
+  it('flags expression as complex when task ref has literal suffix text', () => {
+    const res = getUpstreamSuggestedValues("{{ Tasks['approval-1'].output.status }}-suffix", nodes);
+    expect(res).toEqual({ isComplexExpression: true });
+  });
+
+  it('flags expression as complex when single task ref is mixed with other namespaces', () => {
+    const res = getUpstreamSuggestedValues("{{ Tasks['approval-1'].output.status }}-{{ Inputs.env }}", nodes);
+    expect(res).toEqual({ isComplexExpression: true });
+  });
 });

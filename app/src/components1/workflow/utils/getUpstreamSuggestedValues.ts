@@ -29,9 +29,13 @@ export const getUpstreamSuggestedValues = (expression: string, nodes: Node[], _e
     return null;
   }
 
-  // Check if there are multiple distinct task references
-  const distinctRefs = new Set(matches.map((m) => `${m[1]}.${m[2]}`));
-  if (distinctRefs.size > 1) {
+  // Suggestions are only sound when the expression is *solely* one task ref
+  // Strip all matched {{ Tasks['id'].output.field (| filter)? }} blocks;
+  // if any non-whitespace remains (literal prefix/suffix text, other namespaces
+  // like {{ Inputs.env }}, or multiple distinct task refs), treat as complex.
+  const fullTemplateBlockRegex = /\{\{\s*Tasks\[['"][^'"]+['"]\]\.output\.[a-zA-Z0-9_]+(?:\s*\|\s*\w+)*\s*\}\}/g;
+  const stripped = expression.replace(fullTemplateBlockRegex, '').trim();
+  if (stripped.length > 0 || matches.length > 1) {
     return { isComplexExpression: true };
   }
 
