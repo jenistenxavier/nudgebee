@@ -4078,7 +4078,7 @@ az vmss update \\
 
         - Run modify-instance-attribute command (OSX/Linux/UNIX) to change the instance type of the stopped Amazon EC2 instance to the latest generation:
 \`\`\`
-        aws ec2 modify-instance-attribute --region {{region}} --instance-id {{INSTANCE_ID}} --instance-type '{"Value": "{{INSTANCE_TYPE}}"}'
+        aws ec2 modify-instance-attribute --region {{region}} --instance-id {{INSTANCE_ID}} --instance-type '{"Value":"{{INSTANCE_TYPE}}"}'
 \`\`\`
 
         - Run start-instances command (OSX/Linux/UNIX) to start the Amazon EC2 instance with the new instance type:
@@ -6919,7 +6919,7 @@ aws ec2 stop-instances --region {{region}} --instance-ids {{INSTANCE_ID}}
 
         - Modify Instance Type
 \`\`\`
-aws ec2 modify-instance-attribute --region {{region}} --instance-id {{INSTANCE_ID}} --instance-type '{"Value": "{{INSTANCE_TYPE}}"}'
+aws ec2 modify-instance-attribute --region {{region}} --instance-id {{INSTANCE_ID}} --instance-type '{"Value":"{{INSTANCE_TYPE}}"}'
 \`\`\`
 
         - Start Instance
@@ -6949,7 +6949,7 @@ aws ec2 stop-instances --region {{region}} --instance-ids {{INSTANCE_ID}}
 
         - Modify Instance Type
 \`\`\`
-aws ec2 modify-instance-attribute --region {{region}} --instance-id {{INSTANCE_ID}} --instance-type {"Value": "{{INSTANCE_TYPE}}"}
+aws ec2 modify-instance-attribute --region {{region}} --instance-id {{INSTANCE_ID}} --instance-type '{"Value":"{{INSTANCE_TYPE}}"}'
 \`\`\`
 
         - Start Instance
