@@ -61,6 +61,7 @@ const QueryModeSwitcher = ({
   accountId,
   params,
   logProvider,
+  providerOverride,
   operatorDescriptors,
   onQueryChange,
   queryItems = [],
@@ -419,6 +420,7 @@ const QueryModeSwitcher = ({
             setEsIndexList([]);
             const res = await observability.fetchLogLabels({
               account_id: accountId,
+              ...(providerOverride ? { log_provider: providerOverride } : {}),
             });
             if (res?.errors) {
               snackbar.error(`failed to fetch indexes - ${parseHttpResponseBodyMessage(res)}`);
@@ -723,6 +725,7 @@ const QueryModeSwitcher = ({
         <LogQueryBuilderAutocomplete
           accountId={accountId}
           logProvider={logProvider}
+          providerOverride={providerOverride}
           operatorDescriptors={operatorDescriptors}
           queryItems={queryItems}
           params={params}
@@ -933,6 +936,7 @@ QueryModeSwitcher.propTypes = {
   accountId: PropTypes.string,
   params: PropTypes.object,
   logProvider: PropTypes.any,
+  providerOverride: PropTypes.string,
   operatorDescriptors: PropTypes.arrayOf(
     PropTypes.shape({
       token: PropTypes.string.isRequired,
