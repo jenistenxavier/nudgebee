@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import apiKubernetes from '@api1/kubernetes';
 import ClusterViewCard from '@components/k8s/common/ClusterViewCard';
-import KubernetesMemoryCpuOverView from '@components/k8s/common/KubernetesMemoryCpuOverView';
+import KubernetesMemoryCpuOverView, { CpuMemorySkeleton } from '@components/k8s/common/KubernetesMemoryCpuOverView';
 import KubernetesIssuesOverView from '@components/k8s/common/KubernetesIssuesOverView';
 import KubernetesSaving from '@components/k8s/common/KubernetesSaving';
 import K8sClusterInsights from '@components/k8s/common/k8sClusterInsights';
@@ -12,12 +12,46 @@ import KubernetesDashboardPodExceptions from '@components/k8s/dashboard/Kubernet
 import KubernetesDashboardNodeExceptions from '@components/k8s/dashboard/KubernetesDashboardNodeExceptions';
 import ErrorBoundary from '@shared/ErrorBoundary';
 import { Skeleton } from '@ui/Skeleton';
-import { v4 } from 'uuid';
 import { toast as snackbar } from '@ui/Toast';
 import K8sAccountModal from '@components/integrations/modal/K8sAccountModal';
 import { Button as DsButton } from '@ui/Button';
 import { hasWriteAccess } from '@lib/auth';
 import { ds } from '@utils/colors';
+
+const ClusterCardSkeleton = ({ cardStyle }) => (
+  <Box sx={cardStyle}>
+    <Box display='flex' gap={ds.space[4]} alignItems='flex-start'>
+      <Box
+        sx={{
+          width: { xs: ds.space.mul(0, 130), md: ds.space.mul(0, 160) },
+          flexShrink: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 'var(--ds-space-3)',
+        }}
+      >
+        <Skeleton shape='rect' width='65%' height='24px' />
+        <Skeleton shape='rect' width='100%' height={ds.space.mul(0, 48)} />
+        <Skeleton shape='rect' width='100%' height={ds.space.mul(0, 26)} />
+        <Skeleton shape='rect' width='80%' height='14px' />
+      </Box>
+      <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)' }}>
+        <Box display='flex' gap='14px'>
+          <Box sx={{ flex: 7 }}>
+            <CpuMemorySkeleton />
+          </Box>
+          <Box sx={{ flex: 3 }}>
+            <Skeleton shape='rect' width='100%' height={ds.space.mul(0, 65)} />
+          </Box>
+          <Box sx={{ flex: 2 }}>
+            <Skeleton shape='rect' width='100%' height={ds.space.mul(0, 65)} />
+          </Box>
+        </Box>
+        <Skeleton shape='rect' width='100%' height={ds.space.mul(0, 30)} />
+      </Box>
+    </Box>
+  </Box>
+);
 
 const KubernetesClusterOverview = () => {
   const [allClusters, setAllClusters] = useState([]);
@@ -156,9 +190,7 @@ const KubernetesClusterOverview = () => {
 
   const renderClusterOverViewComponents = (allcluster) => {
     if (loading || !allcluster?.length) {
-      return Array(2)
-        .fill(null)
-        .map((_) => <Skeleton key={`shimmer-${v4()}`} shape='rect' height={ds.space.mul(0, 140)} width='auto' />);
+      return [0, 1].map((i) => <ClusterCardSkeleton key={`skeleton-cluster-${i}`} cardStyle={styles.clusterCard} />);
     }
     return allcluster?.map((cluster) => (
       <ErrorBoundary key={cluster?.account_id}>

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Grid } from '@mui/material';
+import { Grid, Box } from '@mui/material';
 import K8sMemoryCpuIndicator from './K8sMemoryCpuIndicator';
 import PropTypes from 'prop-types';
 import apiKubernetes1 from '@api1/kubernetes1';
@@ -8,6 +8,17 @@ import { getSpecificTime } from '@lib/datetime';
 import { Skeleton } from '@ui/Skeleton';
 import CustomDateTimeRangePicker from '@shared/widgets/CustomDateTimeRangePicker';
 import { ds } from '@utils/colors';
+
+export const CpuMemorySkeleton = ({ sx = {} }) => (
+  <Box sx={{ display: 'flex', gap: 'var(--ds-space-4)', ...sx }}>
+    <Box sx={{ flex: 1 }}>
+      <Skeleton shape='rect' width='100%' height={ds.space.mul(0, 65)} />
+    </Box>
+    <Box sx={{ flex: 1 }}>
+      <Skeleton shape='rect' width='100%' height={ds.space.mul(0, 65)} />
+    </Box>
+  </Box>
+);
 
 const KubernetesMemoryCpuOverView = ({
   showUpdatedUi = false,
@@ -33,11 +44,11 @@ const KubernetesMemoryCpuOverView = ({
       { name: 'Request', request: 0 },
     ],
   });
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(!!accountId);
   const [loadingStates, setLoadingStates] = useState({
-    cpu: false,
-    memory: false,
-    percentile: false,
+    cpu: !!accountId,
+    memory: !!accountId,
+    percentile: !!accountId,
   });
   // Track which data sections have been loaded
   const [dataLoaded, setDataLoaded] = useState({
@@ -433,7 +444,7 @@ const KubernetesMemoryCpuOverView = ({
           />
         </Grid>
       ) : loading ? (
-        <Skeleton width={'100%'} height={ds.space.mul(0, 100)} />
+        <CpuMemorySkeleton sx={{ mt: ds.space.mul(0, 5) }} />
       ) : (
         <>
           <Grid
