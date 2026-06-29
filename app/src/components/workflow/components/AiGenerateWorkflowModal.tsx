@@ -1,12 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Box, CircularProgress, LinearProgress, Typography } from '@mui/material';
+import { Box, Typography } from '@mui/material';
 import { Modal } from '@ui/Modal';
+import { ProgressLinear } from '@ui/ProgressLinear';
 import { Button } from '@ui/Button';
 import { FormField } from '@shared/forms/FormComponents';
 import MarkDowns from '@shared/viewers/MarkDowns';
 import ClarificationQuestion from './ClarificationQuestion';
 
-type ModalStage = 'input' | 'generating' | 'plan_review' | 'text_followup' | 'error';
+type ModalStage = 'input' | 'generating' | 'plan_review' | 'text_followup' | 'success' | 'error';
 
 interface PlanData {
   planText: string;
@@ -34,6 +35,7 @@ interface AiGenerateWorkflowModalProps {
   onPollConversation?: (sessionId: string) => Promise<{
     status: string;
     workflowJson?: string;
+    summaryText?: string;
     planText?: string;
     planOptions?: string[];
     followupType?: string;
@@ -78,6 +80,8 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
   const [showFeedbackInput, setShowFeedbackInput] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [stageMessageIndex, setStageMessageIndex] = useState(0);
+  const [summaryText, setSummaryText] = useState('');
+  const [completedData, setCompletedData] = useState<{ workflowJson: string; conversationId: string; sessionId: string } | null>(null);
 
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const elapsedIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -106,6 +110,28 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
   useEffect(() => {
     return () => clearIntervals();
   }, [clearIntervals]);
+
+  // The modal stays mounted (visibility is driven by `open`), so reset transient state whenever it
+  // closes — otherwise a parent-initiated close (e.g. after "Open in Editor") would re-open on the
+  // stale success/error screen. The `generating` stage keeps `open` true, so this never interrupts it.
+  useEffect(() => {
+    if (open) {
+      return;
+    }
+    clearIntervals();
+    setStage('input');
+    setQuery('');
+    setProgress(null);
+    setPlanData(null);
+    setFeedbackText('');
+    setShowFeedbackInput(false);
+    setErrorMessage('');
+    setStageMessageIndex(0);
+    setSummaryText('');
+    setCompletedData(null);
+    lastPlanMessageIdRef.current = '';
+    processingWaitingRef.current = false;
+  }, [open, clearIntervals]);
 
   // Rotate stage messages every 15 seconds
   useEffect(() => {
@@ -139,7 +165,15 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
           if (result.status === 'COMPLETED') {
             clearIntervals();
             if (result.workflowJson) {
-              onWorkflowCompleted?.(result.workflowJson, result.conversationId || conversationId, sessionId);
+              // Automation built. Show the build summary + an Open-in-Editor button rather than
+              // navigating away immediately, so the user can see what was created.
+              setSummaryText(result.summaryText || '');
+              setCompletedData({
+                workflowJson: result.workflowJson,
+                conversationId: result.conversationId || conversationId,
+                sessionId,
+              });
+              setStage('success');
             } else {
               // Non-workflow completion (e.g., "hi" prompt) — show helpful message
               setErrorMessage(
@@ -191,7 +225,7 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
         }
       }, POLL_INTERVAL_MS);
     },
-    [onPollConversation, onWorkflowCompleted, clearIntervals, clearPolling]
+    [onPollConversation, clearIntervals, clearPolling]
   );
 
   const handleSubmit = async () => {
@@ -288,6 +322,8 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
     setShowFeedbackInput(false);
     setErrorMessage('');
     setStageMessageIndex(0);
+    setSummaryText('');
+    setCompletedData(null);
     lastPlanMessageIdRef.current = '';
     processingWaitingRef.current = false;
     onClose();
@@ -338,11 +374,12 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
               justifyContent: 'center',
             }}
           >
-            <CircularProgress size={48} />
             <Typography variant='body1' sx={{ fontWeight: 'var(--ds-font-weight-medium)', color: 'text.primary' }}>
               {STAGE_MESSAGES[stageMessageIndex]}
             </Typography>
-            <LinearProgress variant='indeterminate' sx={{ width: '60%', borderRadius: 'var(--ds-radius-sm)' }} />
+            <Box sx={{ width: '60%' }}>
+              <ProgressLinear mode='indeterminate' tone='info' surface='section' aria-label='Generating automation' />
+            </Box>
             {progress && (
               <Typography variant='body2' sx={{ color: 'text.secondary' }}>
                 Elapsed: {formatElapsed(progress.elapsedSeconds)}
@@ -440,6 +477,34 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
             </Box>
           </Box>
         );
+
+      case 'success': {
+        // Drop a trailing "[Open in Editor](...)" link from the summary — we render our own button.
+        const successMarkdown = (summaryText || '').replace(/\n*\[Open in Editor\]\([^)]*\)\s*$/i, '').trim();
+        return (
+          <Box sx={{ mt: 2, mb: 2 }}>
+            <Box
+              sx={{
+                p: 2,
+                borderRadius: 'var(--ds-radius-sm)',
+                border: '1px solid',
+                borderColor: 'divider',
+                bgcolor: 'background.default',
+                fontSize: 'var(--ds-text-body)',
+                lineHeight: 1.6,
+              }}
+            >
+              {successMarkdown ? (
+                <MarkDowns data={successMarkdown} sx={{}} allowExecutable={false} onLinkClick={null} />
+              ) : (
+                <Typography variant='body1' sx={{ color: 'text.primary' }}>
+                  Your automation has been built and saved.
+                </Typography>
+              )}
+            </Box>
+          </Box>
+        );
+      }
 
       case 'error':
         return (
@@ -575,6 +640,27 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
           </Box>
         );
 
+      case 'success':
+        return (
+          <Box sx={{ p: 2, pt: 0, display: 'flex', gap: 2, justifyContent: 'flex-end', '& button': { minWidth: '140px' } }}>
+            <Button tone='secondary' size='md' onClick={handleClose}>
+              Close
+            </Button>
+            <Button
+              tone='primary'
+              size='md'
+              onClick={() => {
+                if (!completedData) {
+                  return;
+                }
+                onWorkflowCompleted?.(completedData.workflowJson, completedData.conversationId, completedData.sessionId);
+              }}
+            >
+              Open in Editor
+            </Button>
+          </Box>
+        );
+
       case 'error':
         return (
           <Box sx={{ p: 2, pt: 0, display: 'flex', gap: 2, justifyContent: 'flex-end', '& button': { minWidth: '140px' } }}>
@@ -609,6 +695,8 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
         return 'Review Automation Plan';
       case 'text_followup':
         return 'Additional Information Needed';
+      case 'success':
+        return 'Automation Built';
       case 'error':
         return 'Generation Failed';
       default:
@@ -617,7 +705,7 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
   };
 
   return (
-    <Modal open={open} handleClose={handleClose} width='md' title={getTitle()} loader={stage === 'generating'} actionButtons={renderActionButtons()}>
+    <Modal open={open} handleClose={handleClose} width='md' title={getTitle()} actionButtons={renderActionButtons()}>
       {renderContent()}
     </Modal>
   );
