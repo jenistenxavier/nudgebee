@@ -82,17 +82,26 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const elapsedIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lastPlanMessageIdRef = useRef<string>('');
+  const processingWaitingRef = useRef(false);
 
-  const clearIntervals = useCallback(() => {
+  const clearPolling = useCallback(() => {
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
       pollIntervalRef.current = null;
     }
+  }, []);
+
+  const clearElapsed = useCallback(() => {
     if (elapsedIntervalRef.current) {
       clearInterval(elapsedIntervalRef.current);
       elapsedIntervalRef.current = null;
     }
   }, []);
+
+  const clearIntervals = useCallback(() => {
+    clearPolling();
+    clearElapsed();
+  }, [clearPolling, clearElapsed]);
 
   useEffect(() => {
     return () => clearIntervals();
@@ -127,10 +136,22 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
             return;
           }
 
-          if (result.status === 'COMPLETED' && result.workflowJson) {
+          if (result.status === 'COMPLETED') {
             clearIntervals();
-            onWorkflowCompleted?.(result.workflowJson, result.conversationId || conversationId, sessionId);
+            if (result.workflowJson) {
+              onWorkflowCompleted?.(result.workflowJson, result.conversationId || conversationId, sessionId);
+            } else {
+              // Non-workflow completion (e.g., "hi" prompt) — show helpful message
+              setErrorMessage(
+                "This prompt didn't result in an automation. Try describing a specific task, " + 'e.g., "Send a Slack alert when CPU exceeds 80%".'
+              );
+              setStage('error');
+            }
           } else if (result.status === 'WAITING' && result.planText) {
+            // Guard: prevent concurrent poll callbacks from both processing the same result
+            if (processingWaitingRef.current) {
+              return;
+            }
             // Skip stale WAITING results after approval/feedback —
             // same messageId+updated_at means the backend hasn't processed our response yet.
             // We include updated_at because the backend reuses the same followup message
@@ -139,7 +160,8 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
             if (lastPlanMessageIdRef.current && lastPlanMessageIdRef.current === staleKey) {
               return;
             }
-            clearIntervals();
+            processingWaitingRef.current = true;
+            clearPolling();
             lastPlanMessageIdRef.current = staleKey;
             const followupType = result.followupType || 'single_select';
             setPlanData({
@@ -157,6 +179,7 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
             } else {
               setStage('plan_review');
             }
+            processingWaitingRef.current = false;
           } else if (result.status === 'FAILED') {
             clearIntervals();
             setErrorMessage(result.errorMessage || 'Automation generation failed. Please try again.');
@@ -168,7 +191,7 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
         }
       }, POLL_INTERVAL_MS);
     },
-    [onPollConversation, onWorkflowCompleted, clearIntervals]
+    [onPollConversation, onWorkflowCompleted, clearIntervals, clearPolling]
   );
 
   const handleSubmit = async () => {
@@ -239,6 +262,7 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
 
   const handleCancelGeneration = async () => {
     clearIntervals();
+    processingWaitingRef.current = false;
     if (progress?.conversationId) {
       try {
         await onCancel?.(progress.conversationId);
@@ -265,6 +289,7 @@ const AiGenerateWorkflowModal: React.FC<AiGenerateWorkflowModalProps> = ({
     setErrorMessage('');
     setStageMessageIndex(0);
     lastPlanMessageIdRef.current = '';
+    processingWaitingRef.current = false;
     onClose();
   };
 

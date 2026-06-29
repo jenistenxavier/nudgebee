@@ -995,9 +995,8 @@ const WorkflowListing: React.FC<WorkflowListingProps> = ({ accountId }) => {
           workflowJson = lastGenMsg?.response || '';
         }
       }
-      if (!workflowJson) {
-        workflowJson = lastGenMsg?.response || '';
-      }
+      // Don't fall back to non-JSON responses — they're text answers, not workflows.
+      // The polling loop handles COMPLETED without workflowJson separately.
       return { status: 'COMPLETED', workflowJson, conversationId: conversation.id };
     }
 
