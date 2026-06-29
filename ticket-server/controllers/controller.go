@@ -233,7 +233,9 @@ func GetTicketComments(ctx *gin.Context) {
 }
 
 func AddTicketComment(ctx *gin.Context) {
-	ticket, ok := bindAndAuthoriseTicketRequest(ctx, "write")
+	// Commenting is a read-level capability: anyone who can view the ticket
+	// (including readonly roles) may add a comment. See NB-32932.
+	ticket, ok := bindAndAuthoriseTicketRequest(ctx, "read")
 	if !ok {
 		return
 	}

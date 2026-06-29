@@ -3638,7 +3638,9 @@ actions:
           value_from_env: ACTION_API_SERVER_TOKEN
     permissions:
       - role: account_admin
+      - role: account_admin_readonly
       - role: tenant_admin
+      - role: tenant_admin_readonly
   - name: ticket_get_comments
     definition:
       kind: "synchronous"
@@ -3651,6 +3653,7 @@ actions:
       - role: account_admin
       - role: account_admin_readonly
       - role: tenant_admin
+      - role: tenant_admin_readonly
   - name: ticket_groupings_v2
     definition:
       kind: "synchronous"

@@ -578,11 +578,18 @@ const apiIntegrations = {
         ticket_id,
         comment,
       });
+      // A denied/failed request comes back as a top-level GraphQL error with no
+      // `ticket_add_comment` payload, so `payload?.error` is undefined — treating
+      // "no error field" as success would report a false "added" toast. Require an
+      // actual payload with no error, and surface the real failure otherwise.
+      const payload = response?.data?.data?.ticket_add_comment;
+      const gqlError = response?.data?.errors?.[0]?.message;
+      const success = !!payload && !payload.error;
       return {
         data: {
-          success: !response?.data?.data?.ticket_add_comment?.error,
-          error: response?.data?.data?.ticket_add_comment?.error,
-          comments: response?.data?.data?.ticket_add_comment?.comments || [],
+          success,
+          error: success ? undefined : payload?.error || gqlError || 'Failed to add comment',
+          comments: payload?.comments || [],
         },
       };
     } catch (err) {
