@@ -2,7 +2,6 @@ package recommendation
 
 import (
 	"encoding/json"
-	"os"
 	"strings"
 
 	"nudgebee/services/knowledge_graph/core"
@@ -110,18 +109,6 @@ func annotateK8sRecommendationImpact(kg *core.Service, tenantID, accountID strin
 			"safety_reason":         reason,
 		},
 	}, true
-}
-
-// impactScoringEnvVar gates the (more expensive) blast-radius annotation in the
-// finops recompute cron.
-const impactScoringEnvVar = "RECOMMENDATION_IMPACT_SCORING_ENABLED"
-
-// impactScoringEnabled reports whether the finops recompute cron should annotate
-// recommendations with blast-radius safety bands. Default off: the cron behaves
-// exactly as before until an operator opts in. Kept as an env gate to avoid
-// touching central config loading.
-func impactScoringEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv(impactScoringEnvVar)), "true")
 }
 
 // annotateBreakdownWithImpact resolves a k8s recommendation's blast radius and

@@ -338,16 +338,12 @@ func RecomputeAllFinOpsScores(ctx *security.RequestContext) error {
 	}
 	var batch []scoreRow
 
-	// Optional blast-radius annotation (off by default). When enabled, resolve
-	// each k8s recommendation to its knowledge-graph workload and stamp a safety
-	// band into the breakdown JSONB. Memoized per workload so repeated recs on the
-	// same workload don't re-traverse the graph.
-	impactEnabled := impactScoringEnabled()
-	var kgService *core.Service
+	// Blast-radius annotation: resolve each k8s recommendation to its
+	// knowledge-graph workload and stamp a safety band into the breakdown JSONB.
+	// Always on -- cost is bounded (non-k8s recs are skipped, and results are
+	// memoized per workload so each is resolved + traversed at most once per run).
+	kgService := core.NewService(ctx, ctx.GetLogger(), dbms)
 	impactCache := map[string]*recommendationImpact{}
-	if impactEnabled {
-		kgService = core.NewService(ctx, ctx.GetLogger(), dbms)
-	}
 
 	errCount := 0
 	for rows.Next() {
@@ -378,7 +374,7 @@ func RecomputeAllFinOpsScores(ctx *security.RequestContext) error {
 		if cloudAccountID != nil {
 			accountID = *cloudAccountID
 		}
-		if impactEnabled && len(recJSON) > 0 {
+		if len(recJSON) > 0 {
 			annotateBreakdownWithImpact(kgService, tenantID, accountID, recJSON, result.Breakdown, impactCache)
 		}
 

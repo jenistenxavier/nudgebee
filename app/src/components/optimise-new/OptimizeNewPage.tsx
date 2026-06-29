@@ -778,7 +778,13 @@ const OptimizeNewPage = () => {
               <Chip variant='status' size='2xs' tone={safetyBandTone(row.safetyBand)} dot>
                 {safetyBandLabel(row.safetyBand)}
               </Chip>
-            ) : null,
+            ) : (
+              <Tooltip title='Blast radius not assessed for this recommendation' placement='top'>
+                <Box component='span' sx={{ color: ds.gray[400], cursor: 'default' }}>
+                  —
+                </Box>
+              </Tooltip>
+            ),
           },
           // Resource
           {
