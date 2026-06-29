@@ -700,7 +700,7 @@ const UtilizationAndHealth = ({ accountId, clusterSummary = {}, serviceName }: a
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[3], width: '100%', minWidth: 0, overflow: 'hidden' }}>
-      <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: ds.space[4], rowGap: ds.space[5], mb: ds.space[3] }}>
+      <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: ds.space[4], rowGap: ds.space[5] }}>
         <DSCard size='md' header={<SectionHeading title='Errors' />} elevation='flat'>
           <Stat
             id='cloud-summary-fired-alarm-count'
@@ -1011,8 +1011,7 @@ const CloudAccountSummary = ({ accountId = '', clusterSummary = {}, loading = fa
               alignItems: 'start',
               columnGap: ds.space[4],
               rowGap: ds.space[5],
-              mb: ds.space[6],
-              mt: ds.space[5],
+              mb: ds.space[4],
             }}
           >
             <ClusterSummary accountId={accountId} cloudProvider={cloudProvider} />
