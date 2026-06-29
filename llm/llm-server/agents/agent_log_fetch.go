@@ -400,6 +400,7 @@ func makeFetchResponse(agentName, query, logs, fileRef string, refs []toolcore.N
 		"query":    query,
 		"logs":     inlineLogs,
 		"file_ref": fileRef,
+		"provider": providerFromLogs(logs),
 	}
 	body, err := common.MarshalJson(envelope)
 	if err != nil {

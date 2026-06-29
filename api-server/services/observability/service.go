@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
@@ -487,10 +488,10 @@ func getLogsMetricsTracesProviderWithIntegration(ctx *security.RequestContext, a
 	return defaultProvider, defaultSource, matchedIntegration, nil
 }
 
-func FetchLogs(ctx *security.RequestContext, fetchLogRequest FetchLogRequest) ([]OutputLog, error) {
+func FetchLogs(ctx *security.RequestContext, fetchLogRequest FetchLogRequest) (FetchLogsResult, error) {
 	source, err := getLogSourceForAccount(ctx, fetchLogRequest.AccountId, fetchLogRequest.LogProvider, fetchLogRequest.LogProviderSource)
 	if err != nil {
-		return nil, err
+		return FetchLogsResult{}, err
 	}
 	filteringMap := getMergedLabelMapping(ctx, fetchLogRequest.AccountId, source)
 	fetchLogRequest.SortFields = convertOrderByWithMapping(fetchLogRequest.SortFields, filteringMap)
@@ -519,10 +520,31 @@ func FetchLogs(ctx *security.RequestContext, fetchLogRequest FetchLogRequest) ([
 
 	logs, err := source.QueryLogs(ctx, fetchLogRequest)
 	if err != nil {
-		return nil, err
+		return FetchLogsResult{}, err
 	}
 	normalizeOutputLogLabels(logs, filteringMap)
-	return logs, nil
+
+	// Resolve the query that was actually used so callers (UI, LLM, runbooks)
+	// can show it. fetchLogRequest.Query holds the raw query or the GetQuery
+	// result set above. Providers that consume the where-clause natively emit
+	// no query string, so fall back to the canonical where JSON.
+	usedQuery := fetchLogRequest.Query
+	if usedQuery == "" && hasWhereData(fetchLogRequest.QueryRequest.Where) {
+		if b, mErr := json.Marshal(fetchLogRequest.QueryRequest.Where); mErr == nil {
+			usedQuery = string(b)
+		}
+	}
+
+	// Resolve the provider for the result. The canonical (v2) path sends an empty
+	// LogProvider and lets us resolve the account default, so fall back to the
+	// resolved default provider when the request didn't name one.
+	provider := fetchLogRequest.LogProvider
+	if provider == "" {
+		if resolved, _, _, perr := getLogsMetricsTracesProviderWithIntegration(ctx, fetchLogRequest.AccountId, "", "logs", fetchLogRequest.LogProviderSource); perr == nil {
+			provider = resolved
+		}
+	}
+	return FetchLogsResult{Logs: logs, Query: usedQuery, Provider: provider}, nil
 }
 
 // normalizeOutputLogLabels adds canonical label names as aliases for provider-specific

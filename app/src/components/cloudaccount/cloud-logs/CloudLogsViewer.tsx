@@ -230,6 +230,9 @@ const CloudLogsViewer: React.FC<CloudLogsViewerProps> = ({ accountId, provider }
   const [saasQueryItems, setSaasQueryItems] = useState<any[]>([]);
   const [saasQLEditor, setSaasQLEditor] = useState('code');
   const [saasEsIndex, setSaasEsIndex] = useState('');
+  // The provider-native query the backend actually executed, returned alongside
+  // the logs so Builder mode can show what was run.
+  const [executedQuery, setExecutedQuery] = useState('');
 
   const isNative = selectedProvider === NATIVE_PROVIDER;
   const selectedOption = providers.find((p) => p.provider === selectedProvider);
@@ -374,8 +377,9 @@ const CloudLogsViewer: React.FC<CloudLogsViewerProps> = ({ accountId, provider }
 
     try {
       const response = await observability.fetchLogs(requestPayload);
-      const logs = response?.data?.data?.logs_list || [];
+      const logs = response?.data?.data?.logs_list?.logs || [];
       setData(logs);
+      setExecutedQuery(response?.data?.data?.logs_list?.query || '');
 
       if (logs.length === 0) {
         setError(null);
@@ -652,6 +656,17 @@ const CloudLogsViewer: React.FC<CloudLogsViewerProps> = ({ accountId, provider }
               providerType='logs'
               initialEsIndex={saasEsIndex}
             />
+          </Box>
+        )}
+
+        {executedQuery && (
+          <Box sx={{ display: 'flex', alignItems: 'baseline', gap: ds.space[1], mb: ds.space[2] }}>
+            <Typography sx={{ fontSize: ds.text.small, fontWeight: 600, color: ds.gray[600], whiteSpace: 'nowrap' }}>
+              {selectedProvider ? `${snakeToTitleCase(selectedProvider)} query:` : 'Query:'}
+            </Typography>
+            <Typography sx={{ fontFamily: 'monospace', fontSize: ds.text.small, color: ds.gray[700], wordBreak: 'break-all' }}>
+              {executedQuery}
+            </Typography>
           </Box>
         )}
 

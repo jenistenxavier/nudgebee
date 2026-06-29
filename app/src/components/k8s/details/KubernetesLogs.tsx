@@ -77,6 +77,9 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
   const [errorMsg, setErrorMsg] = useState('');
   const [loading, setLoading] = useState(false);
   const [logProvider, setLogProvider] = useState('');
+  // The provider-native query the backend actually executed (e.g. LogQL),
+  // returned alongside the logs so Builder mode can show what was run.
+  const [executedQuery, setExecutedQuery] = useState('');
   const [operatorDescriptors, setOperatorDescriptors] = useState<OperatorDescriptor[] | undefined>(undefined);
   // The provider the backend resolved as the account default, plus every
   // provider the account has configured. Drives the provider switcher: a
@@ -414,8 +417,9 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
           if (error) {
             throw new Error(parseHttpResponseBodyMessage(response.data));
           }
-          const allResults = response?.data?.data?.logs_list || [];
+          const allResults = response?.data?.data?.logs_list?.logs || [];
           setRawLogs(allResults);
+          setExecutedQuery(response?.data?.data?.logs_list?.query || '');
           fetchTicketsForLogs(allResults);
           formatLogResults(allResults);
           setLoading(false);
@@ -623,8 +627,9 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
           throw new Error(parseHttpResponseBodyMessage(response.data));
         }
 
-        const allResults = response?.data?.data?.logs_list || [];
+        const allResults = response?.data?.data?.logs_list?.logs || [];
         setRawLogs(allResults);
+        setExecutedQuery(response?.data?.data?.logs_list?.query || '');
         fetchTicketsForLogs(allResults);
         formatLogResults(allResults);
         setLoading(false);
@@ -1130,6 +1135,16 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
                 providerType={'logs'}
                 initialEsIndex={esIndex}
               />
+            </Box>
+          )}
+          {executedQuery && (
+            <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 'var(--ds-space-1)', px: 'var(--ds-space-2)', py: 'var(--ds-space-1)' }}>
+              <Box component='span' sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 600, color: ds.gray[600], whiteSpace: 'nowrap' }}>
+                {logProvider ? `${logProvider} query:` : 'Query:'}
+              </Box>
+              <Box component='span' sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-small)', color: ds.gray[700], wordBreak: 'break-all' }}>
+                {executedQuery}
+              </Box>
             </Box>
           )}
           <KubernetesTable2

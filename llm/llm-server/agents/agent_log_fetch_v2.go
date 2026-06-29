@@ -153,7 +153,41 @@ func (a *FetchLogsAgentV2) generateCanonicalLogQueryAndExecute(ctx *security.Req
 		logs = unwrapLokiInnerTimestamps(ctx, logs)
 	}
 	fileRef, fileRefs := saveLogsToWorkspace(ctx, a.accountId, request.ConversationId, a.provider.Provider, logs)
-	return makeFetchResponse(a.GetName(), jsonQuery, logs, fileRef, mergeRefs(toolRefs, fileRefs)), nil
+	return makeFetchResponse(a.GetName(), executedLogQuery(logs, jsonQuery), logs, fileRef, mergeRefs(toolRefs, fileRefs)), nil
+}
+
+// executedLogQuery pulls the provider query the backend actually ran out of the
+// logs_execute_v2 tool result (ObservabilityLogResponse.metadata.query) so the
+// fetch envelope reports the real executed query (e.g. LogQL / ES DSL, or the
+// canonical where JSON for native-where providers) rather than the canonical
+// JSON the LLM produced. Falls back to the canonical JSON when the result
+// carries no metadata (e.g. the zero-rows "no logs found" message).
+func executedLogQuery(logs, fallback string) string {
+	var doc struct {
+		Metadata struct {
+			Query string `json:"query"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal([]byte(logs), &doc); err == nil && doc.Metadata.Query != "" {
+		return doc.Metadata.Query
+	}
+	return fallback
+}
+
+// providerFromLogs extracts the provider the backend reported in the
+// logs_execute_v2 tool result (ObservabilityLogResponse.metadata.provider) so
+// the fetch envelope can show it alongside the query in the UI. Empty when
+// absent (e.g. the kubectl/datadog paths or the zero-rows "no logs" message).
+func providerFromLogs(logs string) string {
+	var doc struct {
+		Metadata struct {
+			Provider string `json:"provider"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal([]byte(logs), &doc); err == nil {
+		return doc.Metadata.Provider
+	}
+	return ""
 }
 
 // generateCanonicalLogQuery produces the same JSON-where envelope logs_execute_v2

@@ -1,7 +1,6 @@
 package services_server
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -382,30 +381,38 @@ func QueryLogs(ctx security.RequestContext, request LogQueryRequest) (core.Obser
 		return observabilityResp, fmt.Errorf("unauthorized: %v", string(jsonBody))
 	}
 
-	if resp.StatusCode == 500 {
-		return observabilityResp, fmt.Errorf("internal Server Error from Services Server, %v", string(jsonBody))
-	}
-
-	// The services server may return an error object (e.g. {"message":"..."}) instead of a log array.
-	// Detect this before attempting slice unmarshalling.
-	trimmed := bytes.TrimLeft(jsonBody, " \t\r\n")
-	if len(trimmed) > 0 && trimmed[0] == '{' {
+	// On any non-200 the services server returns an error object (e.g.
+	// {"message":"..."}); surface its message when present.
+	if resp.StatusCode != 200 {
 		var errResp struct {
 			Message string `json:"message"`
 		}
 		if unmarshalErr := common.UnmarshalJson(jsonBody, &errResp); unmarshalErr == nil && errResp.Message != "" {
 			return observabilityResp, fmt.Errorf("services: logs query error: %s", errResp.Message)
 		}
-		return observabilityResp, fmt.Errorf("services: logs, unexpected object response: %s", string(jsonBody))
+		return observabilityResp, fmt.Errorf("services: logs, unexpected response (status %d): %s", resp.StatusCode, string(jsonBody))
 	}
 
-	response := make([]core.ObservabilityLog, 0, 100)
-	err = common.UnmarshalJson(jsonBody, &response)
-	if err != nil {
+	// Success: the services server returns {logs, query, provider}. Carry the
+	// query/provider it actually executed into the metadata so the agent and UI
+	// can report which query produced these logs (the request query is empty on
+	// the canonical where-clause path).
+	var body struct {
+		Logs     []core.ObservabilityLog `json:"logs"`
+		Query    string                  `json:"query"`
+		Provider string                  `json:"provider"`
+	}
+	if err = common.UnmarshalJson(jsonBody, &body); err != nil {
 		return observabilityResp, err
 	}
 
-	observabilityResp.Logs = response
+	observabilityResp.Logs = body.Logs
+	if body.Query != "" {
+		observabilityResp.Metadata.Query = body.Query
+	}
+	if body.Provider != "" {
+		observabilityResp.Metadata.Provider = body.Provider
+	}
 
 	return observabilityResp, nil
 }

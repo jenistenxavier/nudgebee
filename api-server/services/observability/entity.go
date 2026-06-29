@@ -37,6 +37,19 @@ type OutputLog struct {
 	Severity  string         `json:"severity"`
 }
 
+// FetchLogsResult is the result of FetchLogs: the matched logs plus the query
+// that actually produced them. Query is the provider-native query string when
+// the provider exposes one (e.g. LogQL, ES DSL); for providers that consume the
+// where-clause natively and emit no query string (e.g. Signoz, Datadog), it
+// falls back to the canonical where-clause JSON so callers always see what was
+// run. Surfacing the query end-to-end lets the UI and LLM report exactly which
+// query produced a given set of logs.
+type FetchLogsResult struct {
+	Logs     []OutputLog `json:"logs"`
+	Query    string      `json:"query"`
+	Provider string      `json:"provider"`
+}
+
 type SearchResponse struct {
 	Hits struct {
 		Hits []struct {

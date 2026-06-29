@@ -674,32 +674,42 @@ const FormattedToolResponse = ({ responseText, toolName, toolCall, accountId }) 
   if (isLogsTool(toolName)) {
     try {
       const results = JSON.parse(responseText);
-      if (results?.logs?.length > 0) {
+      // logs is an array for the logs_execute_v2/logs tool result, but a string
+      // preview for the fetch_logs agent envelope ({query, provider, logs, file_ref}).
+      // Read query/provider from metadata (tool result) or the envelope's top level.
+      const logsArray = Array.isArray(results?.logs) ? results.logs : null;
+      const query = results?.metadata?.query || results?.query;
+      const provider = results?.metadata?.provider || results?.provider;
+      if ((logsArray && logsArray.length > 0) || query) {
         const headers = [
           { name: 'Date', width: '25%' },
           { name: 'Message', width: '75%' },
         ];
-        const tableData = results.logs.map((m) => {
+        const tableData = (logsArray || []).map((m) => {
           const dateTimestamp = Date.parse(m.timestamp);
           return [{ component: <LogDate timestamp={dateTimestamp} log={m?.message} /> }, { component: <Text value={m?.message} showAutoEllipsis /> }];
         });
         return (
           <Box>
-            {results?.metadata && (
+            {(provider || query) && (
               <Box sx={{ mb: ds.space[2], fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-700)' }}>
-                {results.metadata.provider && (
+                {provider && (
                   <Typography sx={{ fontSize: 'var(--ds-text-small)' }}>
-                    <b>Provider:</b> {results.metadata.provider}
+                    <b>Provider:</b> {provider}
                   </Typography>
                 )}
-                {results.metadata.query && (
+                {query && (
                   <Typography sx={{ fontSize: 'var(--ds-text-small)' }}>
-                    <b>Query:</b> {results.metadata.query}
+                    <b>Query:</b> {query}
                   </Typography>
                 )}
               </Box>
             )}
-            <CustomTable tableData={tableData} headers={headers} renderVertical={tableData.length <= 1} />
+            {logsArray && logsArray.length > 0 ? (
+              <CustomTable tableData={tableData} headers={headers} renderVertical={tableData.length <= 1} />
+            ) : typeof results?.logs === 'string' && results.logs ? (
+              <pre style={preStyle}>{results.logs.replace(/\\n/g, '\n')}</pre>
+            ) : null}
           </Box>
         );
       }
