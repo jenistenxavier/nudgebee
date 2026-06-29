@@ -223,6 +223,25 @@ func TestWorkflowBuilderAgent_ToolFinalize(t *testing.T) {
 	assert.Equal(t, "test-workflow", workflow["name"])
 }
 
+// TestWorkflowBuilderAgent_Finalize_CapturesChangeSummary verifies the finalize dispatch
+// records the agent-authored change_summary onto the agent so finalizeWithAutoSave can surface
+// the reasoning/approach in the user-facing summary. The finalize branch never touches ctx, so a
+// nil RequestContext is safe here.
+func TestWorkflowBuilderAgent_Finalize_CapturesChangeSummary(t *testing.T) {
+	agent := newWorkflowBuilderAgent("test-account")
+	agent.toolInitWorkflow(map[string]interface{}{
+		"name":     "test-workflow",
+		"triggers": []interface{}{map[string]interface{}{"type": "manual"}},
+	})
+	agent.toolAddTask(map[string]interface{}{"id": "print-hello", "type": "core.print"})
+
+	cs := "Added a print task so the run logs Hello."
+	result := agent.executeWorkflowTool(nil, "finalize", `{"change_summary": "`+cs+`"}`, "")
+
+	assert.Equal(t, cs, agent.changeSummary)
+	assert.Contains(t, result, "test-workflow") // still returns the workflow JSON
+}
+
 // TestWorkflowBuilderAgent_BuildAndModifyWorkflow tests a full create → modify → validate → finalize cycle
 // using in-memory tools without requiring LLM or runbook-server.
 
@@ -920,7 +939,7 @@ func TestBuildWorkflowSummary_CreateMode(t *testing.T) {
 		}
 	}`
 
-	summary, err := buildWorkflowSummary(workflowJSON, "", true)
+	summary, err := buildWorkflowSummary(workflowJSON, "", true, "")
 	assert.Nil(t, err)
 	assert.Contains(t, summary, "**`pod-health-monitor`**")
 	assert.Contains(t, summary, "built and saved")
@@ -943,7 +962,7 @@ func TestBuildWorkflowSummary_CreateMode_NotSaved(t *testing.T) {
 		}
 	}`
 
-	summary, err := buildWorkflowSummary(workflowJSON, "", false)
+	summary, err := buildWorkflowSummary(workflowJSON, "", false, "")
 	assert.Nil(t, err)
 	assert.Contains(t, summary, "**`pod-health-monitor`**")
 	assert.Contains(t, summary, "not yet saved")
@@ -961,11 +980,51 @@ func TestBuildWorkflowSummary_FixMode(t *testing.T) {
 		}
 	}`
 
-	summary, err := buildWorkflowSummary(workflowJSON, "fix", true)
+	summary, err := buildWorkflowSummary(workflowJSON, "fix", true, "")
 	assert.Nil(t, err)
 	assert.Contains(t, summary, "updated")
 	assert.NotContains(t, summary, "built and saved")
 	assert.NotContains(t, summary, "not yet saved")
+}
+
+// TestBuildWorkflowSummary_ChangeSummary verifies the agent-authored change summary is
+// rendered as a labeled paragraph between the headline and the trigger, with a mode-aware
+// label ("What changed" for an edit, "Approach" for a fresh build), and that an empty
+// summary degrades to the prior headline-only shape.
+func TestBuildWorkflowSummary_ChangeSummary(t *testing.T) {
+	workflowJSON := `{
+		"name": "declare-major-incident",
+		"definition": {
+			"triggers": [{"type": "event"}],
+			"tasks": [{"id": "create-incident-channel", "type": "notifications.create_channel"}]
+		}
+	}`
+
+	t.Run("fix mode renders What changed", func(t *testing.T) {
+		cs := "Added a dedup guard so a repeat event with the same fingerprint, subject name, and namespace reuses the existing channel."
+		summary, err := buildWorkflowSummary(workflowJSON, "fix", true, cs)
+		assert.Nil(t, err)
+		assert.Contains(t, summary, "**What changed:** "+cs)
+		// The reasoning must appear before the trigger/task list.
+		assert.Less(t, strings.Index(summary, "What changed"), strings.Index(summary, "**Trigger:**"))
+		assert.NotContains(t, summary, "**Approach:**")
+	})
+
+	t.Run("build mode renders Approach", func(t *testing.T) {
+		cs := "Creates the channel, joins the bot, then posts the incident details."
+		summary, err := buildWorkflowSummary(workflowJSON, "", true, cs)
+		assert.Nil(t, err)
+		assert.Contains(t, summary, "**Approach:** "+cs)
+		assert.NotContains(t, summary, "**What changed:**")
+	})
+
+	t.Run("empty summary degrades to headline-only", func(t *testing.T) {
+		summary, err := buildWorkflowSummary(workflowJSON, "fix", true, "   ")
+		assert.Nil(t, err)
+		assert.NotContains(t, summary, "What changed")
+		assert.NotContains(t, summary, "Approach")
+		assert.Contains(t, summary, "**Trigger:** event")
+	})
 }
 
 // TestBuildWorkflowSummary_FixMode_NotSaved verifies fix mode also reports a
@@ -980,7 +1039,7 @@ func TestBuildWorkflowSummary_FixMode_NotSaved(t *testing.T) {
 		}
 	}`
 
-	summary, err := buildWorkflowSummary(workflowJSON, "fix", false)
+	summary, err := buildWorkflowSummary(workflowJSON, "fix", false, "")
 	assert.Nil(t, err)
 	assert.Contains(t, summary, "**`daily-report`**")
 	assert.Contains(t, summary, "not yet saved")
@@ -996,7 +1055,7 @@ func TestBuildWorkflowSummary_ManualTriggerDefault(t *testing.T) {
 		}
 	}`
 
-	summary, err := buildWorkflowSummary(workflowJSON, "", true)
+	summary, err := buildWorkflowSummary(workflowJSON, "", true, "")
 	assert.Nil(t, err)
 	assert.Contains(t, summary, "**Trigger:** manual")
 }
@@ -1010,7 +1069,7 @@ func TestBuildWorkflowSummary_EmptyTasks(t *testing.T) {
 		}
 	}`
 
-	summary, err := buildWorkflowSummary(workflowJSON, "", true)
+	summary, err := buildWorkflowSummary(workflowJSON, "", true, "")
 	assert.Nil(t, err)
 	assert.Contains(t, summary, "**`empty-workflow`**")
 	assert.Contains(t, summary, "**Trigger:** webhook")
@@ -1025,13 +1084,13 @@ func TestBuildWorkflowSummary_MissingName(t *testing.T) {
 		}
 	}`
 
-	summary, err := buildWorkflowSummary(workflowJSON, "", true)
+	summary, err := buildWorkflowSummary(workflowJSON, "", true, "")
 	assert.Nil(t, err)
 	assert.Contains(t, summary, "**`automation`**") // defaults to "automation"
 }
 
 func TestBuildWorkflowSummary_InvalidJSON(t *testing.T) {
-	_, err := buildWorkflowSummary("not valid json", "", true)
+	_, err := buildWorkflowSummary("not valid json", "", true, "")
 	assert.NotNil(t, err)
 }
 
@@ -1046,7 +1105,7 @@ func TestBuildWorkflowSummary_MissingTaskFields(t *testing.T) {
 		}
 	}`
 
-	summary, err := buildWorkflowSummary(workflowJSON, "", true)
+	summary, err := buildWorkflowSummary(workflowJSON, "", true, "")
 	assert.Nil(t, err)
 	assert.Contains(t, summary, "1. **task-1** — `core.print`") // missing id defaults to task-N
 	assert.Contains(t, summary, "2. **has-id** — `unknown`")    // missing type defaults to unknown
@@ -1814,4 +1873,51 @@ func TestClarificationPrompt_DoesNotAskAboutSlackChannel(t *testing.T) {
 	// channel param entirely and produce an invalid notifications.im task.
 	assert.Contains(t, prompt, "{{ Configs.slack_channel }}",
 		"clarification prompt must reference {{ Configs.slack_channel }} so the LLM knows where the channel value comes from")
+}
+
+// TestParseClarifyingQuestionsJSON covers the shared post-processing used by both the create- and
+// edit-mode clarification paths: fence stripping, the maxQuestions cap, option sanitization, and the
+// guaranteed trailing "Skip" option.
+func TestParseClarifyingQuestionsJSON(t *testing.T) {
+	t.Run("strips fences, appends Skip", func(t *testing.T) {
+		raw := "```json\n{\"questions\":[{\"question\":\"Approach?\",\"options\":[\"Skip-if-exists (recommended)\",\"Reuse existing\"]}]}\n```"
+		qs, err := parseClarifyingQuestionsJSON(raw, 2)
+		assert.Nil(t, err)
+		assert.Len(t, qs, 1)
+		assert.Equal(t, "Approach?", qs[0].Question)
+		assert.Equal(t, []string{"Skip-if-exists (recommended)", "Reuse existing", "Skip"}, qs[0].Options)
+	})
+
+	t.Run("caps at maxQuestions", func(t *testing.T) {
+		raw := `{"questions":[{"question":"q1","options":["a"]},{"question":"q2","options":["b"]},{"question":"q3","options":["c"]}]}`
+		qs, err := parseClarifyingQuestionsJSON(raw, 2)
+		assert.Nil(t, err)
+		assert.Len(t, qs, 2)
+	})
+
+	t.Run("does not duplicate an existing Skip", func(t *testing.T) {
+		raw := `{"questions":[{"question":"q","options":["a","Skip"]}]}`
+		qs, err := parseClarifyingQuestionsJSON(raw, 2)
+		assert.Nil(t, err)
+		assert.Equal(t, []string{"a", "Skip"}, qs[0].Options)
+	})
+
+	t.Run("invalid json errors", func(t *testing.T) {
+		_, err := parseClarifyingQuestionsJSON("not json", 2)
+		assert.NotNil(t, err)
+	})
+}
+
+// TestEditClarificationPrompt asserts the edit-mode clarification prompt is biased toward asking
+// nothing and, when it does ask, mandates a recommended approach with options — the behavior the
+// feature requires. It must also embed the current workflow definition so the model can judge
+// ambiguity against the actual automation.
+func TestEditClarificationPrompt(t *testing.T) {
+	prompt := getEditClarificationSystemPrompt("ENV", "CONFIGS", "THE_DEFINITION")
+
+	assert.Contains(t, prompt, "THE_DEFINITION", "edit clarification prompt must include the current workflow definition")
+	assert.Regexp(t, `(?i)default strongly to no questions`, prompt, "prompt must bias toward applying clear edits directly")
+	assert.Contains(t, prompt, `{"questions": []}`, "prompt must tell the model how to signal 'no clarification needed'")
+	assert.Regexp(t, `(?i)recommended approach|lead with`, prompt, "prompt must require leading with a recommended approach")
+	assert.Regexp(t, `(?i)Maximum 2 questions`, prompt, "edit clarification must cap at 2 questions")
 }

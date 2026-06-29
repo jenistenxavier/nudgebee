@@ -118,7 +118,7 @@ INSTRUCTIONS:
    c. Call get_task_schema for that task type to verify the correct parameter format.
    d. Call modify_task to fix the specific issue.
    e. Call validate again. If the same error recurs, try a different approach entirely.
-5. Once validation passes, call finalize to return the completed automation JSON.
+5. Once validation passes, call finalize to return the completed automation JSON. In the finalize call, ALWAYS set change_summary to 1-3 plain-language sentences describing the approach you took (the key tasks/flow and why), so the user understands how the automation works.
 
 CRITICAL RULES:
 - Jinja2 references: {{ Tasks['task-id'].output.<field> }} (capital T, bracket notation)

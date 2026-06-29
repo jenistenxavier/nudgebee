@@ -152,6 +152,12 @@ type WorkflowBuilderAgent struct {
 	// of asking which account/cluster to target (#30162).
 	currentCluster   string
 	currentClusterId string
+
+	// changeSummary is the agent-authored explanation of WHAT it changed and WHY, captured from the
+	// finalize tool call and surfaced in the build/edit summary so the user sees the reasoning/approach
+	// behind a change — not just "has been updated". Transient per-request (set during runToolLoop, read
+	// in finalizeWithAutoSave); the agent is built fresh per turn so it never leaks across turns.
+	changeSummary string
 }
 
 func newWorkflowBuilderAgent(accountId string) *WorkflowBuilderAgent {
@@ -820,6 +826,96 @@ Return {"questions": []} ONLY when the request is specific and detailed enough t
 Maximum 3 questions.`, envContext, configsContext, intent)
 }
 
+// getEditClarificationSystemPrompt builds the LLM prompt that decides whether a CHANGE request to an
+// EXISTING automation is ambiguous enough to ask the user which approach to take. Unlike the create
+// clarification, it sees the current workflow definition and is biased hard toward asking NOTHING —
+// most edits are clear and should be applied directly. When it does ask, every question must lead
+// with a recommended approach and offer the materially-different alternatives as options, so the
+// user picks an approach in one click instead of getting a silently-guessed change.
+func getEditClarificationSystemPrompt(envContext, configsContext, workflowDefinition string) string {
+	return fmt.Sprintf(`You are about to modify an EXISTING Nudgebee automation. Before changing it, decide whether the user's change request is clear enough to implement directly, or whether there is GENUINE ambiguity in HOW to implement it that a wrong guess would get materially wrong.
+
+%s
+%s
+
+CURRENT AUTOMATION DEFINITION (the user wants to change this):
+%s
+
+YOUR JOB:
+1. Read the user's change request (the human message) against the automation above.
+2. Default STRONGLY to NO questions. Most edits are clear and must be applied directly — e.g. "change the timeout to 5m", "add a Slack alert on failure", "remove the email task", "rename task X". For anything like these, return {"questions": []}.
+3. Ask ONLY when the APPROACH is genuinely undecidable and picking the wrong one would produce an automation the user likely did not intend. Typical cases:
+   - The request names a behavior that can be built more than one materially different way (e.g. "dedup" could mean skip-if-already-exists, reuse-the-existing-resource, or merge-into-one).
+   - The request needs an integration/account/data source that maps to more than one configured option and the right one is not inferable from context.
+   - A new step needs a trigger field or input the request leaves open and a default would change the outcome.
+4. When you ask, FIRST decide on a recommended approach and lead with it; offer the alternative(s) as options so the user can accept your recommendation in one click. Never ask an open-ended "how should I do this?" — always propose.
+
+QUESTION STYLE:
+- Lead with your recommendation and a one-line description of the approach, then list concrete approaches as options. Example: question "To dedup, I'll add an 'if' guard on create-incident-channel that skips creation when an open channel already matches the event's fingerprint, subject_name, and subject_namespace. Use that approach?", options ["Skip if a matching channel exists (recommended)", "Reuse the existing channel and post there instead"].
+- Each option is a concrete, actionable approach — never a generic label like "Option A".
+- Draw integration/account/resource values ONLY from the context above. Never invent resource names (Slack channels, namespaces, buckets, tables). Defer those to {{ Configs.<key> }} — do NOT ask about them.
+- If a CURRENT CONTEXT account/cluster is given above, never ask which account, cluster, or workspace to target.
+- Option labels are the plain display name only — never a UUID, an "id=..." value, or a provider annotation like "(AWS ...)". The only allowed parenthetical is "(recommended)".
+
+OUTPUT FORMAT (JSON only, no other text):
+{
+  "questions": [
+    {
+      "question": "To dedup, I'll add an 'if' guard that skips channel creation when one already matches. Use that approach?",
+      "options": ["Skip if a matching channel exists (recommended)", "Reuse the existing channel and post there instead"]
+    }
+  ]
+}
+
+Return {"questions": []} whenever the change is clear enough to implement directly.
+Maximum 2 questions.`, envContext, configsContext, workflowDefinition)
+}
+
+// parseClarifyingQuestionsJSON parses the LLM clarification response ({"questions":[...]}) and
+// post-processes it: strips markdown fences, caps the list at maxQuestions, sanitizes option labels
+// (stripping internal identifiers — provider annotations, id=<uuid>, bare UUIDs), and guarantees a
+// trailing "Skip" option on every question. Shared by the create- and edit-mode clarification paths.
+func parseClarifyingQuestionsJSON(content string, maxQuestions int) ([]ClarifyingQuestion, error) {
+	content = strings.TrimSpace(content)
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	var result struct {
+		Questions []ClarifyingQuestion `json:"questions"`
+	}
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		return nil, err
+	}
+
+	if len(result.Questions) > maxQuestions {
+		result.Questions = result.Questions[:maxQuestions]
+	}
+
+	// Strip internal identifiers (provider annotations, id=<uuid>, bare UUIDs) that the LLM copies
+	// from the ACCOUNT ENVIRONMENT context into user-facing option labels (#30885, #31141).
+	for i := range result.Questions {
+		result.Questions[i].Options = sanitizeQuestionOptions(result.Questions[i].Options)
+	}
+
+	// Ensure every question has "Skip" as its last option.
+	for i := range result.Questions {
+		hasSkip := false
+		for _, opt := range result.Questions[i].Options {
+			if strings.EqualFold(opt, "Skip") {
+				hasSkip = true
+				break
+			}
+		}
+		if !hasSkip {
+			result.Questions[i].Options = append(result.Questions[i].Options, "Skip")
+		}
+	}
+
+	return result.Questions, nil
+}
+
 func (a *WorkflowBuilderAgent) generateClarifyingQuestions(ctx *security.RequestContext, request core.NBAgentRequest, intent string) ([]ClarifyingQuestion, error) {
 	// includeAccountIDs=false: clarification options are user-facing, so the id= UUID
 	// must never enter this context (#31141). The account_id→UUID mapping happens later
@@ -852,49 +948,55 @@ func (a *WorkflowBuilderAgent) generateClarifyingQuestions(ctx *security.Request
 		return nil, nil
 	}
 
-	content := strings.TrimSpace(completion.Choices[0].Content)
-	// Strip markdown code fences if present
-	content = strings.TrimPrefix(content, "```json")
-	content = strings.TrimPrefix(content, "```")
-	content = strings.TrimSuffix(content, "```")
-	content = strings.TrimSpace(content)
-
-	var result struct {
-		Questions []ClarifyingQuestion `json:"questions"`
+	questions, err := parseClarifyingQuestionsJSON(completion.Choices[0].Content, 3)
+	if err != nil {
+		ctx.GetLogger().Warn("workflow_builder: failed to parse clarification response", "error", err, "content", completion.Choices[0].Content)
+		return nil, nil
 	}
-	if err := json.Unmarshal([]byte(content), &result); err != nil {
-		ctx.GetLogger().Warn("workflow_builder: failed to parse clarification response", "error", err, "content", content)
+	return questions, nil
+}
+
+// generateEditClarifyingQuestions asks the LLM whether a CHANGE request to an existing automation is
+// ambiguous enough that the user should pick the approach. It mirrors generateClarifyingQuestions but
+// is edit-specific: it includes the current workflow definition and is biased to return ZERO
+// questions (most edits are clear). When it does ask, each question leads with a recommended approach
+// and offers the materially-different alternatives as options. Returns nil (apply directly) when the
+// change is clear or on any non-fatal classifier error.
+func (a *WorkflowBuilderAgent) generateEditClarifyingQuestions(ctx *security.RequestContext, request core.NBAgentRequest, workflowDefinition string) ([]ClarifyingQuestion, error) {
+	// includeAccountIDs=false: option labels are user-facing, so the id= UUID must never enter this
+	// context (#31141) — the account_id→UUID mapping happens later in resolveCloudAccountIds.
+	envContext := a.buildEnvironmentContext(ctx, false)
+	configsContext := fetchConfigsContext(ctx, a.accountId)
+	systemPrompt := getEditClarificationSystemPrompt(envContext, configsContext, workflowDefinition)
+
+	messageContent := []llms.MessageContent{
+		llms.TextParts(llms.ChatMessageTypeSystem, systemPrompt),
+		llms.TextParts(llms.ChatMessageTypeHuman, request.Query),
+	}
+
+	// Lite/fast model — this is a yes/ask classification, same as the create-mode clarification.
+	clarifyCtx := security.NewRequestContext(
+		context.WithValue(ctx.GetContext(), core.ContextKeyModelTier, core.ModelTierRetrieval),
+		ctx.GetSecurityContext(),
+		ctx.GetLogger(),
+		ctx.GetTracer(),
+		ctx.GetMeter(),
+	)
+
+	completion, err := core.GenerateAndTrackLLMContent(clarifyCtx, request.UserId, request.AccountId, request.ConversationId, request.MessageId, request.AgentId, true, messageContent, false, llms.WithTemperature(0.0))
+	if err != nil {
+		return nil, fmt.Errorf("edit clarification LLM call failed: %w", err)
+	}
+	if len(completion.Choices) == 0 || completion.Choices[0].Content == "" {
 		return nil, nil
 	}
 
-	// Cap at 3 questions
-	if len(result.Questions) > 3 {
-		result.Questions = result.Questions[:3]
+	questions, err := parseClarifyingQuestionsJSON(completion.Choices[0].Content, 2)
+	if err != nil {
+		ctx.GetLogger().Warn("workflow_builder: failed to parse edit clarification response", "error", err, "content", completion.Choices[0].Content)
+		return nil, nil
 	}
-
-	// Strip internal identifiers (provider annotations, id=<uuid>, bare UUIDs) that the
-	// LLM copies from the ACCOUNT ENVIRONMENT context into user-facing option labels
-	// (#30885, #31141). The id is needed by the LLM for account_id mapping but must
-	// never be shown to the user.
-	for i := range result.Questions {
-		result.Questions[i].Options = sanitizeQuestionOptions(result.Questions[i].Options)
-	}
-
-	// Ensure every question has "Skip" as last option
-	for i := range result.Questions {
-		hasSkip := false
-		for _, opt := range result.Questions[i].Options {
-			if strings.EqualFold(opt, "Skip") {
-				hasSkip = true
-				break
-			}
-		}
-		if !hasSkip {
-			result.Questions[i].Options = append(result.Questions[i].Options, "Skip")
-		}
-	}
-
-	return result.Questions, nil
+	return questions, nil
 }
 
 // handleClarificationResponse processes the user's answer to a clarifying question.
@@ -917,11 +1019,16 @@ func (a *WorkflowBuilderAgent) handleClarificationResponse(ctx *security.Request
 		return a.buildClarificationResponse(request, nextQ)
 	}
 
-	// All questions answered — build clarification context and proceed to plan
+	// All questions answered — build the clarification context and route back to the flow that
+	// asked. An EDIT (fix mode with a target workflow) resumes the edit loop with the chosen
+	// approach; otherwise this is a CREATE clarification, which proceeds to plan generation.
 	clarificationContext := a.buildClarificationContext()
 
 	originalRequest := request
 	originalRequest.Query = a.state.OriginalQuery
+	if a.state.Mode == "fix" && a.state.WorkflowId != "" {
+		return a.runEditToolLoop(ctx, originalRequest, clarificationContext)
+	}
 	return a.generatePlanAndAskApproval(ctx, originalRequest, a.state.Intent, clarificationContext)
 }
 
@@ -1007,7 +1114,7 @@ INSTRUCTIONS:
    c. Call get_task_schema for that task type to verify the correct parameter format.
    d. Call modify_task to fix the specific issue.
    e. Call validate again. If the same error recurs, try a different approach entirely.
-5. Once validation passes, call finalize to return the completed automation JSON.
+5. Once validation passes, call finalize to return the completed automation JSON. In the finalize call, ALWAYS set change_summary to 1-3 plain-language sentences describing the approach you took (the key tasks/flow and why), so the user understands how the automation works.
 
 CRITICAL RULES:
 - Jinja2 references: {{ Tasks['task-id'].output.<field> }} (capital T, bracket notation)
@@ -1131,7 +1238,7 @@ IF CHANGING/EXTENDING:
 
 THEN, ALWAYS:
 - Call validate. If it fails, read the error, fix the specific task, and validate again (try a different approach if the same error recurs).
-- Once validation passes, call finalize to return the complete updated automation JSON.
+- Once validation passes, call finalize to return the complete updated automation JSON. In the finalize call, ALWAYS set change_summary to 1-3 plain-language sentences stating WHAT you changed and WHY (the approach/reasoning) — e.g. which tasks/conditions you added, removed, or modified and the problem it solves — so the user sees more than "updated".
 
 RULES:
 - Change only what is NECESSARY. Preserve existing task IDs, dependencies, and logic that the request does not touch.
@@ -1455,7 +1562,7 @@ func (a *WorkflowBuilderAgent) finalizeWithAutoSave(ctx *security.RequestContext
 	saved := workflowId != ""
 
 	// Build a human-readable summary instead of returning raw JSON
-	summary, summaryErr := buildWorkflowSummary(workflowJSON, a.state.Mode, saved)
+	summary, summaryErr := buildWorkflowSummary(workflowJSON, a.state.Mode, saved, a.changeSummary)
 	if summaryErr != nil {
 		ctx.GetLogger().Warn("workflow_builder: failed to build summary, returning raw JSON", "error", summaryErr)
 		return core.NBAgentResponse{Response: []string{workflowJSON}, IsTerminal: true}
@@ -1568,7 +1675,13 @@ func summaryHeadline(name, mode string, saved bool) string {
 // buildWorkflowSummary parses the workflow JSON and returns a markdown summary
 // with the workflow name, trigger type, and a numbered list of tasks. The headline
 // reflects whether the workflow was persisted to the automation server.
-func buildWorkflowSummary(workflowJSON string, mode string, saved bool) (string, error) {
+//
+// changeSummary is the agent-authored explanation of the approach/reasoning behind the
+// change (captured from the finalize tool call). When present it is rendered as a labeled
+// paragraph right after the headline so the user sees WHY the automation looks the way it
+// does, not just the resulting task list. When empty the summary degrades to the prior
+// headline + trigger + tasks shape.
+func buildWorkflowSummary(workflowJSON string, mode string, saved bool, changeSummary string) (string, error) {
 	var wf map[string]interface{}
 	if err := json.Unmarshal([]byte(workflowJSON), &wf); err != nil {
 		return "", fmt.Errorf("buildWorkflowSummary: failed to parse workflow JSON: %w", err)
@@ -1613,6 +1726,15 @@ func buildWorkflowSummary(workflowJSON string, mode string, saved bool) (string,
 	var sb strings.Builder
 	sb.WriteString(headline)
 	sb.WriteString("\n\n")
+	if cs := strings.TrimSpace(changeSummary); cs != "" {
+		// "What changed" for an edit (mode "fix"), "Approach" for a fresh build — the agent's
+		// reasoning reads correctly under either framing.
+		label := "Approach"
+		if mode == "fix" {
+			label = "What changed"
+		}
+		fmt.Fprintf(&sb, "**%s:** %s\n\n", label, cs)
+	}
 	fmt.Fprintf(&sb, "**Trigger:** %s\n\n", triggerType)
 
 	if len(tasks) > 0 {
@@ -2443,8 +2565,8 @@ func getWorkflowToolDescriptions() string {
 		},
 		{
 			Name:        "finalize",
-			Description: "Finalize and return the complete automation JSON. Call this only after validate returns OK.",
-			Params:      `{}`,
+			Description: "Finalize and return the complete automation JSON. Call this only after validate returns OK. ALWAYS pass change_summary: 1-3 plain-language sentences explaining WHAT you changed/built and WHY (the approach and reasoning), so the user understands the change instead of only seeing that it happened.",
+			Params:      `{"change_summary": "Added a dedup guard so a repeat event with the same fingerprint, subject name, and namespace reuses the existing incident channel instead of creating a new one."}`,
 		},
 		{
 			Name:        "list_executions",
@@ -3270,6 +3392,11 @@ func (a *WorkflowBuilderAgent) executeWorkflowTool(ctx *security.RequestContext,
 	case "dry_run":
 		return a.toolDryRun(ctx)
 	case "finalize":
+		// Capture the agent's plain-language explanation of the change so finalizeWithAutoSave can
+		// surface the reasoning/approach in the summary instead of just "has been updated".
+		if cs, ok := args["change_summary"].(string); ok {
+			a.changeSummary = strings.TrimSpace(cs)
+		}
 		return a.toolFinalize()
 	case "list_executions":
 		return a.toolListExecutions(ctx, args)
@@ -3345,6 +3472,7 @@ RULES:
 - Do NOT generate <observation> tags — I will provide them.
 - Do NOT output both <thought_action> and <final_answer> in the same response.
 - Call validate before finalize.
+- When you call finalize, pass change_summary: a short plain-language explanation of what you changed/built and why.
 - Call finalize to return the completed workflow — put the JSON inside <content>.`, systemPrompt, toolDescriptions)
 
 	messages := []llms.MessageContent{
@@ -3517,14 +3645,65 @@ func (a *WorkflowBuilderAgent) handleEditEntry(ctx *security.RequestContext, req
 	a.state.OriginalQuery = request.Query
 
 	// errorContext (from the UI) and a targeted execution id let the agent jump straight to the
-	// relevant run when the user is debugging a specific failure; both are optional.
-	errorContext := request.QueryContext
-	targetExecutionId := request.QueryConfig.ExecutionId
-	a.state.ExecutionId = targetExecutionId
+	// relevant run when the user is debugging a specific failure; both are optional. They are
+	// persisted on state so a resume after a clarification round still reaches the right run.
+	a.state.ExecutionError = request.QueryContext
+	a.state.ExecutionId = request.QueryConfig.ExecutionId
+
+	// Ambiguity gate: when the requested CHANGE could be implemented more than one materially
+	// different way, ask the user which approach to take (with a recommended option) instead of
+	// silently guessing — then resume the edit with their answer as context. Skipped for failure
+	// debugging (an error context or a target execution id means "fix this specific failure", which
+	// is already a concrete intent). Non-fatal: on any classifier error we proceed straight to the
+	// edit, so an ambiguity check can never dead-end the request.
+	if a.state.ExecutionError == "" && a.state.ExecutionId == "" {
+		questions, qErr := a.generateEditClarifyingQuestions(ctx, request, string(workflowResp))
+		if qErr != nil {
+			ctx.GetLogger().Warn("workflow_builder: edit clarification generation failed, proceeding directly", "error", qErr)
+		} else if len(questions) > 0 {
+			a.state.Stage = "clarification"
+			a.state.ClarifyingQuestions = questions
+			a.state.ClarifyingAnswers = make([]string, len(questions))
+			a.state.ClarifyingIndex = 0
+			return a.buildClarificationResponse(request, questions[0])
+		}
+	}
+
+	return a.runEditToolLoop(ctx, request, "")
+}
+
+// runEditToolLoop applies the (now-disambiguated) change to the loaded automation and persists it.
+// It is reached either directly from handleEditEntry when no clarification was needed, or from
+// handleClarificationResponse after the user chose an approach — in which case clarificationContext
+// carries their answers for the edit prompt. The working workflow is expected to be loaded on state;
+// it is re-fetched defensively if a state round-trip dropped it. The agent decides from the request
+// whether to gather execution evidence (debug) or design a feature change (enhance) — there is no
+// hardcoded "find the failed run" gate, so an enhancement request is never dead-ended with "No
+// failed runs found". The edited definition funnels through the same checkMissingConfigs →
+// finalizeWithAutoSave path as a build, so it auto-saves and the canvas refreshes.
+func (a *WorkflowBuilderAgent) runEditToolLoop(ctx *security.RequestContext, request core.NBAgentRequest, clarificationContext string) (core.NBAgentResponse, error) {
+	// Defensive reload: handleEditEntry loads WorkingWorkflow before this runs, but a clarification
+	// round-trips through persisted state — re-fetch if that dropped the in-memory definition.
+	if a.state.WorkingWorkflow == nil && a.state.WorkflowId != "" {
+		workflowResp, err := tools.DoRunbookRequest("GET", fmt.Sprintf("workflows/%s", a.state.WorkflowId), nil, a.accountId, ctx.GetSecurityContext().GetTenantId(), ctx.GetSecurityContext().GetUserId())
+		if err != nil {
+			return core.NBAgentResponse{}, fmt.Errorf("runEditToolLoop: failed to reload workflow %s: %w", a.state.WorkflowId, err)
+		}
+		var workflow map[string]interface{}
+		if err := json.Unmarshal(workflowResp, &workflow); err != nil {
+			return core.NBAgentResponse{}, fmt.Errorf("runEditToolLoop: failed to parse workflow JSON: %w", err)
+		}
+		a.state.WorkingWorkflow = workflow
+	}
 
 	schema := getWorkflowSchema()
-	systemPrompt := getEditSystemPrompt(errorContext, targetExecutionId, schema)
-	userMessage := fmt.Sprintf("Apply the user's request to the existing automation: %s", request.Query)
+	systemPrompt := getEditSystemPrompt(a.state.ExecutionError, a.state.ExecutionId, schema)
+	// Use OriginalQuery (the change request), not request.Query — on a clarification resume the latter
+	// is the user's option answer, not the original instruction.
+	userMessage := fmt.Sprintf("Apply the user's request to the existing automation: %s", a.state.OriginalQuery)
+	if cc := strings.TrimSpace(clarificationContext); cc != "" {
+		userMessage += "\n" + cc
+	}
 
 	workflowJSON, err := a.runToolLoop(ctx, request, systemPrompt, userMessage)
 	if err != nil {
