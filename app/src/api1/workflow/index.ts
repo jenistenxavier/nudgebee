@@ -7,6 +7,7 @@ import type {
   WorkflowRetriggerRequest,
   WorkflowCancelRequest,
   WorkflowCompleteApprovalRequest,
+  WorkflowValidateRequest,
 } from './types';
 
 export const GET_WORKFLOW_BY_ID = `
@@ -209,6 +210,14 @@ export const CREATE_WORKFLOW = `
 mutation CreateWorkflow($request: WorkflowCreateRequest!) {
   workflow_create(request: $request) {
     id
+  }
+}
+`;
+
+export const VALIDATE_WORKFLOW = `
+mutation ValidateWorkflow($request: WorkflowValidateRequest!) {
+  workflow_validate(request: $request) {
+    message
   }
 }
 `;
@@ -799,6 +808,20 @@ const apiWorkflow = {
       const variables = { request };
 
       const response = await queryGraphQL(query, 'UpdateWorkflow', variables);
+      return {
+        data: response?.data?.data,
+        errors: response?.data?.errors,
+      };
+    } catch (error) {
+      return error;
+    }
+  },
+  async validateWorkflow(request: WorkflowValidateRequest) {
+    try {
+      const query = VALIDATE_WORKFLOW;
+      const variables = { request };
+
+      const response = await queryGraphQL(query, 'ValidateWorkflow', variables);
       return {
         data: response?.data?.data,
         errors: response?.data?.errors,

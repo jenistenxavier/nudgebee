@@ -73,6 +73,9 @@ const SwitchNode = ({ id, data, isConnectable, selected, onAddFromHandle }: any)
   };
 
   const getValidationIcon = () => {
+    if (data.serverError) {
+      return <SafeIcon src={ErrorIcon} alt='server-error-icon' width={24} height={24} />;
+    }
     if (!data.taskConfig || data.taskConfig.valid !== false) return null;
     return <SafeIcon src={alertYellowIcon} alt='alert-icon' width={24} height={24} />;
   };
@@ -220,11 +223,40 @@ const SwitchNode = ({ id, data, isConnectable, selected, onAddFromHandle }: any)
 
   return (
     <div style={{ position: 'relative' }}>
+      {data.serverError && (
+        <div
+          data-testid='switch-node-server-error-badge'
+          title={data.serverError}
+          style={{
+            position: 'absolute',
+            top: -10,
+            right: 12,
+            zIndex: 10,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+            padding: 'var(--ds-space-1) var(--ds-space-2)',
+            borderRadius: 999,
+            background: '#dc2626',
+            color: 'white',
+            fontSize: 10,
+            fontWeight: 'var(--ds-font-weight-semibold)',
+            letterSpacing: 0.3,
+            textTransform: 'uppercase',
+            boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
+            cursor: 'help',
+          }}
+        >
+          Server Error
+        </div>
+      )}
       <BaseNode
         selected={selected}
         border={
           data.connectionRejected
             ? '3px solid #ef4444'
+            : data.serverError
+            ? '2px solid #dc2626'
             : data.taskConfig?.valid === false
             ? '2px solid #fbbf24'
             : selected

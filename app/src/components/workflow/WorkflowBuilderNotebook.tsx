@@ -41,6 +41,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import ArrowDropDownIcon from '@mui/icons-material/ArrowDropDown';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import PublishedWithChangesIcon from '@mui/icons-material/PublishedWithChanges';
+import PlaylistAddCheckIcon from '@mui/icons-material/PlaylistAddCheck';
 
 type WorkflowVersionEntry = {
   id: string;
@@ -243,6 +244,39 @@ function buildNewEdge(connection: any, nodes: any[]) {
 
 type WorkflowBuilderMode = 'editor' | 'json' | 'executions';
 
+const mapBackendErrorsToNodes = (errorMessage: string, nodes: any[]): Record<string, string> => {
+  const errorsMap: Record<string, string> = {};
+  if (!errorMessage) return errorsMap;
+
+  const parts = errorMessage.split(';');
+  parts.forEach((part) => {
+    const trimmed = part.trim();
+    const taskMatch = trimmed.match(/task ['"]([^'"]+)['"]/);
+    if (taskMatch) {
+      const taskId = taskMatch[1];
+      const matchingNode = nodes.find((n) => n.id === taskId || n.data?.taskConfig?.id === taskId);
+      if (matchingNode) {
+        errorsMap[matchingNode.id] = trimmed;
+      }
+      return;
+    }
+
+    if (
+      trimmed.toLowerCase().includes('cron') ||
+      trimmed.toLowerCase().includes('trigger') ||
+      trimmed.toLowerCase().includes('params failed validation')
+    ) {
+      const triggerNodes = nodes.filter((n) => n.type === 'trigger');
+      triggerNodes.forEach((node) => {
+        errorsMap[node.id] = trimmed;
+      });
+      return;
+    }
+  });
+
+  return errorsMap;
+};
+
 interface WorkflowBuilderNotebookProps {
   mode?: 'create' | 'edit';
 }
@@ -326,6 +360,7 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
   const [loading, setLoading] = useState<boolean>(true);
   // Tracks whether the workflow has been fully loaded and state is ready for unsaved changes tracking
   const [isInitialized, setIsInitialized] = useState<boolean>(false);
+  const [serverErrors, setServerErrors] = useState<Record<string, string>>({});
 
   const [workflowSettings, setWorkflowSettings] = useState<WorkflowSettings>({
     timeout: '5m',
@@ -1513,6 +1548,49 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
     setAutoFitViewport(viewport || null);
   }, [nodes, edges, workflowData, taskDefinitions]);
 
+  const runValidation = async (showSuccess: boolean = false): Promise<boolean> => {
+    try {
+      const { definition: workflowDefinition } = prepareWorkflowForSave(
+        nodes,
+        edges,
+        (nodes: Node[]) => extractTasksFromWorkflowNodes(nodes, edges),
+        extractTriggersFromNodes,
+        workflowSettings,
+        workflowData?.definition,
+        reactFlowInstanceRef.current?.getViewport()
+      );
+
+      const validateRequest = {
+        account_id: accountId,
+        workflow: {
+          definition: workflowDefinition,
+          name: workflowData?.name || 'New Automation',
+          tags: workflowSettings.tags || {},
+        },
+      };
+
+      const response: any = await apiWorkflow.validateWorkflow(validateRequest);
+
+      const errorMessage = parseHttpResponseBodyMessage(response);
+      if (errorMessage) {
+        const errorsMap = mapBackendErrorsToNodes(errorMessage, nodes);
+        setServerErrors(errorsMap);
+        snackbar.error(`Validation failed: ${errorMessage}`);
+        return false;
+      }
+
+      setServerErrors({});
+      if (showSuccess) {
+        snackbar.success('Workflow validation succeeded! No errors found.');
+      }
+      return true;
+    } catch (err: any) {
+      console.error('Validation error:', err);
+      snackbar.error(`Validation failed: ${err.message || err}`);
+      return false;
+    }
+  };
+
   // Returns true when the save (create or update) was actually persisted.
   // false signals an early bail or backend failure so callers like the
   // Publish-confirm path can abort instead of snapshotting a stale draft.
@@ -1534,6 +1612,12 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
       const validationErrors = validateWorkflowForSave(workflowData, nodes, (nodes: Node[]) => extractTasksFromWorkflowNodes(nodes, edges));
       if (validationErrors.length > 0) {
         snackbar.error(`Cannot save automation: ${validationErrors.join(', ')}`);
+        return false;
+      }
+
+      // Validate workflow server-side using the RPC action
+      const isServerValid = await runValidation(false);
+      if (!isServerValid) {
         return false;
       }
 
@@ -3058,6 +3142,16 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
     []
   );
 
+  const nodesWithServerErrors = useMemo(() => {
+    return nodes.map((node) => ({
+      ...node,
+      data: {
+        ...node.data,
+        serverError: serverErrors[node.id] || null,
+      },
+    }));
+  }, [nodes, serverErrors]);
+
   // Update node statuses from workflow task execution data
   const updateNodeStatusesFromTasks = (tasks: any[]) => {
     const taskStatusMap = new Map<string, any>();
@@ -3563,7 +3657,7 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
                         }}
                       >
                         <ReactFlow
-                          nodes={nodes}
+                          nodes={nodesWithServerErrors}
                           edges={edges}
                           onNodesChange={onNodesChange}
                           onEdgesChange={onEdgesChange}
@@ -3927,6 +4021,22 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
                                 persists the on-screen draft and does NOT snapshot
                                 a new version; the explicit Publish button in the
                                 top-right state strip is what produces a version. */}
+                          {canEdit && (
+                            <Tooltip title='Validate the workflow definition on the server'>
+                              <span style={{ marginRight: 'var(--ds-space-2)' }}>
+                                <Button
+                                  id='workflow-validate-btn'
+                                  tone='ghost'
+                                  size='sm'
+                                  icon={<PlaylistAddCheckIcon sx={{ fontSize: 16 }} />}
+                                  onClick={() => runValidation(true)}
+                                >
+                                  Validate
+                                </Button>
+                              </span>
+                            </Tooltip>
+                          )}
+
                           {canEdit && (
                             <Tooltip
                               title={
