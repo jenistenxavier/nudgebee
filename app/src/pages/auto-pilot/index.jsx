@@ -7,7 +7,7 @@ import { hasWriteAccess, getUserSession } from '@lib/auth';
 import { DropdownMenu as DsDropdownMenu } from '@components1/ds/DropdownMenu';
 import { Button as DsButton } from '@components1/ds/Button';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
-import { BetaIcon, WorkflowIconBlue, AutomateBlue } from '@assets';
+import { BetaIcon, WorkflowIconBlue, AutomateBlue, PlayCircleIcon } from '@assets';
 import { ds } from '@utils/colors';
 import TaskRunner from '@components1/workflow/TaskRunner';
 import AutoOptimizeTabs from '@components1/autopilot/tables/AutoOptimizeTabs';
@@ -49,7 +49,7 @@ const AutoPilot = () => {
       value: 2,
       fragment: 'task-runner',
       disabled: !isAdmin,
-      icon: WorkflowIconBlue,
+      icon: PlayCircleIcon,
     },
   ];
 
@@ -57,7 +57,7 @@ const AutoPilot = () => {
     const hash = router.asPath.split('#')[1];
     if (!hash || !filterOptions.length) return;
     const [fragment, subFragment] = hash.split('/');
-    const filter = filterOptions.find((option) => option.fragment === fragment);
+    const filter = filterOptions.find((option) => option.fragment === fragment && !option.disabled);
     if (filter) {
       setSelectedFilter(filter.value);
       if (!subFragment) return;
@@ -119,7 +119,7 @@ const AutoPilot = () => {
       <AnchorComponent
         manageRoute={true}
         options={filterOptions[selectedFilter]?.options || []}
-        filterOptions={filterOptions}
+        filterOptions={filterOptions.filter((opt) => !opt.disabled)}
         // Updated Handler: Pushes new Hash URL instead of setting state directly
         onChangeFilter={(val, subVal) => {
           setSelectedFilter(val);

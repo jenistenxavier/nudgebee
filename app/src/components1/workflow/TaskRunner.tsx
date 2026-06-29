@@ -76,20 +76,32 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
     try {
       // Coerce param types based on input_schema
       const coercedParams: Record<string, any> = {};
-      Object.entries(params).forEach(([key, value]) => {
+      for (const [key, value] of Object.entries(params)) {
+        if (value === '') {
+          // If optional and empty, skip sending it to avoid sending invalid format strings
+          if (!selectedTask.input_schema?.required?.includes(key)) {
+            continue;
+          }
+        }
         const fieldSchema = selectedTask.input_schema?.properties?.[key];
         if (fieldSchema?.type === 'integer') {
           const parsed = parseInt(value, 10);
-          coercedParams[key] = isNaN(parsed) ? value : parsed;
+          if (isNaN(parsed)) {
+            throw new Error(`Parameter "${key}" must be an integer.`);
+          }
+          coercedParams[key] = parsed;
         } else if (fieldSchema?.type === 'boolean') {
-          coercedParams[key] = value === 'true';
+          coercedParams[key] = value === 'true' || value === '1';
         } else if (fieldSchema?.type === 'number') {
           const parsed = parseFloat(value);
-          coercedParams[key] = isNaN(parsed) ? value : parsed;
+          if (isNaN(parsed)) {
+            throw new Error(`Parameter "${key}" must be a number.`);
+          }
+          coercedParams[key] = parsed;
         } else {
           coercedParams[key] = value;
         }
-      });
+      }
 
       const resp: any = await apiWorkflow.triggerTask(accountId, selectedTask.name, coercedParams);
       if (resp instanceof Error) {
