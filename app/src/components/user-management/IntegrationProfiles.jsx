@@ -303,7 +303,7 @@ export default function IntegrationProfiles({ userId, onNotify, readOnly = false
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <Select
                     id='user-modal-map-account'
-                    placeholder={selectedType ? 'Select an account' : 'Pick an integration type first'}
+                    placeholder={selectedType ? 'Select an User account' : 'Pick an integration type first'}
                     value={selectedToMap}
                     options={profileOptions}
                     onChange={(next) => setSelectedToMap(next)}
