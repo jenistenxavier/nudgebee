@@ -5,16 +5,18 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"nudgebee/llm/agents/core"
-	"nudgebee/llm/config"
-	"nudgebee/llm/security"
-	toolcore "nudgebee/llm/tools/core"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
+	"nudgebee/llm/agents/core"
+	"nudgebee/llm/config"
+	"nudgebee/llm/security"
+	toolcore "nudgebee/llm/tools/core"
+
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/tmc/langchaingo/llms"
 )
 
 // displayText returns the text a user sees in the chat for this turn: the
@@ -1920,4 +1922,250 @@ func TestEditClarificationPrompt(t *testing.T) {
 	assert.Contains(t, prompt, `{"questions": []}`, "prompt must tell the model how to signal 'no clarification needed'")
 	assert.Regexp(t, `(?i)recommended approach|lead with`, prompt, "prompt must require leading with a recommended approach")
 	assert.Regexp(t, `(?i)Maximum 2 questions`, prompt, "edit clarification must cap at 2 questions")
+}
+
+// ==================== Bug fix regression tests ====================
+
+// TestFetchTaskTypeNames_WrappedAndBareFormats verifies fetchTaskTypeNames handles both
+// the wrapped {"tasks":[...]} and bare [...] response formats from the runbook server.
+func TestFetchTaskTypeNames_WrappedAndBareFormats(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		contains []string
+		empty    bool
+	}{
+		{
+			name:     "wrapped format",
+			body:     `{"tasks":[{"name":"k8s.cli"},{"name":"core.print"}]}`,
+			contains: []string{"k8s.cli", "core.print"},
+		},
+		{
+			name:     "bare array format",
+			body:     `[{"name":"k8s.cli"}]`,
+			contains: []string{"k8s.cli"},
+		},
+		{
+			name:  "empty response",
+			body:  ``,
+			empty: true,
+		},
+		{
+			name:  "invalid JSON",
+			body:  `not json`,
+			empty: true,
+		},
+		{
+			name:  "wrapped with empty tasks",
+			body:  `{"tasks":[]}`,
+			empty: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			oldEndpoint := config.Config.WorkflowServerEndpoint
+			config.Config.WorkflowServerEndpoint = srv.URL
+			defer func() { config.Config.WorkflowServerEndpoint = oldEndpoint }()
+
+			agent := newWorkflowBuilderAgent("test-account")
+			ctx := security.NewRequestContextForTenantAccountAdmin("tenant-1", "user-1", []string{"test-account"})
+
+			result := agent.fetchTaskTypeNames(ctx)
+
+			if tc.empty {
+				assert.Equal(t, "", result)
+			} else {
+				for _, s := range tc.contains {
+					assert.Contains(t, result, s)
+				}
+			}
+		})
+	}
+}
+
+// TestSafeChoiceContent verifies the guard against nil/empty LLM responses.
+func TestSafeChoiceContent(t *testing.T) {
+	cases := []struct {
+		name       string
+		completion *llms.ContentResponse
+		wantText   string
+		wantErr    bool
+	}{
+		{
+			name:       "nil completion",
+			completion: nil,
+			wantErr:    true,
+		},
+		{
+			name:       "empty choices",
+			completion: &llms.ContentResponse{Choices: []*llms.ContentChoice{}},
+			wantErr:    true,
+		},
+		{
+			name: "valid choice",
+			completion: &llms.ContentResponse{
+				Choices: []*llms.ContentChoice{{Content: "  hello world  "}},
+			},
+			wantText: "hello world",
+			wantErr:  false,
+		},
+		{
+			name: "empty content string",
+			completion: &llms.ContentResponse{
+				Choices: []*llms.ContentChoice{{Content: ""}},
+			},
+			wantText: "",
+			wantErr:  false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			text, err := safeChoiceContent(tc.completion)
+			if tc.wantErr {
+				assert.Error(t, err)
+				assert.Equal(t, "", text)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tc.wantText, text)
+			}
+		})
+	}
+}
+
+// TestToolInitWorkflow_ReInitGuard verifies that re-initializing a workflow
+// with existing tasks returns a warning instead of silently overwriting.
+func TestToolInitWorkflow_ReInitGuard(t *testing.T) {
+	agent := newWorkflowBuilderAgent("test-account")
+
+	// First init — should succeed.
+	result := agent.toolInitWorkflow(map[string]interface{}{
+		"name": "my-workflow",
+	})
+	assert.Contains(t, result, "initialized")
+
+	// Add a task.
+	agent.toolAddTask(map[string]interface{}{
+		"id":   "task-1",
+		"type": "core.print",
+		"params": map[string]interface{}{
+			"message": "hello",
+		},
+	})
+
+	// Re-init should warn and refuse.
+	result = agent.toolInitWorkflow(map[string]interface{}{
+		"name": "overwritten-name",
+	})
+	assert.Contains(t, result, "Warning")
+	assert.Contains(t, result, "1 task(s)")
+
+	// Original workflow should be preserved.
+	assert.Equal(t, "my-workflow", agent.state.WorkingWorkflow["name"])
+	taskList := agent.toolListTasks(map[string]interface{}{})
+	assert.Contains(t, taskList, "task-1")
+
+	// Re-init on empty workflow (no tasks) should succeed.
+	agent2 := newWorkflowBuilderAgent("test-account")
+	agent2.toolInitWorkflow(map[string]interface{}{"name": "first"})
+	result = agent2.toolInitWorkflow(map[string]interface{}{"name": "second"})
+	assert.Contains(t, result, "initialized")
+	assert.Equal(t, "second", agent2.state.WorkingWorkflow["name"])
+}
+
+// TestParseAgentId verifies safe UUID parsing for agent IDs.
+func TestParseAgentId(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		wantNil  bool
+		wantUUID string
+	}{
+		{"valid UUID", "5d064c4c-bb53-4630-95ff-f6bb7b9133a6", false, "5d064c4c-bb53-4630-95ff-f6bb7b9133a6"},
+		{"empty string", "", true, ""},
+		{"invalid string", "not-a-uuid", true, ""},
+		{"malformed", "12345", true, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Must not panic.
+			result := parseAgentId(tc.input)
+			if tc.wantNil {
+				assert.Equal(t, uuid.Nil, result)
+			} else {
+				assert.Equal(t, tc.wantUUID, result.String())
+			}
+		})
+	}
+}
+
+// TestIsRawWorkflowJSON verifies the stricter validation for raw JSON fallback
+// in the tool loop (Bug 7).
+func TestIsRawWorkflowJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{
+			name: "valid workflow JSON",
+			in:   `{"name":"test","definition":{"tasks":[]}}`,
+			want: true,
+		},
+		{
+			name: "missing name key",
+			in:   `{"definition":{"tasks":[]}}`,
+			want: false,
+		},
+		{
+			name: "missing definition key",
+			in:   `{"name":"test","tasks":[]}`,
+			want: false,
+		},
+		{
+			name: "definition as substring not key",
+			in:   `{"message":"check the definition field"}`,
+			want: false,
+		},
+		{
+			name: "invalid JSON starting with brace",
+			in:   `{not valid json}`,
+			want: false,
+		},
+		{
+			name: "empty string",
+			in:   "",
+			want: false,
+		},
+		{
+			name: "array JSON",
+			in:   `[{"name":"test"}]`,
+			want: false,
+		},
+		{
+			name: "valid with whitespace",
+			in:   `  {"name": "test", "definition": {"version": "v1"}}  `,
+			want: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isRawWorkflowJSON(tc.in))
+		})
+	}
+}
+
+// TestAntiThrash_ThresholdRaised verifies that the read-only tool streak threshold
+// is set to 6 to avoid premature nudges in multi-task workflows.
+func TestAntiThrash_ThresholdRaised(t *testing.T) {
+	assert.Equal(t, 6, readOnlyToolStreakThreshold, "anti-thrash threshold must be 6 to avoid premature nudges")
 }

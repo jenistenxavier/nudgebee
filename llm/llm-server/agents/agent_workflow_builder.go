@@ -105,6 +105,48 @@ func sanitizeQuestionOptions(options []string) []string {
 	return out
 }
 
+const readOnlyToolStreakThreshold = 6
+
+// isRawWorkflowJSON checks whether content is valid JSON with both "name" and "definition"
+// top-level keys — the two required fields for a workflow definition. This is stricter than
+// the previous HasPrefix("{") && Contains("definition") check which could match garbage.
+func isRawWorkflowJSON(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	if !json.Valid([]byte(trimmed)) {
+		return false
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &obj); err != nil {
+		return false
+	}
+	_, hasName := obj["name"]
+	_, hasDef := obj["definition"]
+	return hasName && hasDef
+}
+
+// parseAgentId safely parses an agent ID string into a uuid.UUID, returning
+// uuid.Nil on empty or invalid input instead of panicking.
+func parseAgentId(agentId string) uuid.UUID {
+	if agentId == "" {
+		return uuid.Nil
+	}
+	parsed, err := uuid.Parse(agentId)
+	if err != nil {
+		return uuid.Nil
+	}
+	return parsed
+}
+
+// safeChoiceContent returns the trimmed text of the first choice, or an error
+// if the completion is nil or has no choices. Guards against panics from LLM
+// providers that return empty responses on transient failures.
+func safeChoiceContent(completion *llms.ContentResponse) (string, error) {
+	if completion == nil || len(completion.Choices) == 0 || completion.Choices[0] == nil {
+		return "", errors.New("empty LLM response: no choices returned")
+	}
+	return strings.TrimSpace(completion.Choices[0].Content), nil
+}
+
 // ClarifyingQuestion represents a single question to ask the user before planning.
 type ClarifyingQuestion struct {
 	Question string   `json:"question"`
@@ -446,7 +488,7 @@ Respond with ONLY one word: ANSWER, EDIT, or CREATE.`, map[bool]string{true: "IS
 		ctx.GetLogger().Warn("workflow_builder: turn intent classification failed, using fallback", "error", err, "fallback", fallback)
 		return fallback
 	}
-	if completion == nil || len(completion.Choices) == 0 {
+	if completion == nil || len(completion.Choices) == 0 || completion.Choices[0] == nil {
 		return fallback
 	}
 	return parseTurnIntent(completion.Choices[0].Content, hasWorkflow)
@@ -661,10 +703,7 @@ func (a *WorkflowBuilderAgent) generatePlanAndAskApproval(ctx *security.RequestC
 	a.state.Plan = plan
 	a.state.PlanAttempts = 1
 
-	agentId := uuid.Nil
-	if request.AgentId != "" {
-		agentId = uuid.MustParse(request.AgentId)
-	}
+	agentId := parseAgentId(request.AgentId)
 
 	planQuestion := fmt.Sprintf("Here's my plan for building your automation:\n\n%s\n\nWould you like to approve this plan or request changes?", plan)
 	resp := core.NBAgentResponse{
@@ -723,11 +762,18 @@ func (a *WorkflowBuilderAgent) handleFeedback(ctx *security.RequestContext, requ
 	a.state.Feedback = feedback
 	a.state.PlanAttempts++
 
-	// If we've exceeded max plan attempts, auto-build with current plan
+	// If we've exceeded max plan attempts, incorporate latest feedback then auto-build.
 	if a.state.PlanAttempts > maxPlanAttempts {
-		ctx.GetLogger().Info("workflow_builder: max plan attempts reached, auto-building", "attempts", a.state.PlanAttempts)
+		ctx.GetLogger().Info("workflow_builder: max plan attempts reached, auto-building with latest feedback", "attempts", a.state.PlanAttempts)
 		originalRequest := request
 		originalRequest.Query = a.state.OriginalQuery
+		// Regenerate plan with the latest feedback so the auto-build uses an up-to-date plan.
+		plan, err := a.regeneratePlan(ctx, originalRequest, a.state.Intent, a.state.Plan, feedback)
+		if err != nil {
+			ctx.GetLogger().Warn("workflow_builder: plan regeneration failed on auto-build, using previous plan", "error", err)
+			plan = a.state.Plan
+		}
+		a.state.Plan = plan
 		return a.buildAndValidate(ctx, originalRequest, a.state.Intent, a.state.Plan)
 	}
 
@@ -742,10 +788,7 @@ func (a *WorkflowBuilderAgent) handleFeedback(ctx *security.RequestContext, requ
 	a.state.Plan = plan
 	a.state.Stage = "plan_approval"
 
-	agentId := uuid.Nil
-	if request.AgentId != "" {
-		agentId = uuid.MustParse(request.AgentId)
-	}
+	agentId := parseAgentId(request.AgentId)
 
 	updatedPlanQuestion := fmt.Sprintf("Here's my updated plan:\n\n%s\n\nWould you like to approve this updated plan or request changes?", plan)
 	resp := core.NBAgentResponse{
@@ -1034,10 +1077,7 @@ func (a *WorkflowBuilderAgent) handleClarificationResponse(ctx *security.Request
 
 // buildClarificationResponse formats a clarifying question as a FollowupRequest with structured option data.
 func (a *WorkflowBuilderAgent) buildClarificationResponse(request core.NBAgentRequest, question ClarifyingQuestion) (core.NBAgentResponse, error) {
-	agentId := uuid.Nil
-	if request.AgentId != "" {
-		agentId = uuid.MustParse(request.AgentId)
-	}
+	agentId := parseAgentId(request.AgentId)
 
 	// Build structured option data for the frontend
 	structuredOptions := make([]map[string]any, 0, len(question.Options))
@@ -1958,7 +1998,7 @@ Return ONLY the JSON object.`, taskTypeNames, envContext)
 		return "", err
 	}
 
-	return strings.TrimSpace(completion.Choices[0].Content), nil
+	return safeChoiceContent(completion)
 }
 
 // buildEnvironmentContext fetches the account's configured integrations, cloud accounts,
@@ -2083,12 +2123,33 @@ func (a *WorkflowBuilderAgent) fetchTaskTypeNames(ctx *security.RequestContext) 
 	if len(tasksResp) == 0 {
 		return ""
 	}
-	var tasks []struct {
-		Type string `json:"type"`
+	// Peek at first non-whitespace byte to determine response shape without double-unmarshaling.
+	var wrapped struct {
+		Tasks []struct {
+			Type string `json:"name"`
+		} `json:"tasks"`
 	}
-	if err := json.Unmarshal(tasksResp, &tasks); err != nil {
-		ctx.GetLogger().Warn("workflow_builder: failed to parse task types response", "error", err)
-		return ""
+	var tasks []struct {
+		Type string `json:"name"`
+	}
+	var firstChar byte
+	for _, b := range tasksResp {
+		if b != ' ' && b != '\t' && b != '\n' && b != '\r' {
+			firstChar = b
+			break
+		}
+	}
+	if firstChar == '{' {
+		if err := json.Unmarshal(tasksResp, &wrapped); err != nil {
+			ctx.GetLogger().Warn("workflow_builder: failed to parse wrapped task types response", "error", err)
+			return ""
+		}
+		tasks = wrapped.Tasks
+	} else {
+		if err := json.Unmarshal(tasksResp, &tasks); err != nil {
+			ctx.GetLogger().Warn("workflow_builder: failed to parse bare task types response", "error", err)
+			return ""
+		}
 	}
 	types := make([]string, 0, len(tasks))
 	for _, t := range tasks {
@@ -2413,7 +2474,7 @@ NOTE: In all user-facing text, refer to these as "automations" (not "workflows")
 		return "", err
 	}
 
-	return strings.TrimSpace(completion.Choices[0].Content), nil
+	return safeChoiceContent(completion)
 }
 
 // regeneratePlan creates an updated plan incorporating user feedback.
@@ -2479,7 +2540,7 @@ RULES:
 		return "", err
 	}
 
-	return strings.TrimSpace(completion.Choices[0].Content), nil
+	return safeChoiceContent(completion)
 }
 
 // coerceWorkflowTypes walks the workflow JSON map and converts float64 values
@@ -2588,10 +2649,20 @@ func getWorkflowToolDescriptions() string {
 }
 
 // toolInitWorkflow initializes the working workflow with name, triggers, and inputs.
+// If a workflow is already loaded with tasks, it refuses to silently overwrite them.
 func (a *WorkflowBuilderAgent) toolInitWorkflow(args map[string]interface{}) string {
 	name, _ := args["name"].(string)
 	if name == "" {
 		return "Error: 'name' is required"
+	}
+
+	// Guard: refuse re-init when tasks already exist to prevent silent data loss.
+	if a.state.WorkingWorkflow != nil {
+		if def, ok := a.state.WorkingWorkflow["definition"].(map[string]interface{}); ok {
+			if tasks, ok := def["tasks"].([]interface{}); ok && len(tasks) > 0 {
+				return fmt.Sprintf("Warning: automation already has %d task(s). Use modify_task/add_task/delete_task to change it, or call finalize to complete it. Re-initializing would discard all existing tasks.", len(tasks))
+			}
+		}
 	}
 
 	definition := map[string]interface{}{
@@ -3540,10 +3611,10 @@ RULES:
 		toolInput := common.XmlExtractTagContent(content, "tool_input")
 
 		if toolName == "" {
-			// No tool call and no final answer — check if content looks like raw JSON (workflow)
-			trimmed := strings.TrimSpace(content)
-			if strings.HasPrefix(trimmed, "{") && strings.Contains(trimmed, "\"definition\"") {
-				return trimmed, nil
+			// No tool call and no final answer — check if content looks like raw JSON (workflow).
+			// Validate strictly: must be valid JSON with both "name" and "definition" keys.
+			if isRawWorkflowJSON(content) {
+				return strings.TrimSpace(content), nil
 			}
 
 			// Nudge the LLM to use a tool or finish
@@ -3575,7 +3646,7 @@ RULES:
 		switch {
 		case toolCallSeen[sig] >= 2:
 			nudge = "\nNOTE: you already ran this exact tool call — the result is unchanged. Do NOT repeat it. Take the next concrete step now: apply the requested change (add_task / modify_task / delete_task), then validate, then finalize. If no change is needed, emit your <final_answer>."
-		case readOnlyToolStreak >= 4:
+		case readOnlyToolStreak >= readOnlyToolStreakThreshold:
 			nudge = "\nNOTE: you have gathered enough information. Stop inspecting and act now: apply the requested change (add_task / modify_task / delete_task), then validate, then finalize. If no change is needed, emit your <final_answer>."
 		}
 
