@@ -161,7 +161,11 @@ var gcpResourceTypeMap = map[string]map[string]core.NodeType{
 		"Cloud Load Balancing": core.NodeTypeBackendPool,
 	},
 	"url-map": {
-		"Cloud Load Balancing": core.NodeTypeCloudResource,
+		// URL maps are the routing layer of an HTTP(S) LB. The CLI enrichment path
+		// (ensureGCPURLMapNodes) and the LB-chain edge builder both treat them as
+		// RouteTable; typing the resource-table copy as RouteTable too keeps them on
+		// one node instead of leaving an orphaned CloudResource duplicate.
+		"Cloud Load Balancing": core.NodeTypeRouteTable,
 	},
 	"target-http-proxy": {
 		"Cloud Load Balancing": core.NodeTypeCloudResource,
@@ -196,6 +200,7 @@ var gcpServiceFallbackMap = map[string]core.NodeType{
 	"Cloud Pub/Sub":        core.NodeTypeTopic,
 	"Artifact Registry":    core.NodeTypeContainerRegistry,
 	"Cloud Run":            core.NodeTypeServerlessFunction,
+	"Cloud Functions":      core.NodeTypeServerlessFunction,
 	// googleapis.com service names (alternative format)
 	"bigquery.googleapis.com": core.NodeTypeDatabase,
 }
@@ -753,7 +758,127 @@ func (s *GCPSource) convertResourcesToGraph(reqCtx *security.RequestContext, res
 	// Persistent Disk → ComputeInstance attachment edges (issue #31101 gap #7)
 	edges = append(edges, s.createPersistentDiskAttachmentEdges(lookup, req)...)
 
+	// CDN → BackendPool edges (Cloud CDN fronts a backend service)
+	edges = append(edges, s.createCDNEdges(lookup, req)...)
+
+	// Cloud Run consumer → Topic edges (Pub/Sub push subscriptions)
+	edges = append(edges, s.createPubSubSubscriptionEdges(resources, lookup, req)...)
+
 	return nodes, edges
+}
+
+// createPubSubSubscriptionEdges links the consumer of a push Pub/Sub subscription
+// to the topic it subscribes to (consumer SUBSCRIBES_TO topic). Subscriptions are
+// not modelled as standalone nodes — the GCP service-type filter only admits
+// topics — but their collected metadata (the topic and the push endpoint) lets us
+// connect a Cloud Run service that receives events to the Topic feeding it. This is
+// the only in-graph signal that wires the serverless app tier to Pub/Sub.
+//
+// Pull subscriptions (no push endpoint) and subscriptions pushing to external,
+// non-Cloud-Run endpoints (webhooks) have no in-graph consumer node and are skipped
+// rather than guessed at.
+func (s *GCPSource) createPubSubSubscriptionEdges(resources []CloudResourceRow, lookup *NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+	edges := make([]*core.DbEdge, 0)
+
+	// Index Cloud Run nodes by their dns_name (the run.app host stamped from
+	// meta.url), so a subscription's push-endpoint host resolves to the receiver.
+	cloudRunByHost := make(map[string]*core.DbNode)
+	if srvNodes, ok := lookup.byNodeType[core.NodeTypeServerlessFunction]; ok {
+		for _, n := range srvNodes {
+			if dns, ok := n.Properties["dns_name"].(string); ok && dns != "" {
+				cloudRunByHost[strings.ToLower(dns)] = n
+			}
+		}
+	}
+	if len(cloudRunByHost) == 0 {
+		return edges
+	}
+
+	for i := range resources {
+		edges = append(edges, s.pushSubscriptionEdges(&resources[i], cloudRunByHost, lookup, req)...)
+	}
+
+	s.logger.Info("created GCP Pub/Sub subscription edges", "edge_count", len(edges))
+	return edges
+}
+
+// pushSubscriptionEdges returns the consumer→topic edges contributed by a single
+// resource row, or nil when the row isn't a push subscription, lacks a topic, or
+// pushes to an endpoint that isn't a known Cloud Run service.
+func (s *GCPSource) pushSubscriptionEdges(r *CloudResourceRow, cloudRunByHost map[string]*core.DbNode, lookup *NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+	if !strings.EqualFold(r.Type, "pubsub.googleapis.com/Subscription") || len(r.Meta) == 0 {
+		return nil
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(r.Meta, &meta); err != nil {
+		return nil
+	}
+	topicName, _ := meta["topic"].(string)
+	pushEndpoint, _ := meta["push_endpoint"].(string)
+	if topicName == "" || pushEndpoint == "" {
+		return nil
+	}
+	consumer, ok := cloudRunByHost[strings.ToLower(repoURIHost(pushEndpoint))]
+	if !ok {
+		return nil // external webhook / unknown consumer — no in-graph node
+	}
+
+	// meta.topic is normally the short topic id (collector shortens it), but guard
+	// against a full resource path so the name lookup doesn't miss.
+	topicNodes := lookup.getNodesByTypeAndName(core.NodeTypeTopic, extractGCPShortName(topicName))
+	edges := make([]*core.DbEdge, 0, len(topicNodes))
+	for _, topicNode := range topicNodes {
+		edges = append(edges, s.createEdge(consumer, topicNode, core.RelationshipSubscribesTo,
+			map[string]interface{}{
+				"connection_type": "pubsub_push_subscription",
+				"subscription":    r.Name,
+			}, req))
+	}
+	return edges
+}
+
+// createCDNEdges links each Cloud CDN node to the BackendPool it fronts.
+// Cloud CDN isn't a standalone resource — it's enabled on a backend service —
+// so the CDN node carries that backend service name (origin_backend_service_name,
+// falling back to its own name). The matching BackendPool node is created from the
+// same backend service, so a name match wires the public CDN entry point to its
+// origin pool. Without this rule CDN nodes are always orphaned.
+func (s *GCPSource) createCDNEdges(lookup *NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+	edges := make([]*core.DbEdge, 0)
+
+	cdnNodes, ok := lookup.byNodeType[core.NodeTypeCDN]
+	if !ok {
+		return edges
+	}
+
+	backendPoolByName := make(map[string]*core.DbNode)
+	if bpNodes, ok := lookup.byNodeType[core.NodeTypeBackendPool]; ok {
+		for _, n := range bpNodes {
+			if shortName := extractGCPShortName(getNodeName(n)); shortName != "" {
+				backendPoolByName[shortName] = n
+			}
+		}
+	}
+
+	for _, cdnNode := range cdnNodes {
+		backendName, _ := cdnNode.Properties["origin_backend_service_name"].(string)
+		if backendName == "" {
+			backendName = getNodeName(cdnNode)
+		}
+		// Normalise to a short name: origin_backend_service_name is usually already
+		// short, but guard against a full self-link/URL so the lookup doesn't miss.
+		backendName = extractGCPShortName(backendName)
+		if backendName == "" {
+			continue
+		}
+		if bpNode, exists := backendPoolByName[backendName]; exists {
+			edges = append(edges, s.createEdge(cdnNode, bpNode, core.RelationshipRoutesTo,
+				map[string]interface{}{"connection_type": "cdn_backend"}, req))
+		}
+	}
+
+	s.logger.Info("created GCP CDN → BackendPool edges", "edge_count", len(edges))
+	return edges
 }
 
 // createNodeFromResource creates a knowledge graph node from a GCP resource row.
@@ -795,8 +920,15 @@ func (s *GCPSource) createNodeFromResource(resource *CloudResourceRow, req *core
 	properties["nb_account_id"] = resource.Account
 	properties["account_number"] = resource.AccountNumber
 
-	// Extract GCP project ID from name
-	projectID := extractGCPProjectID(resource.Name)
+	// GCP project ID == the cloud account's project, carried as account_number.
+	// Prefer it over parsing resource.Name: most GCP resources have a bare Name
+	// (e.g. "default", "backendgaeservice"), so extractGCPProjectID(Name) wrongly
+	// yields the resource's own name as the project — corrupting gcp_project_id on
+	// nearly every node and any DNS synthesized from it (synthesizeGCPEndpointDNS).
+	projectID := resource.AccountNumber
+	if projectID == "" {
+		projectID = extractGCPProjectID(resource.Name)
+	}
 	if projectID != "" {
 		properties["gcp_project_id"] = projectID
 	}
@@ -928,6 +1060,25 @@ func (s *GCPSource) extractGCPMetadataByNodeType(properties map[string]interface
 		if serviceName == "compute.googleapis.com/Disk" {
 			s.extractGCPPersistentDiskMetadata(properties, metaMap)
 		}
+	case core.NodeTypeSubnet:
+		s.extractGCPSubnetMetadata(properties, metaMap)
+	}
+}
+
+// extractGCPSubnetMetadata derives the parent VPC (vpc_id) and CIDR info from a
+// subnet's collected metadata. The collector persists the subnet's network
+// self-link in meta.network (see cloud-collector listSubnets); without it the
+// resource row carries no recoverable VPC reference and the subnet is orphaned.
+func (s *GCPSource) extractGCPSubnetMetadata(properties map[string]interface{}, metaMap map[string]interface{}) {
+	if network, ok := metaMap["network"].(string); ok && network != "" {
+		properties["vpc_id"] = extractGCPResourceNameFromURL(network)
+		properties["vpc_network_url"] = network
+	}
+	if cidr, ok := metaMap["ip_cidr_range"].(string); ok && cidr != "" {
+		properties["ip_cidr_range"] = cidr
+	}
+	if gateway, ok := metaMap["gateway_address"].(string); ok && gateway != "" {
+		properties["gateway_address"] = gateway
 	}
 }
 
@@ -2644,12 +2795,39 @@ func (s *GCPSource) createSubnetToVPCEdges(nodes []*core.DbNode, lookup *NodeLoo
 		return edges
 	}
 
+	// Per-account build invariant: BuildGraph runs once per cloud account and
+	// fetchGCPResources filters by CloudAccountID, so the lookup only ever holds
+	// this account's VPC nodes. A subnet always belongs to a VPC in its own account,
+	// so when the account has exactly one VPC (the common GCP auto-mode "default"
+	// network) any subnet whose parent network wasn't captured at collection time
+	// unambiguously belongs to it. vpc_id is only populated by CLI enrichment
+	// (ensureGCPSubnetNodes); subnets ingested via the resource-table/API path carry
+	// no network self-link, which is why most subnets would otherwise be orphaned.
+	var soleVPC *core.DbNode
+	if vpcNodes := lookup.byNodeType[core.NodeTypeVPC]; len(vpcNodes) == 1 {
+		soleVPC = vpcNodes[0]
+	}
+
 	for _, node := range subnetNodes {
-		if vpcID, ok := node.Properties["vpc_id"].(string); ok && vpcID != "" {
+		if vpcID, _ := node.Properties["vpc_id"].(string); vpcID != "" {
+			// vpc_id is authoritative: link to the named VPC when it's present, but
+			// never fall back to soleVPC here — the named VPC may simply be absent from
+			// this account's lookup (e.g. a Shared VPC host project), and inferring a
+			// different VPC would be a false relationship.
 			if vpcNode := findNodeByNameAndType(lookup, core.NodeTypeVPC, vpcID); vpcNode != nil {
 				edges = append(edges, s.createEdge(node, vpcNode, core.RelationshipBelongsTo,
 					map[string]interface{}{"connection_type": "vpc"}, req))
 			}
+			continue
+		}
+
+		// Fallback: no resolvable vpc_id, but the account has a single VPC. Link to it
+		// and tag the edge "vpc_inferred" so the inference is auditable. Accounts with
+		// multiple VPCs are left as-is (no guessing) to avoid mislinking shared/multi-VPC
+		// topologies — those keep the pre-existing behaviour.
+		if soleVPC != nil {
+			edges = append(edges, s.createEdge(node, soleVPC, core.RelationshipBelongsTo,
+				map[string]interface{}{"connection_type": "vpc_inferred"}, req))
 		}
 	}
 
@@ -3426,15 +3604,7 @@ func (s *GCPSource) ensureGCPTargetProxyNodes(nodes []*core.DbNode, lookup *Node
 // ensureGCPURLMapNodes creates URLMap nodes from CLI data (NodeTypeRouteTable — same concept as routing rules)
 func (s *GCPSource) ensureGCPURLMapNodes(nodes []*core.DbNode, lookup *NodeLookup, cliData *gcpCLIData, req *core.SourceBuildRequest) []*core.DbNode {
 	for name, urlMap := range cliData.urlMaps {
-		found := false
-		if rtNodes, ok := lookup.byNodeType[core.NodeTypeRouteTable]; ok {
-			for _, existing := range rtNodes {
-				if extractGCPShortName(getNodeName(existing)) == name {
-					found = true
-					break
-				}
-			}
-		}
+		found := enrichExistingURLMapNode(lookup, name, urlMap)
 
 		if !found {
 			defaultService := extractGCPResourceNameFromURL(urlMap.DefaultService)
@@ -3459,6 +3629,32 @@ func (s *GCPSource) ensureGCPURLMapNodes(nodes []*core.DbNode, lookup *NodeLooku
 		}
 	}
 	return nodes
+}
+
+// enrichExistingURLMapNode finds a url-map RouteTable node already present in the
+// graph (created from the resource table) and stamps the CLI-only routing target
+// onto it so the URLMap → BackendService chain edge can form. Returns true when a
+// matching node was found, signalling the caller not to create a duplicate.
+func enrichExistingURLMapNode(lookup *NodeLookup, name string, urlMap *GCPURLMap) bool {
+	rtNodes, ok := lookup.byNodeType[core.NodeTypeRouteTable]
+	if !ok {
+		return false
+	}
+	for _, existing := range rtNodes {
+		if extractGCPShortName(getNodeName(existing)) != name {
+			continue
+		}
+		if existing.Properties == nil {
+			existing.Properties = make(map[string]interface{})
+		}
+		if _, has := existing.Properties["default_service"]; !has {
+			existing.Properties["default_service"] = extractGCPResourceNameFromURL(urlMap.DefaultService)
+			existing.Properties["default_service_url"] = urlMap.DefaultService
+			existing.Properties["self_link"] = urlMap.SelfLink
+		}
+		return true
+	}
+	return false
 }
 
 // ensureGCPDNSZoneNodes creates DNSZone nodes from Cloud DNS managed zones (CLI data).
