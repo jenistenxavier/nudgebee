@@ -202,13 +202,14 @@ const (
 // priority makes provenance non-deterministic under the strict-< dedup at L296.
 var edgeTypePriorities = map[RelationshipType]map[string]EdgeSourcePriority{
 	RelationshipCalls: {
-		"k8s":          EdgePriority1, // K8s has authoritative service-to-service data
-		"manual":       EdgePriority2, // User-declared dependency (intent)
-		"aws":          EdgePriority3, // AWS has authoritative cloud resource data
-		"ebpf":         EdgePriority4, // eBPF has accurate network-level data
-		"traces":       EdgePriority5, // Traces has rich application-level data
-		"datadog-apm":  EdgePriority6, // External APM source (instrumentation-derived)
-		"newrelic-apm": EdgePriority7, // External APM source (NRQL Span aggregation)
+		"k8s":              EdgePriority1, // K8s has authoritative service-to-service data
+		"manual":           EdgePriority2, // User-declared dependency (intent)
+		"aws":              EdgePriority3, // AWS has authoritative cloud resource data
+		"ebpf":             EdgePriority4, // eBPF has accurate network-level data
+		"traces":           EdgePriority5, // Traces has rich application-level data
+		"gcp-cloud-traces": EdgePriority5, // GCP Cloud Trace (disjoint from K8s "traces" accounts)
+		"datadog-apm":      EdgePriority6, // External APM source (instrumentation-derived)
+		"newrelic-apm":     EdgePriority7, // External APM source (NRQL Span aggregation)
 	},
 	RelationshipResolvesTo: {
 		"k8s":              EdgePriority1, // K8s DNS resolution
@@ -1103,6 +1104,69 @@ func GetK8sAccountsForTenant(tenantID string, cloudAccountIDs []string) ([]K8sAc
 	}
 
 	return k8sAccounts, nil
+}
+
+// GCPAccount represents an active GCP cloud account for a tenant.
+type GCPAccount struct {
+	CloudAccountID string `db:"cloud_account_id"`
+	AccountNumber  string `db:"account_number"`
+	Name           string `db:"name"`
+	Tenant         string `db:"tenant"`
+}
+
+// GetGCPAccountsForTenant retrieves all active GCP cloud accounts for a tenant,
+// optionally filtered to specific cloud account IDs. Mirrors GetK8sAccountsForTenant
+// but for GCP (no agent join — GCP traces are pulled via the cloud-collector, not an
+// in-cluster agent). The CloudAccountID is the UUID passed to cloud.QueryTraces.
+func GetGCPAccountsForTenant(tenantID string, cloudAccountIDs []string) ([]GCPAccount, error) {
+	dbManager, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get database manager: %w", err)
+	}
+
+	query := `
+		SELECT ca.id as cloud_account_id, ca.account_number as account_number,
+		       ca.account_name as name, ca.tenant as tenant
+		FROM cloud_accounts ca
+		WHERE ca.cloud_provider = 'GCP'
+		  AND ca.status = 'active'
+		  AND ca.tenant = ?`
+
+	args := []interface{}{tenantID}
+
+	if len(cloudAccountIDs) > 0 {
+		query += `
+		  AND ca.id IN (?)`
+		args = append(args, cloudAccountIDs)
+	}
+
+	// Expand the IN clause, then rebind to PostgreSQL placeholders.
+	var queryErr error
+	query, args, queryErr = sqlx.In(query, args...)
+	if queryErr != nil {
+		return nil, fmt.Errorf("failed to expand query with IN clause: %w", queryErr)
+	}
+	query = dbManager.Db.Rebind(query)
+
+	rows, err := dbManager.Db.Queryx(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query GCP accounts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var gcpAccounts []GCPAccount
+	for rows.Next() {
+		var account GCPAccount
+		if err := rows.StructScan(&account); err != nil {
+			continue
+		}
+		gcpAccounts = append(gcpAccounts, account)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating GCP account rows: %w", err)
+	}
+
+	return gcpAccounts, nil
 }
 
 // ExtractDeploymentFromReplicaSet extracts the Deployment name from a ReplicaSet name

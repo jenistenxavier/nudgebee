@@ -192,7 +192,7 @@
   comment: Trigger vertical rightsizing for K8s workloads daily at 8 AM UTC
 - name: build_knowledge_graph
   webhook: '{{SERVICE_API_SERVER_URL}}/rpc-cron'
-  schedule: '30 23 * * *'
+  schedule: '30 * * * *'
   payload:
     action:
       name: build_knowledge_graphs_with_db_filters
