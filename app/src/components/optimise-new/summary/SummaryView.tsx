@@ -99,11 +99,11 @@ const FilterFacet = ({ label, children }: { label: string; children: ReactNode }
 
 // ─── Conversational summaries ──────────────────────────────────────────────
 
-const costConvoSummary = (items: InsightItem[]) => {
+const costConvoSummary = (items: InsightItem[], symbol: string) => {
   const critCount = items.filter((i) => i.severity === 'critical').length;
   const topDollars = [...items].sort((a, b) => b.dollarImpact - a.dollarImpact)[0]?.dollarImpact || 0;
-  if (critCount > 0) return `${critCount} critical anomalies — largest opportunity is ${formatDollars(topDollars)}/mo.`;
-  if (topDollars > 0) return `Right-sizing and cleanup dominate. Savings plans alone could recover ${formatDollars(topDollars)}/mo.`;
+  if (critCount > 0) return `${critCount} critical anomalies — largest opportunity is ${formatDollars(topDollars, symbol)}/mo.`;
+  if (topDollars > 0) return `Right-sizing and cleanup dominate. Savings plans alone could recover ${formatDollars(topDollars, symbol)}/mo.`;
   return `${items.length} cost optimization opportunities identified.`;
 };
 
@@ -146,7 +146,19 @@ const SummaryView = () => {
   const [viewMode, setViewMode] = useState<'cards' | 'list'>('cards');
 
   // ── Data (fetched via hook) ──
-  const { accounts, insights, loading, lastUpdated, totalSavings, savingsLoading, costByCurrency, accountCosts, costLoading } = useSummaryData();
+  const {
+    accounts,
+    insights,
+    loading,
+    lastUpdated,
+    totalSavings,
+    savingsLoading,
+    costByCurrency,
+    accountCosts,
+    costLoading,
+    savingsCurrency,
+    savingsSymbol,
+  } = useSummaryData();
 
   // ── Action modal state ──
   const [resolveModalRec, setResolveModalRec] = useState<any>(null);
@@ -242,7 +254,7 @@ const SummaryView = () => {
     [accounts]
   );
   const selectedAccountName = accountFilter ? accounts[accountFilter]?.account_name || accountFilter : '';
-  const nubiBriefing = useMemo(() => generateNubiBriefing(filtered, totalSavings), [filtered, totalSavings]);
+  const nubiBriefing = useMemo(() => generateNubiBriefing(filtered, totalSavings, savingsSymbol), [filtered, totalSavings, savingsSymbol]);
 
   const costItems = useMemo(() => filtered.filter((i) => i.category === 'cost'), [filtered]);
   const perfItems = useMemo(() => filtered.filter((i) => i.category === 'performance'), [filtered]);
@@ -298,7 +310,7 @@ const SummaryView = () => {
             <Skeleton shape='text' size='heading' width={140} />
           ) : (
             <Box sx={{ display: 'flex', alignItems: 'flex-end', gap: ds.space[2] }}>
-              <CostCallout value={totalSavings} size='display' tone={savingsTone} period='/ mo' currency='USD' />
+              <CostCallout value={totalSavings} size='display' tone={savingsTone} period='/ mo' currency={savingsCurrency} locale='en-US' />
               <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.medium, color: ds.gray[500] }}>Potential savings</Typography>
             </Box>
           )}
@@ -516,10 +528,11 @@ const SummaryView = () => {
                       category='cost'
                       label='Cost'
                       oneLiner={costOneLiner}
-                      conversationalSummary={costConvoSummary(costItems)}
+                      conversationalSummary={costConvoSummary(costItems, savingsSymbol)}
                       subCategories={COST_SUBCATEGORIES}
                       items={costItems}
                       sortBy={sortBy}
+                      currencySymbol={savingsSymbol}
                       onClickResource={handleOpenResource}
                       onAskNubi={handleAskNubiFromCard}
                     />
@@ -533,6 +546,7 @@ const SummaryView = () => {
                       subCategories={PERF_SUBCATEGORIES}
                       items={perfItems}
                       sortBy={sortBy}
+                      currencySymbol={savingsSymbol}
                       onClickResource={handleOpenResource}
                       onAskNubi={handleAskNubiFromCard}
                     />
@@ -546,6 +560,7 @@ const SummaryView = () => {
                       subCategories={SEC_CONFIG_SUBCATEGORIES}
                       items={secItems}
                       sortBy={sortBy}
+                      currencySymbol={savingsSymbol}
                       onClickResource={handleOpenResource}
                       onAskNubi={handleAskNubiFromCard}
                     />
@@ -689,6 +704,7 @@ const SummaryView = () => {
           costByCurrency={costByCurrency}
           accountCosts={accountCosts}
           costLoading={costLoading}
+          defaultCurrencySymbol={savingsSymbol}
           selectedAccountId={accountFilter}
           onSelectAccount={setAccountFilter}
         />
@@ -738,7 +754,11 @@ const SummaryView = () => {
         ticketData={{
           subject: ticketRec?.summary || '',
           description: `${ticketRec?.accountName || ''}\n\nSeverity: ${ticketRec?.severity || ''}\n${
-            ticketRec?.dollarImpact > 0 ? `Potential savings: $${ticketRec.dollarImpact}/mo` : ''
+            ticketRec?.dollarImpact > 0
+              ? `Potential savings: ${
+                  (ticketRec?._raw?.account_id ? accountCosts[ticketRec._raw.account_id]?.currencySymbol : undefined) || savingsSymbol
+                }${ticketRec.dollarImpact}/mo`
+              : ''
           }`,
           accountId: ticketRec?._raw?.account_id,
         }}

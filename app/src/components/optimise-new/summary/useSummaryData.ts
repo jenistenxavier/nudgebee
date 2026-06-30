@@ -20,6 +20,12 @@ export function useSummaryData() {
   const [costByCurrency, setCostByCurrency] = useState<CurrencyCostSummary[]>([]);
   const [accountCosts, setAccountCosts] = useState<Record<string, AccountCost>>({});
   const [currencySymbols, setCurrencySymbols] = useState<Record<string, string>>({});
+  // Currency the headline / briefing savings total is rendered in. estimated_savings
+  // is denominated in each account's billing currency, so a single-currency tenant
+  // (the common case) gets its real currency; a mixed-currency tenant falls back to
+  // USD since one summed figure across currencies is meaningless either way.
+  const [savingsCurrency, setSavingsCurrency] = useState<string>('USD');
+  const [savingsSymbol, setSavingsSymbol] = useState<string>(DEFAULT_SYMBOL);
   const [costLoading, setCostLoading] = useState(true);
 
   // Fetch accounts
@@ -130,28 +136,41 @@ export function useSummaryData() {
 
         if (cancelled) return;
 
-        // Fold (account_id, currency) grouped rows into per-account totals.
-        const folded: Record<string, { mtd: number; prevMonth: number; ytd: number; currency: string }> = {};
+        // Fold (account_id, currency) grouped rows into per-account totals. We track
+        // spend per currency rather than latching onto the first currency_type seen,
+        // so an account with a few stray cross-currency rows resolves to the currency
+        // its spend is actually denominated in (dominant by amount), deterministically.
+        const folded: Record<string, { mtd: number; prevMonth: number; ytd: number; currencyAmounts: Record<string, number> }> = {};
         const fold = (rows: any[], key: 'mtd' | 'prevMonth' | 'ytd') => {
           for (const row of rows || []) {
             const id = row?.account_id;
             if (!id) continue;
-            if (!folded[id]) folded[id] = { mtd: 0, prevMonth: 0, ytd: 0, currency: '' };
+            if (!folded[id]) folded[id] = { mtd: 0, prevMonth: 0, ytd: 0, currencyAmounts: {} };
             folded[id][key] += row.spend_amount || 0;
-            if (!folded[id].currency && row.currency_type) folded[id].currency = row.currency_type;
+            if (row.currency_type) {
+              folded[id].currencyAmounts[row.currency_type] = (folded[id].currencyAmounts[row.currency_type] || 0) + Math.abs(row.spend_amount || 0);
+            }
           }
         };
         fold(mtdRows, 'mtd');
         fold(prevRows, 'prevMonth');
         fold(ytdRows, 'ytd');
 
+        // Dominant currency = highest total spend; ties broken alphabetically so the
+        // pick is stable across reloads regardless of row order.
+        const dominantCurrency = (amounts: Record<string, number>): string =>
+          Object.entries(amounts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] || '';
+
         const accountCurrency: Record<string, string> = {};
         const byCurrency: Record<string, { mtd: number; prevMonth: number; ytd: number; accountNames: string[] }> = {};
         const perAccount: Record<string, AccountCost> = {};
+        const realCurrencies = new Set<string>();
 
         accountIds.forEach((id) => {
           const data = folded[id];
-          const symbol = CURRENCY_MAP[data?.currency || ''] || DEFAULT_SYMBOL;
+          const currencyIso = dominantCurrency(data?.currencyAmounts || {});
+          if (currencyIso) realCurrencies.add(currencyIso);
+          const symbol = CURRENCY_MAP[currencyIso] || DEFAULT_SYMBOL;
           accountCurrency[id] = symbol;
           const acctName = accounts[id]?.account_name || id;
 
@@ -188,9 +207,12 @@ export function useSummaryData() {
             };
           });
 
+        const tenantCurrency = realCurrencies.size === 1 ? [...realCurrencies][0] : 'USD';
         setCostByCurrency(costSummaries);
         setAccountCosts(perAccount);
         setCurrencySymbols(accountCurrency);
+        setSavingsCurrency(tenantCurrency);
+        setSavingsSymbol(CURRENCY_MAP[tenantCurrency] || DEFAULT_SYMBOL);
       } catch (err) {
         console.error('Failed to fetch cost data:', err);
       } finally {
@@ -202,5 +224,17 @@ export function useSummaryData() {
     };
   }, [accounts]);
 
-  return { accounts, insights, loading, lastUpdated, totalSavings, savingsLoading, costByCurrency, accountCosts, costLoading };
+  return {
+    accounts,
+    insights,
+    loading,
+    lastUpdated,
+    totalSavings,
+    savingsLoading,
+    costByCurrency,
+    accountCosts,
+    costLoading,
+    savingsCurrency,
+    savingsSymbol,
+  };
 }
