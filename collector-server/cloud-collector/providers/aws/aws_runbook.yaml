@@ -1655,9 +1655,23 @@ rules:
           update_last_seen: true
           update_meta: true
           meta_updates:
-            last_status: "{{ (index .Detail \"lastStatus\") }}"
-            desired_status: "{{ (index .Detail \"desiredStatus\") }}"
-            stopped_reason: "{{ (index .Detail \"stoppedReason\") }}"
+            LastStatus: "{{ (index .Detail \"lastStatus\") }}"
+            DesiredStatus: "{{ (index .Detail \"desiredStatus\") }}"
+            StoppedReason: "{{ safeIndex .Detail \"stoppedReason\" }}"
+            StopCode: "{{ safeIndex .Detail \"stopCode\" }}"
+            LaunchType: "{{ safeIndex .Detail \"launchType\" }}"
+            Cpu: "{{ safeIndex .Detail \"cpu\" }}"
+            Memory: "{{ safeIndex .Detail \"memory\" }}"
+            CapacityProviderName: "{{ safeIndex .Detail \"capacityProviderName\" }}"
+            PlatformFamily: "{{ safeIndex .Detail \"platformFamily\" }}"
+            PlatformVersion: "{{ safeIndex .Detail \"platformVersion\" }}"
+            AvailabilityZone: "{{ safeIndex .Detail \"availabilityZone\" }}"
+            Version: "{{ safeIndex .Detail \"version\" }}"
+            Group: "{{ safeIndex .Detail \"group\" }}"
+            TaskArn: "{{ (index .Detail \"taskArn\") }}"
+            ClusterArn: "{{ (index .Detail \"clusterArn\") }}"
+            TaskDefinitionArn: "{{ safeIndex .Detail \"taskDefinitionArn\" }}"
+            last_state_change: "{{ (index .Event \"time\") }}"
         description: "Update cloud_resourses table for ECS task"
 
   - name: "Resource_Sync_ECS_Service_Action"
