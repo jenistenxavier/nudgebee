@@ -2291,9 +2291,19 @@ Make minimal, precise changes only.`,
 					string(prMetaJSON), recommendResolutionId)
 			}
 		} else if executionStatus == "success" {
-			// Agent succeeded but no PR was created (might have applied changes directly)
-			ctx.GetLogger().Warn("recommendation_resolution: code agent succeeded but no PR URL found")
-			updateStatus(models.RecommendationResolutionStatusSuccess, "Code agent applied changes but no PR was created", "")
+			if reason := prCreationFailureReason(agentResponse); reason != "" {
+				// The code fix itself succeeded (execution_status=success) but the PR
+				// could not be opened — e.g. a rejected git push. The orchestrator
+				// reports the real cause via pr_creation_status/pr_creation_reason;
+				// surface it as a failure instead of a misleading "applied changes
+				// but no PR" Success that hides the actual error.
+				ctx.GetLogger().Error("recommendation_resolution: code agent applied changes but PR creation failed", "reason", reason)
+				updateStatus(models.RecommendationResolutionStatusFailed, "Code agent applied changes but PR creation failed: "+reason, "")
+			} else {
+				// Agent succeeded but no PR was created (might have applied changes directly)
+				ctx.GetLogger().Warn("recommendation_resolution: code agent succeeded but no PR URL found")
+				updateStatus(models.RecommendationResolutionStatusSuccess, "Code agent applied changes but no PR was created", "")
+			}
 		} else {
 			// Failure: No PR and no success status
 			errorMsg := "Code agent execution failed"
@@ -2570,9 +2580,16 @@ When creating the PR, ensure the description includes:
 					string(prMetaJSON), recommendResolutionId)
 			}
 		} else if executionStatus == "success" {
-			// Agent succeeded but no PR was created (might have applied changes directly)
-			ctx.GetLogger().Warn("recommendation_resolution: security code agent succeeded but no PR URL found")
-			updateStatus(models.RecommendationResolutionStatusSuccess, "Security code agent applied changes but no PR was created", "")
+			if reason := prCreationFailureReason(agentResponse); reason != "" {
+				// Fix succeeded but the PR could not be opened (e.g. rejected git
+				// push). Surface the real cause instead of a misleading Success.
+				ctx.GetLogger().Error("recommendation_resolution: security code agent applied changes but PR creation failed", "reason", reason)
+				updateStatus(models.RecommendationResolutionStatusFailed, "Security code agent applied changes but PR creation failed: "+reason, "")
+			} else {
+				// Agent succeeded but no PR was created (might have applied changes directly)
+				ctx.GetLogger().Warn("recommendation_resolution: security code agent succeeded but no PR URL found")
+				updateStatus(models.RecommendationResolutionStatusSuccess, "Security code agent applied changes but no PR was created", "")
+			}
 		} else {
 			// Failure: No PR and no success status
 			errorMsg := "Security code agent execution failed"
@@ -2614,6 +2631,20 @@ func appendAgentResponseDetails(baseMsg string, agentResponse map[string]any) st
 		return baseMsg
 	}
 	return baseMsg + "\n\n" + strings.Join(details, "\n\n")
+}
+
+// prCreationFailureReason returns a non-empty, human-readable reason when the
+// code agent applied its changes but PR creation failed (e.g. a rejected git
+// push). The code-analysis orchestrator reports this via
+// pr_creation_status="failed" alongside pr_creation_reason and a
+// failure_summary, while execution_status stays "success" because the fix
+// itself succeeded. Returns "" when no PR-creation failure is signalled.
+func prCreationFailureReason(agentResponse map[string]any) string {
+	if status, _ := agentResponse["pr_creation_status"].(string); status != "failed" {
+		return ""
+	}
+	return getStringFromMultipleKeys(agentResponse,
+		[]string{"pr_creation_reason", "failure_summary"}, "PR creation failed")
 }
 
 // formatCVELogs formats recommendation data into the CVE log format expected by SecurityAuditorAgent
