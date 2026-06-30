@@ -8337,7 +8337,10 @@ type WorkflowExecutionSummary {
   trigger_type: String
   parent_workflow_id: String
   workflow_name: String
+  version: Int
+  version_number: Int
 }
+
 
 type WorkflowUpdateResponse {
   id: String

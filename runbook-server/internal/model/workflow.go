@@ -709,7 +709,10 @@ type WorkflowExecutionSummary struct {
 	TriggerType        string                  `json:"trigger_type,omitempty"`
 	ParentWorkflowID   string                  `json:"parent_workflow_id,omitempty"`
 	WorkflowName       string                  `json:"workflow_name,omitempty"`
+	Version            *int                    `json:"version,omitempty"`
+	VersionNumber      *int                    `json:"version_number,omitempty"`
 }
+
 
 // ListWorkflowExecutionResponse contains a list of workflow executions.
 type ListWorkflowExecutionResponse struct {

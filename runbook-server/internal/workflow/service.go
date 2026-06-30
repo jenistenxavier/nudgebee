@@ -2385,6 +2385,18 @@ func (s *Service) ListWorkflowExecutions(ctx *security.RequestContext, accountId
 			}
 		}
 
+		if info.Memo != nil {
+			if v, ok := info.Memo.GetFields()[model.MemoWorkflowVersionNumber]; ok {
+				var val any
+				if err := s.dataConverter.FromPayload(v, &val); err == nil {
+					if vn, ok := toInt(val); ok {
+						summary.Version = &vn
+						summary.VersionNumber = &vn
+					}
+				}
+			}
+		}
+
 		summaries = append(summaries, summary)
 	}
 
@@ -2456,6 +2468,19 @@ func (s *Service) ListWorkflowExecutionsForEvent(ctx *security.RequestContext, a
 				}
 			}
 		}
+
+		if info.Memo != nil {
+			if v, ok := info.Memo.GetFields()[model.MemoWorkflowVersionNumber]; ok {
+				var val any
+				if err := s.dataConverter.FromPayload(v, &val); err == nil {
+					if vn, ok := toInt(val); ok {
+						summary.Version = &vn
+						summary.VersionNumber = &vn
+					}
+				}
+			}
+		}
+
 		summaries = append(summaries, summary)
 	}
 
