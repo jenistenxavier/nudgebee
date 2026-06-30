@@ -124,7 +124,7 @@ func (a *CodeAgent) Execute(ctx context.Context, sessionCtx *session.SessionCont
 	}
 
 	// Build the enhanced query and the specific prompt for this agent
-	enhancedQuery := a.buildEnhancedQuery(sessionCtx)
+	enhancedQuery := a.buildEnhancedQuery(ctx, sessionCtx)
 	systemPrompt, err := a.buildCodeAgentPrompt(sessionCtx)
 	if err != nil {
 		return "", fmt.Errorf("failed to build code agent prompt: %w", err)
@@ -163,17 +163,13 @@ func (a *CodeAgent) Execute(ctx context.Context, sessionCtx *session.SessionCont
 	return result.FinalAnswer, nil
 }
 
-func (a *CodeAgent) buildEnhancedQuery(sessionCtx *session.SessionContext) string {
+func (a *CodeAgent) buildEnhancedQuery(ctx context.Context, sessionCtx *session.SessionContext) string {
 	var data strings.Builder
 	data.WriteString("=== USER QUERY ===\n")
 	data.WriteString(sessionCtx.OriginalQuery)
 	data.WriteString("\n\n")
 
-	if sessionCtx.InitialLogs != "" {
-		data.WriteString("=== LOGS (if provided) ===\n")
-		data.WriteString(sessionCtx.InitialLogs)
-		data.WriteString("\n\n")
-	}
+	data.WriteString(buildEvidenceBlock(ctx, a.llmClient, a.logger, "LOGS (if provided)", sessionCtx.InitialLogs))
 
 	return data.String()
 }
