@@ -759,7 +759,7 @@ func TestReAct3BuildScratchpad_CompressionGatedByWindow(t *testing.T) {
 		assert.Contains(t, scratchpad, "OBS-MARKER-00")
 		assert.Contains(t, scratchpad, strings.Repeat("x", 700))
 		// And nothing should have been marked compressed.
-		assert.Empty(t, collectCompressionEvents(steps), "no compression should occur under budget")
+		assert.Empty(t, collectCompressionEvents(steps, false, 0), "no compression should occur under budget")
 	})
 
 	t.Run("over budget compresses older observations", func(t *testing.T) {
@@ -768,8 +768,13 @@ func TestReAct3BuildScratchpad_CompressionGatedByWindow(t *testing.T) {
 		planner := &NBReActPlanner3{}
 		_ = planner.buildScratchpad(steps)
 
-		events := collectCompressionEvents(steps)
+		events := collectCompressionEvents(steps, true /*windowPressureActive*/, 0)
 		assert.NotEmpty(t, events, "older observations should be compressed when over budget")
+		// Every event in this scenario is window-pressure (no refinement set).
+		for _, e := range events {
+			assert.Equal(t, compressionCauseWindowPressure, e.cause,
+				"all events should classify as window pressure when no refinement index is set")
+		}
 	})
 
 	t.Run("pre-refinement steps compress even under budget", func(t *testing.T) {
@@ -781,7 +786,13 @@ func TestReAct3BuildScratchpad_CompressionGatedByWindow(t *testing.T) {
 		planner := &NBReActPlanner3{postRefinementToolIndex: 6}
 		_ = planner.buildScratchpad(steps)
 
-		assert.NotEmpty(t, collectCompressionEvents(steps), "pre-refinement steps must compress regardless of window pressure")
+		events := collectCompressionEvents(steps, false /*no window pressure*/, 6)
+		assert.NotEmpty(t, events, "pre-refinement steps must compress regardless of window pressure")
+		// Every event in this scenario classifies as refinement-focus.
+		for _, e := range events {
+			assert.Equal(t, compressionCauseRefinementFocus, e.cause,
+				"compression under budget but with refinement index set should classify as refinement-focus")
+		}
 		for i := 6; i < len(steps); i++ {
 			assert.Empty(t, steps[i].CompressedObservation, "post-refinement step %d should stay full under budget", i)
 		}

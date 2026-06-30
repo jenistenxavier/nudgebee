@@ -288,6 +288,14 @@ func (o *NBReActPlanner3) buildScratchpad(intermediateSteps []NBAgentPlannerTool
 	activationChars, hardCapChars := scratchpadBudget(maxContextTokens)
 	compressionActive := totalObsBytes > activationChars
 
+	// Stash the gating decision on the tracker so SaveCompressionVisibility
+	// can classify each event's cause (window-pressure vs refinement-focus)
+	// instead of defaulting to the misleading "context window" wording on the
+	// card. postRefinementToolIndex carries the always-on path; without this
+	// plumbing a 4-step / 7-KB conversation that hit the refinement-focused
+	// compression path was reported as "compressed to fit context window".
+	o.compressionTracker.SetCompressionContext(compressionActive, o.postRefinementToolIndex)
+
 	// Parallel prewarm: fire LLM summarizations for non-recent steps concurrently to
 	// avoid a sequential latency spike — but only when compression will actually run.
 	if compressionActive {

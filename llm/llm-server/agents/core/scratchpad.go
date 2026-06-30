@@ -332,6 +332,14 @@ func ConstructScratchPad(intermediateSteps []NBAgentPlannerToolActionStep, sctx 
 		total += len(c.Header) + len(c.Observation) + len(c.Footer) + len("    <response><![CDATA[]]></response>\n")
 	}
 
+	// Stash whether this pass crossed the activation threshold so the visibility
+	// card can be honest about why compression fired. ReWOO has no refinement
+	// path (postRefinementToolIndex=0), so any compression here is window-pressure.
+	windowPressureActive := total > activationChars
+	if scratchpadCtx != nil {
+		scratchpadCtx.Tracker.SetCompressionContext(windowPressureActive, 0)
+	}
+
 	// Compress from oldest if over budget.
 	// When a ScratchpadContext is provided and summarization is enabled, we use an LLM
 	// to generate a concise summary instead of blindly truncating.
