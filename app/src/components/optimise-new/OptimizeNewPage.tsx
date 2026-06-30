@@ -1,5 +1,5 @@
 import { Box, Typography } from '@mui/material';
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo, memo } from 'react';
 import NubiChatSidebar from '@shared/layout/NubiChatSidebar';
 import { buildNubiOptimizePrompt } from 'src/utils/nubiPromptBuilder';
 import { useRouter } from 'next/router';
@@ -8,7 +8,6 @@ import { useData } from '@context/DataContext';
 import apiHome from '@api1/home';
 import { transformClusters } from '@shared/layout/UpdateDataContext';
 import recommendationApi from '@api1/recommendation';
-import Loader from '@shared/Loader';
 import { toast as snackbar } from '@ui/Toast';
 import { SeverityIcon, type SeverityLevel as DsSeverityLevel } from '@ui/SeverityIcon';
 import { Skeleton } from '@ui/Skeleton';
@@ -199,6 +198,85 @@ const getTicketSourceFromCloudProvider = (cloudProvider: string | undefined): st
   }
 };
 
+interface RowActionsProps {
+  rowId: string;
+  rec: any;
+  category: string;
+  ticketId: string;
+  assistantName: string | undefined;
+  onAskNubi: (rec: any) => void;
+  onResolve: (rec: any) => void;
+  onCreateTicket: (rec: any) => void;
+  onCopyCli: (rec: any) => void;
+}
+
+const RowActions = memo(({ rowId, rec, category, ticketId, assistantName, onAskNubi, onResolve, onCreateTicket, onCopyCli }: RowActionsProps) => {
+  const showResolve = category === 'RightSizing' && rec.rule_name === 'pod_right_sizing' && hasWriteAccess(rec.account_id);
+  const showCopyCli = category === 'RightSizing' && rec.rule_name === 'pod_right_sizing';
+
+  const menuItems: Array<{ label: string; icon: React.ReactNode; onSelect: () => void; disabled?: boolean; id?: string }> = [
+    {
+      id: `action-ticket-${rowId}`,
+      label: ticketId ? `Ticket: ${ticketId}` : 'Create ticket',
+      icon: <ConfirmationNumberOutlinedIcon sx={{ fontSize: 16 }} />,
+      onSelect: () => onCreateTicket(rec),
+      disabled: !!ticketId,
+    },
+    ...(showCopyCli
+      ? [
+          {
+            id: `action-copy-cli-${rowId}`,
+            label: 'Copy CLI command',
+            icon: <ContentCopyOutlinedIcon sx={{ fontSize: 16 }} />,
+            onSelect: () => onCopyCli(rec),
+          },
+        ]
+      : []),
+  ];
+
+  return (
+    <Box onClick={(e) => e.stopPropagation()} sx={{ display: 'inline-flex', alignItems: 'center', gap: ds.space[1], justifyContent: 'flex-end' }}>
+      {showResolve && (
+        <Tooltip title='Optimize' placement='top'>
+          <span>
+            <Button
+              tone='ghost'
+              size='xs'
+              composition='icon-only'
+              icon={<SafeIcon src={OptimizeIcon} alt='' width={16} height={16} />}
+              aria-label='Optimize'
+              id={`action-resolve-${rowId}`}
+              onClick={() => onResolve(rec)}
+            />
+          </span>
+        </Tooltip>
+      )}
+      <Tooltip title={`Ask ${assistantName || 'Nubi'}`} placement='top'>
+        <span>
+          <Button
+            tone='ghost'
+            size='xs'
+            composition='icon-only'
+            icon={<SafeIcon src={getNubiIconUrl()} alt='' width={16} height={16} />}
+            aria-label={`Ask ${assistantName || 'Nubi'}`}
+            id={`action-ask-nubi-${rowId}`}
+            onClick={() => onAskNubi(rec)}
+          />
+        </span>
+      </Tooltip>
+      <DropdownMenu
+        align='end'
+        size='sm'
+        items={menuItems}
+        trigger={
+          <Button tone='ghost' size='xs' composition='icon-only' icon={<MoreVertIcon />} aria-label='More actions' id={`action-menu-${rowId}`} />
+        }
+      />
+    </Box>
+  );
+});
+RowActions.displayName = 'RowActions';
+
 const OptimizeNewPage = () => {
   const router = useRouter();
   const routerRef = useRef(router);
@@ -219,7 +297,7 @@ const OptimizeNewPage = () => {
   const [recommendations, setRecommendations] = useState<any[]>([]);
   const [tableTotal, setTableTotal] = useState(0);
   const [page, setPage] = useState(0);
-  const [rowsPerPage, setRowsPerPage] = useState(20);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
   const [tableLoading, setTableLoading] = useState(true);
 
   // Sort state
@@ -256,9 +334,6 @@ const OptimizeNewPage = () => {
   const [nubiQuery, setNubiQuery] = useState('');
   const [nubiAccountId, setNubiAccountId] = useState('');
   const [nubiConversationId, setNubiConversationId] = useState('');
-
-  // Page-level loading
-  const [pageLoading, setPageLoading] = useState(true);
 
   // Sync filters to URL
   const updateUrl = useCallback((newFilters: FilterState) => {
@@ -304,7 +379,9 @@ const OptimizeNewPage = () => {
         const clusters = transformClusters(res);
         setAllCluster(clusters);
       })
-      .finally(() => setPageLoading(false));
+      .catch(() => {
+        /* accounts are non-blocking; widgets degrade gracefully */
+      });
   }, []);
 
   // Build filter query for the API
@@ -480,13 +557,16 @@ const OptimizeNewPage = () => {
     }
   }, [buildTableQuery, applyTableResult]);
 
+  // O(1) lookup for keeping the detail panel in sync after table refreshes.
+  const recById = useMemo(() => new Map(recommendations.map((r: any) => [r.id, r])), [recommendations]);
+
   // Keep the detail drawer in sync when table data refreshes
   useEffect(() => {
     setSelectedRec((prev: any) => {
       if (!prev || !detailOpen) return prev;
-      return recommendations.find((r: any) => r.id === prev.id) ?? prev;
+      return recById.get(prev.id) ?? prev;
     });
-  }, [recommendations, detailOpen]);
+  }, [recById, detailOpen]);
 
   // CSV export — replaces the legacy DownloadButton DOM-scraping path.
   // Built directly from the in-memory recommendation rows so it stays decoupled
@@ -710,10 +790,16 @@ const OptimizeNewPage = () => {
   // Current sort in CustomTable2 shape.
   const sortBy = useMemo(() => ({ name: SORT_FIELD_TO_HEADER[sortField], order: sortDirection }), [sortField, sortDirection]);
 
+  // Stable ref so askNubiAboutRec has no dep on `accounts` and doesn't invalidate tableData.
+  const accountsRef = useRef(accounts);
+  useEffect(() => {
+    accountsRef.current = accounts;
+  }, [accounts]);
+
   // Reused by both the row action menu and the detail panel.
   const askNubiAboutRec = useCallback(
     (rec: any) => {
-      const accountInfo = accounts[rec.account_id];
+      const accountInfo = accountsRef.current[rec.account_id];
       const prompt = buildNubiOptimizePrompt({
         ruleName: formatRuleName(rec.rule_name || ''),
         category: rec.category || '',
@@ -730,7 +816,7 @@ const OptimizeNewPage = () => {
       setNubiConversationId(`recom_${rec.id}`);
       setNubiSidebarVisible(true);
     },
-    [accounts]
+    [] // reads accounts via accountsRef — stable across account reloads
   );
 
   const { assistantName } = useTenantBranding();
@@ -744,27 +830,6 @@ const OptimizeNewPage = () => {
       tableRows.map((row) => {
         const providerLabel = row.cloudService === 'kubernetes' ? 'K8s' : row.cloudService ? row.cloudService.toUpperCase() : '';
         const providerSlug = row.accountCloudProvider || (row.cloudService === 'kubernetes' ? 'K8S' : row.cloudService.toUpperCase());
-
-        const showResolve = row.category === 'RightSizing' && row.rec.rule_name === 'pod_right_sizing' && hasWriteAccess(row.rec.account_id);
-        const showCopyCli = row.category === 'RightSizing' && row.rec.rule_name === 'pod_right_sizing';
-
-        // Items behind the kebab — everything that isn't surfaced inline.
-        const menuItems: Array<{ label: string; icon: React.ReactNode; onSelect: () => void; disabled?: boolean; id?: string }> = [];
-        menuItems.push({
-          id: `action-ticket-${row.id}`,
-          label: row.ticketId ? `Ticket: ${row.ticketId}` : 'Create ticket',
-          icon: <ConfirmationNumberOutlinedIcon sx={{ fontSize: 16 }} />,
-          onSelect: () => setTicketModalRec(row.rec),
-          disabled: !!row.ticketId,
-        });
-        if (showCopyCli) {
-          menuItems.push({
-            id: `action-copy-cli-${row.id}`,
-            label: 'Copy CLI command',
-            icon: <ContentCopyOutlinedIcon sx={{ fontSize: 16 }} />,
-            onSelect: () => setCliModalRec(row.rec),
-          });
-        }
 
         return [
           // Severity
@@ -896,69 +961,23 @@ const OptimizeNewPage = () => {
           // Actions
           {
             component: (
-              <Box
-                onClick={(e) => e.stopPropagation()}
-                sx={{ display: 'inline-flex', alignItems: 'center', gap: ds.space[1], justifyContent: 'flex-end' }}
-              >
-                {showResolve && (
-                  <Tooltip title='Optimize' placement='top'>
-                    <span>
-                      <Button
-                        tone='ghost'
-                        size='xs'
-                        composition='icon-only'
-                        icon={<SafeIcon src={OptimizeIcon} alt='' width={16} height={16} />}
-                        aria-label='Optimize'
-                        id={`action-resolve-${row.id}`}
-                        onClick={() => setResolveModalRec(row.rec)}
-                      />
-                    </span>
-                  </Tooltip>
-                )}
-                <Tooltip title={`Ask ${assistantName || 'Nubi'}`} placement='top'>
-                  <span>
-                    <Button
-                      tone='ghost'
-                      size='xs'
-                      composition='icon-only'
-                      icon={<SafeIcon src={getNubiIconUrl()} alt='' width={16} height={16} />}
-                      aria-label={`Ask ${assistantName || 'Nubi'}`}
-                      id={`action-ask-nubi-${row.id}`}
-                      onClick={() => askNubiAboutRec(row.rec)}
-                    />
-                  </span>
-                </Tooltip>
-                <DropdownMenu
-                  align='end'
-                  size='sm'
-                  items={menuItems}
-                  trigger={
-                    <Button
-                      tone='ghost'
-                      size='xs'
-                      composition='icon-only'
-                      icon={<MoreVertIcon />}
-                      aria-label='More actions'
-                      id={`action-menu-${row.id}`}
-                    />
-                  }
-                />
-              </Box>
+              <RowActions
+                rowId={row.id}
+                rec={row.rec}
+                category={row.category}
+                ticketId={row.ticketId}
+                assistantName={assistantName}
+                onAskNubi={askNubiAboutRec}
+                onResolve={setResolveModalRec}
+                onCreateTicket={setTicketModalRec}
+                onCopyCli={setCliModalRec}
+              />
             ),
           },
         ];
       }),
-    [tableRows, assistantName, askNubiAboutRec]
+    [tableRows, assistantName, askNubiAboutRec, setResolveModalRec, setTicketModalRec, setCliModalRec]
   );
-
-  // Show page-level loader on initial load
-  if (pageLoading && summaryLoading) {
-    return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh' }}>
-        <Loader style={{ height: '400px', width: 'auto' }} />
-      </Box>
-    );
-  }
 
   return (
     <Box sx={{ p: '0px' }} data-testid='optimize-new-page'>
