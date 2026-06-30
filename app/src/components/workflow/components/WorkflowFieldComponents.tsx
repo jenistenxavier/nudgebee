@@ -1,9 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import {
-  Box,
-  Typography,
-  TextField,
-} from '@mui/material';
+import { Box, Typography, TextField } from '@mui/material';
 import { Add, Delete, DragIndicator, Visibility, VisibilityOff, ExpandMore, ExpandLess, Code, ViewList } from '@mui/icons-material';
 import { Input } from '@ui/Input';
 import CollapsableCard from '@ui/CollapsableCard';
@@ -370,9 +366,7 @@ export const ArrayEditor: React.FC<ArrayEditorProps> = ({
             <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-medium)', color: 'var(--ds-brand-500)' }}>
               Item {index + 1}
             </Typography>
-            {configuredCount > 0 && (
-              <DsChip size='xs' tone='neutral'>{`${configuredCount} fields`}</DsChip>
-            )}
+            {configuredCount > 0 && <DsChip size='xs' tone='neutral'>{`${configuredCount} fields`}</DsChip>}
             {isExpanded ? (
               <ExpandLess sx={{ fontSize: 18, color: 'var(--ds-gray-600)', ml: 'auto' }} />
             ) : (
