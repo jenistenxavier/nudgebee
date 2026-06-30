@@ -229,144 +229,149 @@ export default function IntegrationProfiles({ userId, onNotify, readOnly = false
               >
                 {group.name}
               </Box>
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--ds-space-2)' }}>
-                {group.items.map((a) => {
-                  const expanded = expandedId === a.id;
-                  return (
-                    <Box
-                      key={a.id}
-                      data-testid={`integration-account-${a.integration_type}`}
-                      sx={{
-                        flex: '1 1 280px',
-                        maxWidth: 380,
-                        display: 'flex',
-                        flexDirection: 'column',
-                        border: `1px solid ${expanded ? ds.gray[400] : ds.background[300]}`,
-                        borderRadius: 'var(--ds-radius-md)',
-                        transition: 'border-color 0.15s, box-shadow 0.15s',
-                        '&:hover': { borderColor: ds.gray[400], boxShadow: `0px 1px 3px 0px ${ds.gray.alpha[300]}` },
-                      }}
-                    >
-                      {/* Clickable summary row — toggles the detail panel below */}
-                      <Box
-                        onClick={() => setExpandedId(expanded ? null : a.id)}
-                        sx={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 'var(--ds-space-3)',
-                          padding: 'var(--ds-space-2) var(--ds-space-3)',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        {/* Provider logo in a rounded avatar */}
+              <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--ds-space-2)', alignItems: 'start' }}>
+                {[group.items.filter((_, i) => i % 2 === 0), group.items.filter((_, i) => i % 2 !== 0)].map((col, colIdx) => (
+                  <Box key={colIdx} sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-2)' }}>
+                    {col.map((a) => {
+                      const expanded = expandedId === a.id;
+                      return (
                         <Box
+                          key={a.id}
+                          data-testid={`integration-account-${a.integration_type}`}
                           sx={{
-                            width: 36,
-                            height: 36,
-                            flexShrink: 0,
-                            borderRadius: 'var(--ds-radius-pill)',
-                            border: `1px solid ${ds.background[300]}`,
-                            background: ds.background[100],
                             display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            '& img, & svg': { width: 20, height: 20, objectFit: 'contain' },
+                            flexDirection: 'column',
+                            border: `1px solid ${expanded ? ds.gray[400] : ds.background[300]}`,
+                            borderRadius: 'var(--ds-radius-md)',
+                            transition: 'border-color 0.15s, box-shadow 0.15s',
+                            '&:hover': { borderColor: ds.gray[400], boxShadow: `0px 1px 3px 0px ${ds.gray.alpha[300]}` },
                           }}
                         >
-                          {providerLogo(a.integration_type) && (
-                            <SafeIcon src={providerLogo(a.integration_type)} alt={providerLabel(a.integration_type)} width={20} height={20} />
-                          )}
-                        </Box>
-
-                        {/* Account identity: name on top, provider · email beneath */}
-                        <Box sx={{ flex: 1, minWidth: 0 }}>
+                          {/* Clickable summary row — toggles the detail panel below */}
                           <Box
+                            onClick={() => setExpandedId(expanded ? null : a.id)}
                             sx={{
-                              font: "600 13px/1.3 'Roboto'",
-                              color: ds.gray[700],
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 'var(--ds-space-3)',
+                              padding: 'var(--ds-space-2) var(--ds-space-3)',
+                              cursor: 'pointer',
                             }}
                           >
-                            {a.display_name || a.username || a.external_user_id}
-                          </Box>
-                          {(() => {
-                            // On multi-instance cards the instance name is the disambiguator
-                            // and the email repeats identically across the person's instances,
-                            // so show just the instance name (provider is shown by the icon).
-                            // Single-instance cards keep the familiar "Provider · email".
-                            const subtitle = showInstanceName(a)
-                              ? a.integration_name
-                              : [providerLabel(a.integration_type), a.email || a.username].filter(Boolean).join(' · ');
-                            return (
+                            {/* Provider logo in a rounded avatar */}
+                            <Box
+                              sx={{
+                                width: 36,
+                                height: 36,
+                                flexShrink: 0,
+                                borderRadius: 'var(--ds-radius-pill)',
+                                border: `1px solid ${ds.background[300]}`,
+                                background: ds.background[100],
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                '& img, & svg': { width: 20, height: 20, objectFit: 'contain' },
+                              }}
+                            >
+                              {providerLogo(a.integration_type) && (
+                                <SafeIcon src={providerLogo(a.integration_type)} alt={providerLabel(a.integration_type)} width={20} height={20} />
+                              )}
+                            </Box>
+
+                            {/* Account identity: name on top, provider · email beneath */}
+                            <Box sx={{ flex: 1, minWidth: 0 }}>
                               <Box
-                                title={subtitle}
                                 sx={{
-                                  font: "400 11px/1.3 'Roboto'",
-                                  color: ds.gray[400],
+                                  font: "600 13px/1.3 'Roboto'",
+                                  color: ds.gray[700],
                                   overflow: 'hidden',
                                   textOverflow: 'ellipsis',
                                   whiteSpace: 'nowrap',
                                 }}
                               >
-                                {subtitle}
+                                {a.display_name || a.username || a.external_user_id}
                               </Box>
-                            );
-                          })()}
-                        </Box>
+                              {(() => {
+                                // On multi-instance cards the instance name is the disambiguator
+                                // and the email repeats identically across the person's instances,
+                                // so show just the instance name (provider is shown by the icon).
+                                // Single-instance cards keep the familiar "Provider · email".
+                                const subtitle = showInstanceName(a)
+                                  ? a.integration_name
+                                  : [providerLabel(a.integration_type), a.email || a.username].filter(Boolean).join(' · ');
+                                return (
+                                  <Box
+                                    title={subtitle}
+                                    sx={{
+                                      font: "400 11px/1.3 'Roboto'",
+                                      color: ds.gray[400],
+                                      overflow: 'hidden',
+                                      textOverflow: 'ellipsis',
+                                      whiteSpace: 'nowrap',
+                                    }}
+                                  >
+                                    {subtitle}
+                                  </Box>
+                                );
+                              })()}
+                            </Box>
 
-                        <Chip variant='status' size='xs' dot tone={a.mapped_via === 'manual' ? 'info' : 'success'}>
-                          {a.mapped_via === 'manual' ? 'Manual' : 'Auto'}
-                        </Chip>
-                        {canEdit && (
-                          <Button
-                            id={`integration-account-unmap-${a.id}`}
-                            tone='secondary'
-                            size='sm'
-                            disabled={busy}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleUnmap(a.id);
-                            }}
-                          >
-                            Unmap
-                          </Button>
-                        )}
-                        <KeyboardArrowDownIcon
-                          sx={{
-                            fontSize: 18,
-                            flexShrink: 0,
-                            color: ds.gray[400],
-                            transition: 'transform 0.15s',
-                            transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)',
-                          }}
-                        />
-                      </Box>
+                            <Chip variant='status' size='xs' dot tone={a.mapped_via === 'manual' ? 'info' : 'success'}>
+                              {a.mapped_via === 'manual' ? 'Manual' : 'Auto'}
+                            </Chip>
+                            {canEdit && (
+                              <Button
+                                id={`integration-account-unmap-${a.id}`}
+                                tone='secondary'
+                                size='sm'
+                                disabled={busy}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleUnmap(a.id);
+                                }}
+                              >
+                                Unmap
+                              </Button>
+                            )}
+                            <KeyboardArrowDownIcon
+                              sx={{
+                                fontSize: 18,
+                                flexShrink: 0,
+                                color: ds.gray[400],
+                                transition: 'transform 0.15s',
+                                transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)',
+                              }}
+                            />
+                          </Box>
 
-                      {/* Expanded detail: how it was mapped, by whom, when last synced */}
-                      {expanded && (
-                        <Box
-                          sx={{
-                            display: 'flex',
-                            flexDirection: 'column',
-                            gap: 'var(--ds-space-1)',
-                            padding: 'var(--ds-space-2) var(--ds-space-3) var(--ds-space-3)',
-                            borderTop: `1px solid ${ds.background[300]}`,
-                          }}
-                        >
-                          {detailRow('How mapped', a.mapped_via === 'manual' ? 'Manual' : 'Auto · matched by email')}
-                          {a.mapped_via === 'manual' && detailRow('Mapped by', a.mapped_by_name || '—')}
-                          {a.last_synced_at &&
-                            detailRow('Last synced', <Datetime value={a.last_synced_at} sx={{ fontSize: '11px' }} sxSuffix={{ fontSize: '11px' }} />)}
-                          {detailRow('External ID', a.external_user_id)}
-                          {a.integration_name && detailRow('Integration', a.integration_name)}
-                          {a.email && detailRow('Email', a.email)}
+                          {/* Expanded detail: how it was mapped, by whom, when last synced */}
+                          {expanded && (
+                            <Box
+                              sx={{
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: 'var(--ds-space-1)',
+                                padding: 'var(--ds-space-2) var(--ds-space-3) var(--ds-space-3)',
+                                borderTop: `1px solid ${ds.background[300]}`,
+                              }}
+                            >
+                              {detailRow('How mapped', a.mapped_via === 'manual' ? 'Manual' : 'Auto · matched by email')}
+                              {a.mapped_via === 'manual' && detailRow('Mapped by', a.mapped_by_name || '—')}
+                              {a.last_synced_at &&
+                                detailRow(
+                                  'Last synced',
+                                  <Datetime value={a.last_synced_at} sx={{ fontSize: '11px' }} sxSuffix={{ fontSize: '11px' }} />
+                                )}
+                              {detailRow('External ID', a.external_user_id)}
+                              {a.integration_name && detailRow('Integration', a.integration_name)}
+                              {a.email && detailRow('Email', a.email)}
+                            </Box>
+                          )}
                         </Box>
-                      )}
-                    </Box>
-                  );
-                })}
+                      );
+                    })}
+                  </Box>
+                ))}
               </Box>
             </Box>
           ))}
