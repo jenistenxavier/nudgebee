@@ -70,7 +70,10 @@ func upsertRecommendationData(ctx *security.RequestContext, dbms *database.Datab
 	if len(data) == 0 {
 		return nil
 	}
-	// Compute finops score for each recommendation before upserting
+	// Compute finops score for the INSERT case only. On conflict finops_* are
+	// deliberately not overwritten: this path scores recency from now(), which
+	// inflated re-upserted old rows until the next cron pass. The 6h recompute
+	// cron owns score refresh for existing rows.
 	for _, d := range data {
 		ComputeAndSetFinOpsScoreFields(d)
 	}
@@ -78,7 +81,7 @@ func upsertRecommendationData(ctx *security.RequestContext, dbms *database.Datab
 		(status, tenant_id, cloud_account_id, recommendation, severity, category, rule_name, estimated_savings, recommendation_action, resource_id, account_object_id, updated_at, finops_score, finops_band, finops_score_breakdown)
 		values (:status, :tenant_id, :cloud_account_id, :recommendation, :severity, :category, :rule_name, :estimated_savings, :recommendation_action, :resource_id, :account_object_id, :updated_at, :finops_score, :finops_band, :finops_score_breakdown)
 		ON CONFLICT (rule_name, cloud_account_id, resource_id, category, account_object_id)
-		DO UPDATE SET recommendation = (EXCLUDED.recommendation), status = (EXCLUDED.status), updated_at = (EXCLUDED.updated_at), estimated_savings = (EXCLUDED.estimated_savings), finops_score = (EXCLUDED.finops_score), finops_band = (EXCLUDED.finops_band), finops_score_breakdown = (EXCLUDED.finops_score_breakdown) `, data)
+		DO UPDATE SET recommendation = (EXCLUDED.recommendation), status = (EXCLUDED.status), updated_at = (EXCLUDED.updated_at), estimated_savings = (EXCLUDED.estimated_savings) `, data)
 	if err != nil {
 		ctx.GetLogger().Error("error upserting recommendation data", "error", err)
 		return err

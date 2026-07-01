@@ -1096,6 +1096,15 @@ func ApplyRightsizingRecommendationUsingCodeAgentGitLab(ctx AccountAdapterContex
 			}
 		}
 
+		// Only inject resizePolicy when the cluster is >= 1.35 (where in-place
+		// resize / the field take effect). The UI / rule can pass an explicit
+		// resize_policy override via provider_config.
+		resizePolicySection := ""
+		if clusterSupportsInPlaceResize(ctx, request.Recommendation.CloudAccountId) {
+			override, _ := request.ProviderConfig["resize_policy"].(string)
+			resizePolicySection = resizePolicyPromptSection(resolveResizePolicyMode(override, gitDetail.Annotations))
+		}
+
 		queryText := fmt.Sprintf(`Please apply the following Kubernetes resource rightsizing recommendations.
 
 **Repository**: %s (GitLab)
@@ -1112,7 +1121,7 @@ func ApplyRightsizingRecommendationUsingCodeAgentGitLab(ctx AccountAdapterContex
 2. Identify the correct YAML path in the values file for each container (check template variable references like {{.Values.resources}})
 3. Update only the specified CPU/memory values at the correct paths
 4. Preserve existing formatting and structure
-5. **CRITICAL - CPU Limits**: If the recommendation specifies CPU limit as null, empty, or omitted, you MUST remove the CPU limit line entirely or leave it unset. DO NOT set CPU limit to match the request value. Only set CPU limit if explicitly provided with a non-null value in the recommendation.
+5. **CRITICAL - CPU Limits**: If the recommendation specifies CPU limit as null, empty, or omitted, you MUST remove the CPU limit line entirely or leave it unset. DO NOT set CPU limit to match the request value. Only set CPU limit if explicitly provided with a non-null value in the recommendation.%s
 
 **MR Description Requirements**:
 When creating the MR, ensure the description includes:
@@ -1133,6 +1142,7 @@ Make minimal, precise changes only.`,
 			gitDetail.FilePath,
 			resourceNamespace,
 			string(recommendationJSON),
+			resizePolicySection,
 		)
 
 		// Wrap the prompt in a JSON envelope so agent_code_2 receives explicit

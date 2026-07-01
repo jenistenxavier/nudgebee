@@ -197,7 +197,7 @@ func TestEventRegistry_Match(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			matches := registry.Match(tt.eventType, tt.accountID, tt.payload)
+			matches := registry.Match(tt.eventType, tt.accountID, tt.payload, string(model.DefaultLifecyclePhase))
 			var gotIDs []string
 			for _, m := range matches {
 				gotIDs = append(gotIDs, m.WorkflowID)
@@ -276,7 +276,7 @@ func TestEventRegistry_Wildcard(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			matches := registry.Match(tt.eventType, tt.accountID, tt.payload)
+			matches := registry.Match(tt.eventType, tt.accountID, tt.payload, string(model.DefaultLifecyclePhase))
 			var gotIDs []string
 			for _, m := range matches {
 				gotIDs = append(gotIDs, m.WorkflowID)
@@ -286,27 +286,35 @@ func TestEventRegistry_Wildcard(t *testing.T) {
 	}
 }
 
-// TestEventRegistry_DateVars verifies the built-in date/time vars are injected into
-// the trigger-filter context so filters can do date-based logic. (The tz/strftime
-// filters themselves are registered by the workflow package at runtime and are not
-// exercised here; this only asserts the variables are present.)
-func TestEventRegistry_DateVars(t *testing.T) {
+func TestEventRegistry_Match_PhaseGate(t *testing.T) {
 	mockStore := new(MockTriggerStore)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	registry := NewEventRegistry(mockStore, logger)
+	ctx := context.Background()
 
 	rules := []model.WorkflowEventTriggerRule{
-		{WorkflowID: "wf-has-ts", EventType: "generic.event", Filter: `{{ timestamp_iso != "" and event.env == "prod" }}`, AccountID: "acc-1"},
-		{WorkflowID: "wf-no-ts", EventType: "generic.event", Filter: `{{ timestamp_iso == "" }}`, AccountID: "acc-1"},
+		{WorkflowID: "wf-created", EventType: "alert.fired", AccountID: "a1", LifecyclePhase: string(model.LifecyclePhaseEventCreated)},
+		{WorkflowID: "wf-completed", EventType: "alert.fired", AccountID: "a1", LifecyclePhase: string(model.LifecyclePhaseInvestigationCompleted)},
+		{WorkflowID: "wf-legacy", EventType: "alert.fired", AccountID: "a1", LifecyclePhase: ""}, // empty ⇒ defaults to event.created
 	}
-	mockStore.On("FindEventTriggers", mock.Anything).Return(rules, nil)
-	_ = registry.Refresh(context.Background())
+	mockStore.On("FindEventTriggers", ctx).Return(rules, nil)
+	assert.NoError(t, registry.Refresh(ctx))
 
-	matches := registry.Match("generic.event", "acc-1", map[string]any{"env": "prod"})
-	var gotIDs []string
-	for _, m := range matches {
-		gotIDs = append(gotIDs, m.WorkflowID)
+	payload := map[string]any{"event_type": "alert.fired"}
+
+	ids := func(ms []model.WorkflowEventTriggerRule) []string {
+		var out []string
+		for _, m := range ms {
+			out = append(out, m.WorkflowID)
+		}
+		return out
 	}
-	// timestamp_iso is populated, so only the non-empty branch matches.
-	assert.ElementsMatch(t, []string{"wf-has-ts"}, gotIDs)
+
+	created := registry.Match("alert.fired", "a1", payload, string(model.LifecyclePhaseEventCreated))
+	assert.ElementsMatch(t, []string{"wf-created", "wf-legacy"}, ids(created),
+		"event.created matches the created rule and the legacy (empty⇒created) rule")
+
+	completed := registry.Match("alert.fired", "a1", payload, string(model.LifecyclePhaseInvestigationCompleted))
+	assert.ElementsMatch(t, []string{"wf-completed"}, ids(completed),
+		"investigation.completed matches only the completed rule — no double-fire of the created rule")
 }

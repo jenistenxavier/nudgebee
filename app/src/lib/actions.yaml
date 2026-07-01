@@ -2804,6 +2804,18 @@ actions:
     permissions:
       - role: tenant_admin
     comment: Update a notification channel account mapping
+  - name: notifications_google_chat_permission_status
+    definition:
+      kind: "synchronous"
+      handler: '{{NOTIFICATION_SERVICE_URL}}/api/channels/google-chat/permission-status'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+    comment: Probe whether the Google Chat bot's self-join permission is authorized
   - name: notifications_list_channels
     definition:
       kind: "synchronous"
@@ -3945,6 +3957,52 @@ actions:
     permissions:
       - role: tenant_admin
     comment: Delete an ownership rule
+  - name: users_list_integration_accounts
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/user'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: tenant_admin_readonly
+    comment: List external integration accounts (Slack/GitHub/PagerDuty/ZenDuty) mapped to a user
+  - name: users_list_unmapped_accounts
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/user'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: tenant_admin_readonly
+    comment: List unmapped external integration accounts for manual mapping
+  - name: users_create_account_mapping
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/user'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+    comment: Manually map an external integration account to an internal user
+  - name: users_delete_account_mapping
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/user'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+    comment: Remove the internal-user mapping from an external integration account
   - name: users_update_status
     definition:
       kind: synchronous

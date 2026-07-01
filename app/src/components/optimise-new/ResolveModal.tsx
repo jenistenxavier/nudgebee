@@ -12,6 +12,8 @@ import apiIntegrations from '@api1/integrations';
 import k8sApi from '@api1/kubernetes';
 import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
 import { Select } from '@ui/Select';
+import { Switch } from '@ui/Switch';
+import Tooltip from '@ui/Tooltip';
 import { Button } from '@ui/Button';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { BetaIcon } from '@assets';
@@ -48,6 +50,12 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
   const [prLoading, setPRLoading] = useState(false);
   const [allGitIntegrations, setAllGitIntegrations] = useState<any[]>([]);
   const [selectedGitIntegration, setSelectedGitIntegration] = useState('');
+  // In-place resize policy written into the PR (KEP-1287). Applied only on
+  // Kubernetes 1.35+ clusters; older clusters fall back to a rollout on deploy.
+  const [resizePolicyMode, setResizePolicyMode] = useState<string>('in-place');
+  // Deploy Fix: apply in place (no restart) when the cluster supports it
+  // (Kubernetes 1.35+); otherwise it auto-falls back to a rolling restart.
+  const [inPlace, setInPlace] = useState<boolean>(true);
   const [selectedWorkloadAnnotations, setSelectedWorkloadAnnotations] = useState<Record<string, string>>({});
   const [isGitReposLoading, setIsGitReposLoading] = useState(false);
 
@@ -425,7 +433,7 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
       const dataToSubmit = getDataWithMemorySuffix();
       const accountId = recommendation.account_id || '';
       const recommendationId = recommendation.id;
-      const result = await recommendationApi.applyRecommendation(accountId, recommendationId, dataToSubmit);
+      const result = await recommendationApi.applyRecommendation(accountId, recommendationId, dataToSubmit, undefined, { in_place: inPlace });
 
       if (result?.errors) {
         snackbar.error('An error occurred while deploying');
@@ -482,7 +490,7 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
     const data = getDataWithMemorySuffix();
     const accountId = recommendation.account_id || '';
     recommendationApi
-      .applyRecommendation(accountId, recommendation.id, data, integrationType, { name: integrationName })
+      .applyRecommendation(accountId, recommendation.id, data, integrationType, { name: integrationName, resize_policy: resizePolicyMode })
       .then((res: any) => {
         if (res?.errors?.length > 0) {
           snackbar.error('Failed to create Pull Request');
@@ -589,10 +597,23 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
         paddingX: '10px',
       }}
     >
-      <Box sx={{ display: 'flex', alignItems: 'center' }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
         <Button tone='secondary' size='md' onClick={handleClose} disabled={deploying} id='resolve-modal-cancel'>
           Cancel
         </Button>
+        <Tooltip title='Resize running pods without a restart on Kubernetes 1.35+. Older clusters automatically fall back to a rolling restart.'>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <Switch
+              checked={inPlace}
+              onChange={(e: any) => setInPlace(e.target.checked)}
+              size='sm'
+              disabled={deploying}
+              aria-label='Apply in place (no restart)'
+              id='resolve-modal-inplace'
+            />
+            <Typography sx={{ color: ds.gray[600], fontSize: 'var(--ds-text-small)' }}>No-restart (in-place)</Typography>
+          </Box>
+        </Tooltip>
       </Box>
       <Box sx={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
         <Button tone='secondary' size='md' onClick={openTicketForm} disabled={ticketExists} id='resolve-modal-ticket'>
@@ -696,6 +717,23 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
                     disabled={isGitReposLoading}
                   />
                 </Grid>
+                <Grid container gap={3} sx={{ mt: 2 }}>
+                  <Select
+                    label='In-place resize policy'
+                    value={resizePolicyMode}
+                    options={[
+                      { value: 'in-place', label: 'In-place — resize without restart (CPU & memory)' },
+                      { value: 'restart-memory', label: 'Restart container on memory change' },
+                      { value: 'disabled', label: "Don't configure (apply on next rollout)" },
+                    ]}
+                    onChange={(v: string) => setResizePolicyMode(v)}
+                    disabled={prLoading}
+                  />
+                </Grid>
+                <Typography variant='body2' sx={{ mt: 1, color: ds.gray[500] }} data-testid='resize-policy-hint'>
+                  Adds a <strong>resizePolicy</strong> to the workload so future pods resize without a restart on Kubernetes 1.35+. Older clusters
+                  ignore it and apply on the next rollout.
+                </Typography>
                 <Typography sx={{ mt: 2, mb: 1, color: ds.green[600], fontWeight: ds.weight.medium }}>Source configuration detected</Typography>
                 <ul>
                   {Object.entries(selectedWorkloadAnnotations).map(([key, value]) => (

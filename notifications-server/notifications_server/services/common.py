@@ -260,6 +260,65 @@ class CommonService:
 
         return {"data": spaces}
 
+    def get_default_google_chat_space(self, tenant):
+        """Resolve the tenant's default Google Chat space for notifications that don't
+        name one (e.g. proactive incident posts). If exactly one space is bound it is
+        the implicit default; with several, the one flagged is_default='true' wins;
+        otherwise None. Returns the space id (integration name)."""
+        bindings = (
+            self.session.query(Integration)
+            .filter(
+                Integration.tenant_id == tenant,
+                Integration.type == "google_chat_space",
+                Integration.status != "disabled",
+            )
+            .all()
+        )
+        if not bindings:
+            return None
+        if len(bindings) == 1:
+            return bindings[0].name
+        by_id = {binding.id: binding.name for binding in bindings}
+        default_row = (
+            self.session.query(IntegrationConfigValue)
+            .filter(
+                IntegrationConfigValue.integration_id.in_(list(by_id.keys())),
+                IntegrationConfigValue.name == "is_default",
+                IntegrationConfigValue.value == "true",
+            )
+            .first()
+        )
+        return by_id.get(default_row.integration_id) if default_row else None
+
+    def google_chat_permission_status(self, tenant):
+        """Probe whether the bot's self-join permission (chat.app.memberships) is
+        authorized for this tenant's workspace, for the guided-grant UI. Probes the
+        default (or any) bound space. Returns status:
+          authorized | needs_authorization | no_spaces | sa_not_configured | unknown."""
+        if not GoogleChatAppClient.is_enabled():
+            return {"status": "sa_not_configured"}
+        space_id = self.get_default_google_chat_space(tenant)
+        if not space_id:
+            first = (
+                self.session.query(Integration)
+                .filter(
+                    Integration.tenant_id == tenant,
+                    Integration.type == "google_chat_space",
+                    Integration.status != "disabled",
+                )
+                .first()
+            )
+            space_id = first.name if first else None
+        if not space_id:
+            return {"status": "no_spaces"}
+        probe = GoogleChatAppClient.membership_status(space_id)
+        status = probe.get("status")
+        if status in ("already_member", "can_join"):
+            return {"status": "authorized"}
+        if status == "needs_authorization":
+            return {"status": "needs_authorization"}
+        return {"status": "unknown"}
+
     def join_channel(self, platform, account_id, tenant_id, channel_id, session_id=None, team_id=None, text=None):
         try:
             if platform == "google_chat":

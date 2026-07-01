@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -240,6 +241,115 @@ func updateYamlCode(data []byte, pathsToUpdate map[string]any) ([]byte, []string
 	}
 
 	return updatedData, updatedPaths, nil
+}
+
+// resizePolicyEntry is one container resizePolicy rule. Field order (yaml tags)
+// is deterministic so the rendered manifest is stable across runs.
+type resizePolicyEntry struct {
+	ResourceName  string `yaml:"resourceName"`
+	RestartPolicy string `yaml:"restartPolicy"`
+}
+
+// resolveResizePolicyMode resolves the resize-policy mode string. An explicit
+// override (from the apply request's provider_config.resize_policy — set by the
+// Optimize "Create PR" UI or an AutoOptimize rule) wins over the workload's
+// ci.<domain>/inPlaceResize annotation.
+func resolveResizePolicyMode(override string, ann map[string]string) string {
+	if strings.TrimSpace(override) != "" {
+		return override
+	}
+	return ann[annotations.CIInPlaceResize]
+}
+
+// resizePolicyEntries returns the resizePolicy block to inject and whether to
+// inject it, based on the resolved mode string:
+//   - "false"/"off"/"disabled"/"no" → don't inject
+//   - "restart-memory"              → cpu=NotRequired, memory=RestartContainer
+//   - unset / anything else         → cpu=NotRequired, memory=NotRequired
+func resizePolicyEntries(mode string) ([]resizePolicyEntry, bool) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "false", "off", "disabled", "no":
+		return nil, false
+	}
+	memPolicy := "NotRequired"
+	if strings.EqualFold(strings.TrimSpace(mode), "restart-memory") {
+		memPolicy = "RestartContainer"
+	}
+	return []resizePolicyEntry{
+		{ResourceName: "cpu", RestartPolicy: "NotRequired"},
+		{ResourceName: "memory", RestartPolicy: memPolicy},
+	}, true
+}
+
+// inPlaceResizeK8sVersionRegex extracts major.minor from a k8s_version such as
+// "v1.33.11-eks-40737a8" or "v1.35.3-gke.1389002".
+var inPlaceResizeK8sVersionRegex = regexp.MustCompile(`^v?(\d+)\.(\d+)`)
+
+// k8sSupportsInPlaceResize reports whether a cluster version string is >= 1.35,
+// where in-place pod resize reached GA / Stable. We require GA rather than the
+// 1.33/1.34 beta because beta support was uneven across managed providers
+// (e.g. EKS). Returns false on an unparseable/empty version.
+func k8sSupportsInPlaceResize(version string) bool {
+	m := inPlaceResizeK8sVersionRegex.FindStringSubmatch(strings.TrimSpace(version))
+	if m == nil {
+		return false
+	}
+	major, _ := strconv.Atoi(m[1])
+	minor, _ := strconv.Atoi(m[2])
+	return major > 1 || (major == 1 && minor >= 35)
+}
+
+// clusterSupportsInPlaceResize looks up the account's k8s agent cluster version
+// from the agent table and reports whether it is >= 1.35 (in-place resize GA).
+// Fails closed (false) on any lookup/parse failure so the GitOps PR never
+// injects a resizePolicy a cluster can't honor.
+func clusterSupportsInPlaceResize(ctx AccountAdapterContext, accountId string) bool {
+	if accountId == "" {
+		return false
+	}
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		ctx.GetLogger().Warn("resizePolicy: db manager error, skipping injection", "error", err)
+		return false
+	}
+	var raw string
+	err = dbms.Db.Get(&raw, `
+		SELECT k8s_version FROM agent
+		WHERE cloud_account_id = $1 AND type = 'k8s'
+		  AND k8s_version IS NOT NULL AND k8s_version <> ''
+		ORDER BY (status = 'CONNECTED') DESC, updated_at DESC
+		LIMIT 1`, accountId)
+	if err != nil {
+		ctx.GetLogger().Info("resizePolicy: no k8s_version for account, skipping injection", "account", accountId)
+		return false
+	}
+	return k8sSupportsInPlaceResize(raw)
+}
+
+// resizePolicyPromptSection returns an instruction block telling the code
+// agent (@agent_code_2) to also write a resizePolicy block for each modified
+// container, so the workload becomes in-place resizable (KEP-1287) after the
+// PR merges. Returns "" when injection is disabled via the
+// ci.<domain>/inPlaceResize annotation. The actual rightsizing PR is raised by
+// the code agent editing the manifest/values, so this is delivered as prompt
+// guidance rather than a deterministic file edit. Callers must first confirm
+// the target cluster is >= 1.35 (see clusterSupportsInPlaceResize). mode is the
+// resolved resize-policy mode (see resolveResizePolicyMode).
+func resizePolicyPromptSection(mode string) string {
+	entries, inject := resizePolicyEntries(mode)
+	if !inject {
+		return ""
+	}
+	return fmt.Sprintf(`
+
+**In-Place Resize (zero-downtime)**: For each container you modify, also add (or replace) a resizePolicy list as a sibling of resources, so the workload can be resized in place on Kubernetes >= 1.35 without a pod restart. Map it into the values file the same way you map resources, using exactly these entries:
+   resizePolicy:
+     - resourceName: cpu
+       restartPolicy: %s
+     - resourceName: memory
+       restartPolicy: %s
+   If a resizePolicy already exists for that container, replace it. Do not add resizePolicy to containers you are not modifying.`,
+		entries[0].RestartPolicy, entries[1].RestartPolicy)
 }
 
 func updateCode(ctx AccountAdapterContext, dir string, request ApplyRecommendationRequest, gitDetails gitDetailFromDeployment) error {
@@ -1989,6 +2099,15 @@ func ApplyRightsizingRecommendationUsingCodeAgent(ctx AccountAdapterContext, req
 		// Using @agent_code_2 to invoke the code agent
 		recommendationJSON, _ := common.MarshalJson(request.Recommendation)
 		requestDataJSON, _ := common.MarshalJson(formatRequestedValuesForPrompt(request.Data))
+		// Only instruct the agent to add resizePolicy when the cluster is >= 1.35
+		// (where in-place resize / the field take effect); otherwise it is a
+		// no-op or rejected manifest field. The UI (Create PR) / rule can pass an
+		// explicit resize_policy override via provider_config.
+		resizePolicySection := ""
+		if clusterSupportsInPlaceResize(ctx, request.Recommendation.CloudAccountId) {
+			override, _ := request.ProviderConfig["resize_policy"].(string)
+			resizePolicySection = resizePolicyPromptSection(resolveResizePolicyMode(override, gitDetail.Annotations))
+		}
 
 		queryText := fmt.Sprintf(`Please apply the following Kubernetes resource rightsizing recommendations.
 
@@ -2008,7 +2127,7 @@ func ApplyRightsizingRecommendationUsingCodeAgent(ctx AccountAdapterContext, req
 3. Identify the correct YAML path in the values file for each container
 4. Update only the specified CPU/memory values at the correct paths
 5. Preserve existing formatting and structure
-6. **CRITICAL - CPU Limits**: If the recommendation specifies CPU limit as null, empty, or omitted, you MUST remove the CPU limit line entirely or leave it unset. DO NOT set CPU limit to match the request value. Only set CPU limit if explicitly provided with a non-null value in the recommendation.
+6. **CRITICAL - CPU Limits**: If the recommendation specifies CPU limit as null, empty, or omitted, you MUST remove the CPU limit line entirely or leave it unset. DO NOT set CPU limit to match the request value. Only set CPU limit if explicitly provided with a non-null value in the recommendation.%s
 
 **PR Description Requirements**:
 When creating the PR, ensure the description includes:
@@ -2029,6 +2148,7 @@ Make minimal, precise changes only.`,
 			gitDetail.FilePath,
 			string(requestDataJSON),
 			string(recommendationJSON),
+			resizePolicySection,
 		)
 
 		// Wrap the prompt in a JSON envelope so agent_code_2 receives explicit
