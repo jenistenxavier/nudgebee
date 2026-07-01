@@ -635,7 +635,9 @@ func runImageScannerServerOrchestrated(ctx *security.RequestContext, accountId, 
 	}
 	defer func() { _ = rows.Close() }()
 
-	type pendingImage struct{ image, node string }
+	// namespace + podName identify a pod running the image: the node to pin to and
+	// the source of the registry pull secret (when the agent's auto-copy is on).
+	type pendingImage struct{ image, node, namespace, podName string }
 	pending := []pendingImage{}
 	for rows.Next() {
 		row := make(map[string]any)
@@ -655,7 +657,12 @@ func runImageScannerServerOrchestrated(ctx *security.RequestContext, accountId, 
 			ctx.GetLogger().Warn("image_scanner: skipping image with no node", "image", img, "account_id", accountId)
 			continue
 		}
-		pending = append(pending, pendingImage{image: img, node: node})
+		namespace, _ := row["namespace"].(string)
+		podName, _ := row["name"].(string)
+		pending = append(pending, pendingImage{image: img, node: node, namespace: namespace, podName: podName})
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("image_scanner: iterate pending images: %w", err)
 	}
 	ctx.GetLogger().Info("image_scanner: pending images for server-orchestrated scan",
 		"account_id", accountId, "count", len(pending))
@@ -679,11 +686,15 @@ func runImageScannerServerOrchestrated(ctx *security.RequestContext, accountId, 
 			}()
 			// TargetImage/TargetNode drive buildImageScanSpec; per-image so each
 			// goroutine gets its own value (ScanAccount is a value type).
+			// TargetNamespace/TargetPodName let the agent source the image's pull
+			// secret (opt-in, agent-gated) so private images can be pulled.
 			scanAccount := scan_orchestrator.ScanAccount{
-				AccountID:   accountId,
-				TenantID:    tenantId,
-				TargetImage: p.image,
-				TargetNode:  p.node,
+				AccountID:       accountId,
+				TenantID:        tenantId,
+				TargetImage:     p.image,
+				TargetNode:      p.node,
+				TargetNamespace: p.namespace,
+				TargetPodName:   p.podName,
 			}
 			if err := scan_orchestrator.RunOne(ctx, scanAccount, "image_scanner", nil); err != nil {
 				ctx.GetLogger().Error("image_scanner: per-image scan failed", "image", p.image, "node", p.node, "error", err)

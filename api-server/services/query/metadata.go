@@ -206,6 +206,9 @@ func GetDefaultTraceIntegrationType(context *security.RequestContext, accountId 
 			return "", err
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
 
 	// Cache the result (including empty string)
 	traceIntegrationCache.Lock()

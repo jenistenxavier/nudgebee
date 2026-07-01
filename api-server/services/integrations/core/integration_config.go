@@ -1452,21 +1452,26 @@ func DeleteIntegrationConfig(
 
 	// Audit
 	auditEvent := audit.Audit{
-		UserId:         ctx.GetSecurityContext().GetUserId(),
-		TenantId:       tenantId,
-		AccountId:      "", // not account-specific anymore
-		EventTime:      time.Now().UTC(),
-		EventCategory:  audit.EventCategoryIntegration,
-		EventTarget:    "integration",
-		EventType:      audit.EventTypeIntegrationDelete,
-		EventState:     nil,
+		UserId:        ctx.GetSecurityContext().GetUserId(),
+		TenantId:      tenantId,
+		AccountId:     "", // not account-specific anymore
+		EventTime:     time.Now().UTC(),
+		EventCategory: audit.EventCategoryIntegration,
+		EventTarget:   "integration",
+		EventType:     audit.EventTypeIntegrationDelete,
+		// EventState must be non-nil: audit.Audit validates it as "required", so
+		// CreateAudit rejects the whole request before insert when it's nil —
+		// which silently dropped every integration delete audit (#31417).
+		EventState:     map[string]any{"type": integrationType, "name": integrationConfigName, "source": source},
 		EventPrevState: integrationConfigName,
 		EventActor:     audit.EventActorUiService,
 		EventAction:    audit.EventActionDelete,
 		EventStatus:    audit.EventStatusSuccess,
 		EventAttr:      map[string]any{},
 	}
-	_ = audit.CreateAudit(ctx, &audit.AuditRequest{Audits: []audit.Audit{auditEvent}})
+	if auditErr := audit.CreateAudit(ctx, &audit.AuditRequest{Audits: []audit.Audit{auditEvent}}); auditErr != nil {
+		slog.Error("integrations: failed to create integration delete audit", "error", auditErr)
+	}
 
 	// Trigger proxy config push for affected accounts (datasource was removed)
 	for _, accID := range affectedAccountIDs {

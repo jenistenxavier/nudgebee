@@ -5732,6 +5732,10 @@ type tenant_list_all_output {
   name: String!
 }
 
+type Query {
+  tenant_list_all: [tenant_list_all_output!]!
+}
+
 type aws_account_onboard_output {
   url: String!
 }

@@ -28,6 +28,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var gitCredentialPattern = regexp.MustCompile(`://[^@/\s]+:[^@/\s]+@`)
+
+// redactGitCredentials strips embedded credentials (e.g. oauth2:token@) from git output
+// to prevent token leakage in logs and error messages.
+func redactGitCredentials(s string) string {
+	return gitCredentialPattern.ReplaceAllString(s, "://***:***@")
+}
+
 // resolutionTableIdent returns the SQL identifier (already double-quoted)
 // for the table that holds a resolution row. PostgreSQL placeholders ($N)
 // cannot bind identifiers, so any fmt.Sprintf that interpolates the table
@@ -120,13 +128,13 @@ func checkoutCodeRepo(ctx AccountAdapterContext, request ApplyRecommendationRequ
 	cmd := exec.Command("git", "clone", "--depth", "1", "-b", gitDetails.BaseBranch, gitUrl, dir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		ctx.GetLogger().Error("Error cloning repo", "error", err, "output", string(output))
+		ctx.GetLogger().Error("Error cloning repo", "error", err, "output", redactGitCredentials(string(output)))
 		return "", err
 	}
 	if gitDetails.Sha1 != "" {
 		cmdFetch := exec.Command("git", "-C", dir, "fetch", "--depth=1", "origin", gitDetails.Sha1)
 		if output, err := cmdFetch.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("fetch specific commit failed: %s, %v", output, err)
+			return "", fmt.Errorf("fetch specific commit failed: %s, %v", redactGitCredentials(string(output)), err)
 		}
 		cmdCheckout := exec.Command("git", "-C", dir, "checkout", gitDetails.Sha1)
 		if output, err := cmdCheckout.CombinedOutput(); err != nil {
@@ -513,15 +521,15 @@ func commitCode(ctx AccountAdapterContext, dir string, request ApplyRecommendati
 		cmd1.Dir = dir
 		output1, err1 := cmd1.Output()
 		if err1 != nil {
-			ctx.GetLogger().Error("Error fetching remote branch", "error", err, "output", string(output1), "branch", branchName)
-			return "", err
+			ctx.GetLogger().Error("Error fetching remote branch", "error", err1, "output", redactGitCredentials(string(output1)), "branch", branchName)
+			return "", err1
 		}
 		cmd2 := exec.Command("git", "checkout", "-b", branchName, "origin/"+branchName)
 		cmd2.Dir = dir
 		output2, err2 := cmd2.Output()
 		if err2 != nil {
-			ctx.GetLogger().Error("Error checking out remote branch", "error", err, "output", string(output2), "branch", branchName)
-			return "", err
+			ctx.GetLogger().Error("Error checking out remote branch", "error", err2, "output", string(output2), "branch", branchName)
+			return "", err2
 		}
 	} else {
 		cmd := exec.Command("git", "checkout", "-b", branchName)
@@ -604,15 +612,15 @@ func commitCodeForEvent(ctx AccountAdapterContext, dir string, request ApplyReco
 		cmd1.Dir = dir
 		output1, err1 := cmd1.Output()
 		if err1 != nil {
-			ctx.GetLogger().Error("Error fetching remote branch", "error", err, "output", string(output1), "branch", branchName)
-			return "", err
+			ctx.GetLogger().Error("Error fetching remote branch", "error", err1, "output", redactGitCredentials(string(output1)), "branch", branchName)
+			return "", err1
 		}
 		cmd2 := exec.Command("git", "checkout", "-b", branchName, "origin/"+branchName)
 		cmd2.Dir = dir
 		output2, err2 := cmd2.Output()
 		if err2 != nil {
-			ctx.GetLogger().Error("Error checking out remote branch", "error", err, "output", string(output2), "branch", branchName)
-			return "", err
+			ctx.GetLogger().Error("Error checking out remote branch", "error", err2, "output", string(output2), "branch", branchName)
+			return "", err2
 		}
 	} else {
 		cmd := exec.Command("git", "checkout", "-b", branchName)
@@ -706,7 +714,7 @@ func raisePrForCodeRepo(ctx AccountAdapterContext, dir string, branchName string
 	cmd.Dir = dir
 	output, err := cmd.Output()
 	if err != nil {
-		ctx.GetLogger().Error("Error pushing branch", "error", err, "output", string(output))
+		ctx.GetLogger().Error("Error pushing branch", "error", err, "output", redactGitCredentials(string(output)))
 		return "", err
 	}
 
