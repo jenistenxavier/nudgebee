@@ -73,6 +73,11 @@ func TestBuildGCPServiceMap_FromFixture(t *testing.T) {
 	if !apps["oauth"] {
 		t.Errorf("expected an 'oauth' application; got %v", apps)
 	}
+	// "app" is a shared service.name label (not a Cloud Run service) — it must NOT
+	// become a phantom node now that identity resolves via faas.name inheritance.
+	if apps["app"] {
+		t.Errorf("phantom 'app' service should not exist (service.name fallback removed); got %v", apps)
+	}
 
 	// oauth must carry a Redis dependency (it hits redis heavily in the fixture).
 	redisReq, hasRedis, upstreams := -1.0, false, 0
@@ -96,6 +101,52 @@ func TestBuildGCPServiceMap_FromFixture(t *testing.T) {
 	}
 	if redisReq <= 0 {
 		t.Errorf("oauth→Redis RequestCount = %v, want > 0", redisReq)
+	}
+}
+
+// TestBuildGCPServiceMap_FaasNameInheritance verifies that a span without faas.name is
+// attributed to its nearest ancestor's faas.name (not its shared service.name), so the
+// shared label never mints a phantom node, internal calls fold into the real service, and
+// a span with no faas.name in its ancestry is skipped rather than materialized.
+func TestBuildGCPServiceMap_FaasNameInheritance(t *testing.T) {
+	spans := []gcpTraceSpan{
+		// svcA entry span (carries the Cloud Run faas.name).
+		{TraceID: "t1", SpanID: "1", ParentSpanID: "", Name: "Recv.GET /x",
+			Labels: map[string]string{"faas.name": "svcA"}},
+		// svcA internal span: no faas.name, only the shared service.name; calls Redis.
+		{TraceID: "t1", SpanID: "2", ParentSpanID: "1", Name: "Sent.GET", DurationMs: 3,
+			Labels: map[string]string{"service.name": "shared", "db.system": "redis"}},
+		// Standalone span: only the shared service.name, no faas.name in ancestry → skip.
+		{TraceID: "t2", SpanID: "9", ParentSpanID: "", Name: "Sent.PING", DurationMs: 1,
+			Labels: map[string]string{"service.name": "shared"}},
+	}
+
+	sm := buildGCPServiceMap(spans)
+	names := make(map[string]bool)
+	for _, a := range sm.Applications {
+		names[a.Id.Name] = true
+	}
+	if !names["svcA"] {
+		t.Fatalf("expected svcA application; got %v", names)
+	}
+	if names["shared"] {
+		t.Errorf("phantom 'shared' service must not be created from service.name; got %v", names)
+	}
+
+	// The Redis call on the faas.name-less internal span must attribute to svcA.
+	hasRedis := false
+	for _, a := range sm.Applications {
+		if a.Id.Name != "svcA" {
+			continue
+		}
+		for _, up := range a.Upstreams {
+			if up.Id == formatUpstreamID("ExternalService", "Redis") {
+				hasRedis = true
+			}
+		}
+	}
+	if !hasRedis {
+		t.Errorf("svcA → Redis edge missing — internal span not attributed via faas.name inheritance")
 	}
 }
 

@@ -43,7 +43,6 @@ const (
 // OTel/Cloud Trace span label keys read by this source.
 const (
 	lblFaasName      = "faas.name"
-	lblServiceName   = "service.name"
 	lblDBSystem      = "db.system"
 	lblRPCSystem     = "rpc.system"
 	lblRPCService    = "rpc.service"
@@ -290,16 +289,42 @@ func accumulateTraceLinks(
 	for _, sp := range traceSpans {
 		byID[sp.SpanID] = sp
 	}
+
+	// resolveService returns the owning Cloud Run service for a span: its own faas.name,
+	// else the nearest ancestor's faas.name within the trace. service.name is deliberately
+	// NOT used — on GCP it is frequently a shared app-level label (e.g. "app" reported by
+	// oauth, api AND webapp), so falling back to it mints phantom service nodes and
+	// self-loop edges from a service's own faas.name-less internal spans. Spans with no
+	// faas.name anywhere in their ancestry are unattributable and skipped.
+	resolveService := func(sp gcpTraceSpan) string {
+		// `visited` guards against cyclic/self-parent spans in malformed telemetry, which
+		// would otherwise loop forever (Cloud Trace should be a tree, but we don't trust it).
+		visited := make(map[string]bool)
+		cur, ok := sp, true
+		for ok {
+			if v := cur.Labels[lblFaasName]; v != "" {
+				return v
+			}
+			if cur.ParentSpanID == "" || visited[cur.SpanID] {
+				break
+			}
+			visited[cur.SpanID] = true
+			cur, ok = byID[cur.ParentSpanID]
+		}
+		return ""
+	}
+
 	for _, sp := range traceSpans {
-		svc := gcpSpanService(sp.Labels)
-		if isNoiseServiceName(svc) {
+		svc := resolveService(sp)
+		if isNoiseServiceName(svc) { // also covers svc == "" (unattributable)
 			continue
 		}
 		noteService(svc, sp.Labels)
 
-		// service → service: parent (caller) calls this span's service (callee)
+		// service → service: parent (caller) calls this span's service (callee).
+		// Internal spans resolve to their own service, so same-service hops collapse.
 		if parent, ok := byID[sp.ParentSpanID]; ok {
-			parentSvc := gcpSpanService(parent.Labels)
+			parentSvc := resolveService(parent)
 			if !isNoiseServiceName(parentSvc) && parentSvc != svc {
 				addLink(serviceLinks, parentSvc, svc, sp.DurationMs, spanFailed(sp.Labels), spanProtocol(sp.Labels))
 			}
@@ -322,14 +347,6 @@ func addLink(m map[string]map[string]*linkAgg, from, to string, latencyMs float6
 		m[from][to] = agg
 	}
 	agg.add(latencyMs, failed, protocol)
-}
-
-// gcpSpanService resolves a span's owning Cloud Run service from OTel resource labels.
-func gcpSpanService(labels map[string]string) string {
-	if v := labels[lblFaasName]; v != "" {
-		return v
-	}
-	return labels[lblServiceName]
 }
 
 // isNoiseServiceName filters out empty / generic service names that should not become nodes.
