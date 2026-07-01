@@ -201,6 +201,20 @@ var gcpServiceFallbackMap = map[string]core.NodeType{
 	"Artifact Registry":    core.NodeTypeContainerRegistry,
 	"Cloud Run":            core.NodeTypeServerlessFunction,
 	"Cloud Functions":      core.NodeTypeServerlessFunction,
+	// App Engine is GCP's managed serverless app platform — same compute class as
+	// Cloud Run / Cloud Functions, so it shares the ServerlessFunction node type
+	// (one node per app today; per-service modelling needs richer collection).
+	"App Engine": core.NodeTypeServerlessFunction,
+	// Secret Manager secrets (collected by the cloud-collector secretManagerService).
+	"Secret Manager": core.NodeTypeSecretVault,
+	// Cloud Tasks queues and Memorystore Redis (cloud-collector cloudTasksService /
+	// memorystoreService).
+	"Cloud Tasks": core.NodeTypeQueue,
+	"Memorystore": core.NodeTypeCache,
+	// Firestore / Datastore databases (operational DB + CDC source) and Cloud
+	// Scheduler cron jobs (cloud-collector firestoreService / schedulerService).
+	"Firestore":       core.NodeTypeDatabase,
+	"Cloud Scheduler": core.NodeTypeCronJob,
 	// googleapis.com service names (alternative format)
 	"bigquery.googleapis.com": core.NodeTypeDatabase,
 }
@@ -460,6 +474,21 @@ type GCPCDNBackendService struct {
 	} `json:"cdnPolicy,omitempty"`
 }
 
+// GCPServerlessNEG is a serverless Network Endpoint Group — the indirection that
+// connects an LB backend service to the Cloud Run / App Engine service it fronts.
+// cloudRun.service / appEngine.service name the actual backing service.
+type GCPServerlessNEG struct {
+	Name                string `json:"name"`
+	Region              string `json:"region"`
+	NetworkEndpointType string `json:"networkEndpointType"`
+	CloudRun            *struct {
+		Service string `json:"service"`
+	} `json:"cloudRun"`
+	AppEngine *struct {
+		Service string `json:"service"`
+	} `json:"appEngine"`
+}
+
 // gcpCLIData holds all CLI-fetched data for a GCP account, used during graph enrichment
 type gcpCLIData struct {
 	computeInstances map[string]*GCPComputeInstance  // name → instance
@@ -477,6 +506,8 @@ type gcpCLIData struct {
 	// DNS + CDN
 	dnsZones    map[string]*GCPDNSManagedZone    // zone name → zone (with records)
 	cdnBackends map[string]*GCPCDNBackendService // backend service name → CDN-enabled backend
+	// Serverless NEGs: resolve a backend service to the Cloud Run / App Engine service behind it
+	serverlessNEGs map[string]*GCPServerlessNEG // NEG name → serverless NEG
 }
 
 // NewGCPSource creates a new GCP source
@@ -761,10 +792,456 @@ func (s *GCPSource) convertResourcesToGraph(reqCtx *security.RequestContext, res
 	// CDN → BackendPool edges (Cloud CDN fronts a backend service)
 	edges = append(edges, s.createCDNEdges(lookup, req)...)
 
-	// Cloud Run consumer → Topic edges (Pub/Sub push subscriptions)
-	edges = append(edges, s.createPubSubSubscriptionEdges(resources, lookup, req)...)
+	// BackendPool → Cloud Run / App Engine service edges (via serverless NEG), and the
+	// backend→service map used to resolve LB-fronted Pub/Sub push endpoints below.
+	backendEdges, backendTargets := s.createServerlessBackendEdges(cliData, lookup, req)
+	edges = append(edges, backendEdges...)
+
+	// Consumer → Topic edges (Pub/Sub push subscriptions), resolving custom-domain and
+	// appspot push endpoints to the Cloud Run / App Engine service behind the LB.
+	edges = append(edges, s.createPubSubSubscriptionEdges(resources, cliData, lookup, backendTargets, req)...)
+
+	// Cloud Scheduler CronJob → target (Topic it publishes to, or the service it invokes)
+	edges = append(edges, s.createCronJobEdges(cliData, lookup, backendTargets, req)...)
+
+	// ServerlessFunction → ServiceIdentity (RUNS_AS) via the runtime service account
+	edges = append(edges, s.createRunsAsEdges(lookup, req)...)
+
+	// ServerlessFunction → SecretVault (USES_SECRET) via referenced Secret Manager secrets
+	edges = append(edges, s.createUsesSecretEdges(lookup, req)...)
+
+	// ServiceIdentity → data resource (HAS_ACCESS_TO / PUBLISHES_TO / SUBSCRIBES_TO) via
+	// project IAM policy role bindings. Connects the data tier (Firestore/BigQuery/Storage/
+	// Pub-Sub) that traces don't observe, through the SA that runs each service (RUNS_AS).
+	edges = append(edges, s.createHasAccessEdges(resources, lookup, req)...)
+
+	// ServerlessFunction → Cache (CALLS) via a plain-value Redis endpoint in the
+	// service's env matching a Memorystore instance host. Connects app→cache where
+	// the endpoint isn't hidden in a secret.
+	edges = append(edges, s.createCacheEndpointEdges(lookup, req)...)
 
 	return nodes, edges
+}
+
+// createUsesSecretEdges links a compute node to the Secret Manager secrets it
+// references (from meta.secrets — env secretKeyRef + secret volumes), matching each
+// secret's short name to the SecretVault node.
+func (s *GCPSource) createUsesSecretEdges(lookup *NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+	edges := make([]*core.DbEdge, 0)
+	srvNodes, ok := lookup.byNodeType[core.NodeTypeServerlessFunction]
+	if !ok {
+		return edges
+	}
+	for _, node := range srvNodes {
+		meta, _ := node.Properties["meta"].(map[string]interface{})
+		if meta == nil {
+			continue
+		}
+		secrets, _ := meta["secrets"].([]interface{})
+		for _, sv := range secrets {
+			name, _ := sv.(string)
+			if name == "" {
+				continue
+			}
+			if secretNode := findNodeByNameAndType(lookup, core.NodeTypeSecretVault, extractGCPShortName(name)); secretNode != nil {
+				edges = append(edges, s.createEdge(node, secretNode, core.RelationshipUsesSecret,
+					map[string]interface{}{"connection_type": "secret_ref"}, req))
+			}
+		}
+	}
+	s.logger.Info("created GCP USES_SECRET edges", "edge_count", len(edges))
+	return edges
+}
+
+// gcpIAMPolicyServiceName / gcpIAMBindingType mirror the collector's
+// gcloud.ServiceNameIAMPolicy / gcloud.IAMBindingType. Kept as local literals so
+// the KG source doesn't import the collector package.
+const (
+	gcpIAMPolicyServiceName = "IAM Policy"
+	gcpIAMBindingType       = "cloudresourcemanager.googleapis.com/IamBinding"
+)
+
+// maxIAMAccessFanout caps how many data nodes a single (identity, role) grant may
+// connect to. Project-level IAM roles grant access to *every* resource of a type
+// in the project; a broad grant (e.g. storage.admin over a project with hundreds
+// of buckets) would flood the graph with low-signal edges. Above this many
+// candidates we skip the grant and log it rather than guess which are relevant.
+const maxIAMAccessFanout = 30
+
+// iamAccessTarget describes what a mapped IAM role grants access to.
+type iamAccessTarget struct {
+	nodeType core.NodeType
+	rel      core.RelationshipType
+	// dbConstraint, for NodeTypeDatabase targets, narrows the candidate set to a
+	// GCP database sub-kind ("firestore" or "bigquery-dataset"). Empty means the
+	// node type alone is sufficient (Storage, Topic).
+	dbConstraint string
+}
+
+// gcpIAMRoleTarget maps a GCP IAM role to the KG data resource it grants access
+// to, or ok=false when the role is not a data-tier grant we model. Primitive
+// roles (roles/owner|editor|viewer) and org-level custom roles are deliberately
+// excluded: they grant access to nearly everything and expanding them would
+// swamp the graph with noise rather than describe real data dependencies.
+func gcpIAMRoleTarget(role string) (iamAccessTarget, bool) {
+	switch {
+	case strings.HasPrefix(role, "roles/datastore."):
+		// Any datastore role (user/owner/viewer/importExportAdmin/indexAdmin)
+		// indicates the identity touches the project's single Firestore database.
+		return iamAccessTarget{core.NodeTypeDatabase, core.RelationshipHasAccessTo, "firestore"}, true
+	case role == "roles/bigquery.dataViewer", role == "roles/bigquery.dataEditor",
+		role == "roles/bigquery.dataOwner", role == "roles/bigquery.admin", role == "roles/bigquery.user":
+		// Data-access roles only — jobUser/metadataViewer/readSessionUser don't
+		// map to a specific dataset. Target Datasets, never the (huge) Table set.
+		return iamAccessTarget{core.NodeTypeDatabase, core.RelationshipHasAccessTo, "bigquery-dataset"}, true
+	case strings.HasPrefix(role, "roles/storage."):
+		return iamAccessTarget{core.NodeTypeStorage, core.RelationshipHasAccessTo, ""}, true
+	case role == "roles/pubsub.publisher":
+		return iamAccessTarget{core.NodeTypeTopic, core.RelationshipPublishesTo, ""}, true
+	case role == "roles/pubsub.subscriber":
+		return iamAccessTarget{core.NodeTypeTopic, core.RelationshipSubscribesTo, ""}, true
+	case role == "roles/pubsub.editor", role == "roles/pubsub.admin", role == "roles/pubsub.viewer":
+		return iamAccessTarget{core.NodeTypeTopic, core.RelationshipHasAccessTo, ""}, true
+	}
+	return iamAccessTarget{}, false
+}
+
+// gcpDatabaseMatchesConstraint reports whether a Database node's properties["type"]
+// satisfies an iamAccessTarget.dbConstraint.
+func gcpDatabaseMatchesConstraint(dbType, constraint string) bool {
+	switch constraint {
+	case "firestore":
+		return strings.EqualFold(dbType, "firestore")
+	case "bigquery-dataset":
+		return strings.HasSuffix(strings.ToLower(dbType), "/dataset")
+	}
+	return true
+}
+
+// createHasAccessEdges turns project IAM policy binding rows into edges from a
+// ServiceIdentity (the granted service account) to the data resources its roles
+// permit: Firestore/BigQuery datasets/Storage buckets (HAS_ACCESS_TO) and Pub/Sub
+// topics (PUBLISHES_TO / SUBSCRIBES_TO). Combined with RUNS_AS (service→identity)
+// this links each service to the data tier — the dependency traces alone can't
+// see. Binding rows for identities without a ServiceIdentity node in this account
+// (cross-project grantees) or roles outside gcpIAMRoleTarget are skipped.
+func (s *GCPSource) createHasAccessEdges(resources []CloudResourceRow, lookup *NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+	edges := make([]*core.DbEdge, 0)
+
+	// Candidate cache per (nodeType|dbConstraint) so a project's node set is
+	// filtered once, not per binding.
+	candCache := make(map[string][]*core.DbNode)
+	candidates := func(t iamAccessTarget) []*core.DbNode {
+		key := string(t.nodeType) + "|" + t.dbConstraint
+		if c, ok := candCache[key]; ok {
+			return c
+		}
+		var out []*core.DbNode
+		for _, n := range lookup.byNodeType[t.nodeType] {
+			if t.nodeType == core.NodeTypeDatabase {
+				dbType, _ := n.Properties["type"].(string)
+				if !gcpDatabaseMatchesConstraint(dbType, t.dbConstraint) {
+					continue
+				}
+			}
+			out = append(out, n)
+		}
+		candCache[key] = out
+		return out
+	}
+
+	seen := make(map[string]bool) // (saID|targetID|rel) dedup across overlapping roles
+	for i := range resources {
+		email, role, target, ok := gcpIAMAccessBinding(&resources[i])
+		if !ok {
+			continue
+		}
+		saNode := findNodeByNameAndType(lookup, core.NodeTypeServiceIdentity, email)
+		if saNode == nil {
+			continue // cross-project grantee without a ServiceIdentity node here
+		}
+		cands := candidates(target)
+		if len(cands) == 0 {
+			continue
+		}
+		if len(cands) > maxIAMAccessFanout {
+			s.logger.Info("skipping broad IAM grant (fan-out cap)",
+				"identity", email, "role", role, "node_type", target.nodeType, "candidates", len(cands))
+			continue
+		}
+		edges = append(edges, s.hasAccessEdgesFor(saNode, cands, target, role, seen, req)...)
+	}
+	s.logger.Info("created GCP IAM access edges", "edge_count", len(edges))
+	return edges
+}
+
+// gcpIAMAccessBinding extracts a mapped (identity email, role, target) from an IAM
+// policy binding row, or ok=false when the row is not a data-tier grant we model.
+func gcpIAMAccessBinding(r *CloudResourceRow) (email, role string, target iamAccessTarget, ok bool) {
+	if !strings.EqualFold(r.ServiceName, gcpIAMPolicyServiceName) && !strings.EqualFold(r.Type, gcpIAMBindingType) {
+		return "", "", iamAccessTarget{}, false
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(r.Meta, &meta); err != nil {
+		return "", "", iamAccessTarget{}, false
+	}
+	role, _ = meta["role"].(string)
+	email, _ = meta["member"].(string)
+	if role == "" || email == "" {
+		return "", "", iamAccessTarget{}, false
+	}
+	target, ok = gcpIAMRoleTarget(role)
+	if !ok {
+		return "", "", iamAccessTarget{}, false
+	}
+	return email, role, target, true
+}
+
+// createCacheEndpointEdges links each Cloud Run service to the Memorystore Cache
+// instance it connects to, matched by the Redis endpoint host captured in the
+// service's env (meta.redis_endpoints) against the Cache node's meta.host. This
+// recovers app→cache dependencies for services that expose the endpoint as a
+// plain env value; services whose endpoint lives in a secret are not connected.
+func (s *GCPSource) createCacheEndpointEdges(lookup *NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+	edges := make([]*core.DbEdge, 0)
+	srvNodes, ok := lookup.byNodeType[core.NodeTypeServerlessFunction]
+	if !ok {
+		return edges
+	}
+	cacheByHost := indexCacheNodesByHost(lookup.byNodeType[core.NodeTypeCache])
+	if len(cacheByHost) == 0 {
+		return edges
+	}
+
+	seen := make(map[string]bool)
+	for _, node := range srvNodes {
+		for _, host := range nodeRedisEndpoints(node) {
+			cn := cacheByHost[host]
+			if cn == nil {
+				continue
+			}
+			dk := node.ID + "|" + cn.ID
+			if seen[dk] {
+				continue
+			}
+			seen[dk] = true
+			edges = append(edges, s.createEdge(node, cn, core.RelationshipCalls,
+				map[string]interface{}{"evidence": "redis_env_endpoint", "endpoint": host}, req))
+		}
+	}
+	s.logger.Info("created GCP cache endpoint edges", "edge_count", len(edges))
+	return edges
+}
+
+// indexCacheNodesByHost maps each Cache node's Memorystore host (meta.host) to
+// the node, for endpoint matching.
+func indexCacheNodesByHost(cacheNodes []*core.DbNode) map[string]*core.DbNode {
+	byHost := make(map[string]*core.DbNode)
+	for _, cn := range cacheNodes {
+		meta, _ := cn.Properties["meta"].(map[string]interface{})
+		if meta == nil {
+			continue
+		}
+		if host, _ := meta["host"].(string); host != "" {
+			byHost[host] = cn
+		}
+	}
+	return byHost
+}
+
+// nodeRedisEndpoints returns the non-empty Redis endpoint hosts recorded on a
+// ServerlessFunction node's meta.redis_endpoints.
+func nodeRedisEndpoints(node *core.DbNode) []string {
+	meta, _ := node.Properties["meta"].(map[string]interface{})
+	if meta == nil {
+		return nil
+	}
+	raw, _ := meta["redis_endpoints"].([]interface{})
+	out := make([]string, 0, len(raw))
+	for _, ep := range raw {
+		if host, _ := ep.(string); host != "" {
+			out = append(out, host)
+		}
+	}
+	return out
+}
+
+// hasAccessEdgesFor emits deduplicated access edges from one identity to every
+// candidate data node, recording provenance (role) on each.
+func (s *GCPSource) hasAccessEdgesFor(saNode *core.DbNode, cands []*core.DbNode, target iamAccessTarget, role string, seen map[string]bool, req *core.SourceBuildRequest) []*core.DbEdge {
+	edges := make([]*core.DbEdge, 0, len(cands))
+	for _, tn := range cands {
+		dk := saNode.ID + "|" + tn.ID + "|" + string(target.rel)
+		if seen[dk] {
+			continue
+		}
+		seen[dk] = true
+		edges = append(edges, s.createEdge(saNode, tn, target.rel,
+			map[string]interface{}{"evidence": "iam_policy", "granted_role": role}, req))
+	}
+	return edges
+}
+
+// createRunsAsEdges links a compute node to the ServiceIdentity it runs as, matching
+// the runtime service-account email (collected into meta.service_account) to the
+// ServiceIdentity node keyed on that email.
+func (s *GCPSource) createRunsAsEdges(lookup *NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+	edges := make([]*core.DbEdge, 0)
+	srvNodes, ok := lookup.byNodeType[core.NodeTypeServerlessFunction]
+	if !ok {
+		return edges
+	}
+	for _, node := range srvNodes {
+		meta, _ := node.Properties["meta"].(map[string]interface{})
+		if meta == nil {
+			continue
+		}
+		sa, _ := meta["service_account"].(string)
+		if sa == "" {
+			continue
+		}
+		if saNode := findNodeByNameAndType(lookup, core.NodeTypeServiceIdentity, sa); saNode != nil {
+			edges = append(edges, s.createEdge(node, saNode, core.RelationshipRunsAs,
+				map[string]interface{}{"connection_type": "service_account"}, req))
+		}
+	}
+	s.logger.Info("created GCP RUNS_AS edges", "edge_count", len(edges))
+	return edges
+}
+
+// createCronJobEdges links each Cloud Scheduler CronJob to what it triggers: the
+// Pub/Sub Topic it publishes to (PUBLISHES_TO), or the Cloud Run / App Engine service
+// its HTTP/App Engine target hits (CALLS) — resolved through the same host→service map
+// used for Pub/Sub push endpoints (run.app, LB-fronted custom domains, appspot).
+func (s *GCPSource) createCronJobEdges(cliData *gcpCLIData, lookup *NodeLookup, backendTargets map[string]*core.DbNode, req *core.SourceBuildRequest) []*core.DbEdge {
+	edges := make([]*core.DbEdge, 0)
+	cronNodes, ok := lookup.byNodeType[core.NodeTypeCronJob]
+	if !ok {
+		return edges
+	}
+	hostConsumer, appEngineNode := s.buildPushConsumerHostMap(cliData, lookup, backendTargets)
+
+	for _, node := range cronNodes {
+		if e := s.cronJobTargetEdge(node, hostConsumer, appEngineNode, lookup, req); e != nil {
+			edges = append(edges, e)
+		}
+	}
+
+	s.logger.Info("created GCP Cloud Scheduler → target edges", "edge_count", len(edges))
+	return edges
+}
+
+// cronJobTargetEdge resolves a single CronJob's target to a graph node, or nil.
+func (s *GCPSource) cronJobTargetEdge(node *core.DbNode, hostConsumer map[string]*core.DbNode, appEngineNode *core.DbNode, lookup *NodeLookup, req *core.SourceBuildRequest) *core.DbEdge {
+	meta, _ := node.Properties["meta"].(map[string]interface{})
+	if meta == nil {
+		return nil
+	}
+	targetType, _ := meta["target_type"].(string)
+	target, _ := meta["target"].(string)
+	if target == "" {
+		return nil
+	}
+
+	switch targetType {
+	case "pubsub":
+		// target is "projects/{p}/topics/{name}"; link cron PUBLISHES_TO topic.
+		if t := findNodeByNameAndType(lookup, core.NodeTypeTopic, extractGCPShortName(target)); t != nil {
+			return s.createEdge(node, t, core.RelationshipPublishesTo,
+				map[string]interface{}{"connection_type": "scheduler_target"}, req)
+		}
+	case "appengine":
+		// App Engine target carries only a relative URI; it hits the account's App Engine app.
+		if appEngineNode != nil {
+			return s.createEdge(node, appEngineNode, core.RelationshipCalls,
+				map[string]interface{}{"connection_type": "scheduler_target"}, req)
+		}
+	case "http":
+		host := strings.ToLower(repoURIHost(target))
+		consumer := hostConsumer[host]
+		if consumer == nil && appEngineNode != nil && strings.HasSuffix(host, ".appspot.com") {
+			consumer = appEngineNode
+		}
+		if consumer != nil {
+			return s.createEdge(node, consumer, core.RelationshipCalls,
+				map[string]interface{}{"connection_type": "scheduler_target"}, req)
+		}
+	}
+	return nil
+}
+
+// createServerlessBackendEdges links each LB BackendPool to the Cloud Run / App Engine
+// ServerlessFunction it fronts, resolved through the backend's serverless NEG
+// (backend → NEG → cloudRun.service / appEngine.service). It also returns a
+// backend-service-name → target-node map so Pub/Sub push endpoints that hit a custom
+// domain served by that backend can be resolved to the same consumer.
+func (s *GCPSource) createServerlessBackendEdges(cliData *gcpCLIData, lookup *NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, map[string]*core.DbNode) {
+	edges := make([]*core.DbEdge, 0)
+	backendTargets := make(map[string]*core.DbNode)
+	if cliData == nil || len(cliData.backendServices) == 0 {
+		return edges, backendTargets
+	}
+
+	cloudRunByName, appEngineNode := indexServerlessNodes(lookup)
+
+	for name, bs := range cliData.backendServices {
+		target := resolveBackendTargetNode(bs, cliData, cloudRunByName, appEngineNode)
+		if target == nil {
+			continue
+		}
+		backendTargets[name] = target
+		if bp := findNodeByNameAndType(lookup, core.NodeTypeBackendPool, name); bp != nil {
+			edges = append(edges, s.createEdge(bp, target, core.RelationshipRoutesTo,
+				map[string]interface{}{"connection_type": "backend_service"}, req))
+		}
+	}
+
+	s.logger.Info("created GCP backend → service edges", "edge_count", len(edges))
+	return edges, backendTargets
+}
+
+// indexServerlessNodes returns Cloud Run ServerlessFunction nodes keyed by short
+// name, and the account's single App Engine node (type=app-engine), if present.
+func indexServerlessNodes(lookup *NodeLookup) (map[string]*core.DbNode, *core.DbNode) {
+	cloudRunByName := make(map[string]*core.DbNode)
+	var appEngineNode *core.DbNode
+	srv, ok := lookup.byNodeType[core.NodeTypeServerlessFunction]
+	if !ok {
+		return cloudRunByName, nil
+	}
+	for _, n := range srv {
+		if t, _ := n.Properties["type"].(string); t == "app-engine" {
+			appEngineNode = n
+			continue
+		}
+		if name := extractGCPShortName(getNodeName(n)); name != "" {
+			cloudRunByName[name] = n
+		}
+	}
+	return cloudRunByName, appEngineNode
+}
+
+// resolveBackendTargetNode walks a backend service's serverless NEG(s) to the
+// Cloud Run service node (by name) or the account's App Engine node.
+func resolveBackendTargetNode(bs *GCPBackendService, cliData *gcpCLIData, cloudRunByName map[string]*core.DbNode, appEngineNode *core.DbNode) *core.DbNode {
+	for _, b := range bs.Backends {
+		neg := cliData.serverlessNEGs[extractGCPResourceNameFromURL(b.Group)]
+		if neg == nil {
+			continue
+		}
+		if neg.CloudRun != nil && neg.CloudRun.Service != "" {
+			if n := cloudRunByName[neg.CloudRun.Service]; n != nil {
+				return n
+			}
+		}
+		// An App Engine NEG with an empty service targets the App Engine *default*
+		// service (gcloud emits `appEngine: {}`), so match on the object's presence,
+		// not a non-empty service name — all App Engine services map to the one node.
+		if neg.AppEngine != nil && appEngineNode != nil {
+			return appEngineNode
+		}
+	}
+	return nil
 }
 
 // createPubSubSubscriptionEdges links the consumer of a push Pub/Sub subscription
@@ -777,35 +1254,77 @@ func (s *GCPSource) convertResourcesToGraph(reqCtx *security.RequestContext, res
 // Pull subscriptions (no push endpoint) and subscriptions pushing to external,
 // non-Cloud-Run endpoints (webhooks) have no in-graph consumer node and are skipped
 // rather than guessed at.
-func (s *GCPSource) createPubSubSubscriptionEdges(resources []CloudResourceRow, lookup *NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+func (s *GCPSource) createPubSubSubscriptionEdges(resources []CloudResourceRow, cliData *gcpCLIData, lookup *NodeLookup, backendTargets map[string]*core.DbNode, req *core.SourceBuildRequest) []*core.DbEdge {
 	edges := make([]*core.DbEdge, 0)
 
-	// Index Cloud Run nodes by their dns_name (the run.app host stamped from
-	// meta.url), so a subscription's push-endpoint host resolves to the receiver.
-	cloudRunByHost := make(map[string]*core.DbNode)
-	if srvNodes, ok := lookup.byNodeType[core.NodeTypeServerlessFunction]; ok {
-		for _, n := range srvNodes {
-			if dns, ok := n.Properties["dns_name"].(string); ok && dns != "" {
-				cloudRunByHost[strings.ToLower(dns)] = n
-			}
-		}
-	}
-	if len(cloudRunByHost) == 0 {
+	hostConsumer, appEngineNode := s.buildPushConsumerHostMap(cliData, lookup, backendTargets)
+	if len(hostConsumer) == 0 && appEngineNode == nil {
 		return edges
 	}
 
 	for i := range resources {
-		edges = append(edges, s.pushSubscriptionEdges(&resources[i], cloudRunByHost, lookup, req)...)
+		edges = append(edges, s.pushSubscriptionEdges(&resources[i], hostConsumer, appEngineNode, lookup, req)...)
 	}
 
 	s.logger.Info("created GCP Pub/Sub subscription edges", "edge_count", len(edges))
 	return edges
 }
 
+// buildPushConsumerHostMap maps every hostname a Pub/Sub push endpoint might target
+// to its in-graph consumer node, and returns the account's App Engine node for the
+// appspot fallback. Three sources of hosts:
+//   - Cloud Run run.app hosts (the ServerlessFunction dns_name);
+//   - custom domains served by the external HTTPS LB — resolved host → url-map
+//     hostRule → path-matcher default backend → backend's Cloud Run/App Engine target;
+//   - (appspot hosts are handled by the caller via the returned App Engine node).
+func (s *GCPSource) buildPushConsumerHostMap(cliData *gcpCLIData, lookup *NodeLookup, backendTargets map[string]*core.DbNode) (map[string]*core.DbNode, *core.DbNode) {
+	hostConsumer := make(map[string]*core.DbNode)
+
+	_, appEngineNode := indexServerlessNodes(lookup)
+	if srvNodes, ok := lookup.byNodeType[core.NodeTypeServerlessFunction]; ok {
+		for _, n := range srvNodes {
+			if dns, _ := n.Properties["dns_name"].(string); dns != "" {
+				hostConsumer[strings.ToLower(dns)] = n
+			}
+		}
+	}
+
+	if cliData != nil {
+		for _, um := range cliData.urlMaps {
+			addURLMapHostTargets(um, backendTargets, hostConsumer)
+		}
+	}
+
+	return hostConsumer, appEngineNode
+}
+
+// addURLMapHostTargets maps each host routed by a url-map to the backend's target
+// service node (host → path-matcher default backend → backendTargets), so a push
+// endpoint on a custom domain resolves to the service the LB delivers it to.
+func addURLMapHostTargets(um *GCPURLMap, backendTargets map[string]*core.DbNode, out map[string]*core.DbNode) {
+	pmBackend := make(map[string]string, len(um.PathMatchers))
+	for _, pm := range um.PathMatchers {
+		pmBackend[pm.Name] = extractGCPResourceNameFromURL(pm.DefaultService)
+	}
+	for _, hr := range um.HostRules {
+		backendName := pmBackend[hr.PathMatcher]
+		if backendName == "" {
+			backendName = extractGCPResourceNameFromURL(um.DefaultService)
+		}
+		target := backendTargets[backendName]
+		if target == nil {
+			continue
+		}
+		for _, h := range hr.Hosts {
+			out[strings.ToLower(h)] = target
+		}
+	}
+}
+
 // pushSubscriptionEdges returns the consumer→topic edges contributed by a single
 // resource row, or nil when the row isn't a push subscription, lacks a topic, or
 // pushes to an endpoint that isn't a known Cloud Run service.
-func (s *GCPSource) pushSubscriptionEdges(r *CloudResourceRow, cloudRunByHost map[string]*core.DbNode, lookup *NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+func (s *GCPSource) pushSubscriptionEdges(r *CloudResourceRow, hostConsumer map[string]*core.DbNode, appEngineNode *core.DbNode, lookup *NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
 	if !strings.EqualFold(r.Type, "pubsub.googleapis.com/Subscription") || len(r.Meta) == 0 {
 		return nil
 	}
@@ -818,8 +1337,17 @@ func (s *GCPSource) pushSubscriptionEdges(r *CloudResourceRow, cloudRunByHost ma
 	if topicName == "" || pushEndpoint == "" {
 		return nil
 	}
-	consumer, ok := cloudRunByHost[strings.ToLower(repoURIHost(pushEndpoint))]
-	if !ok {
+	host := strings.ToLower(repoURIHost(pushEndpoint))
+	if host == "" {
+		return nil
+	}
+	consumer := hostConsumer[host]
+	// appspot.com hosts are App Engine's default/custom domains; map to the account's
+	// App Engine node when not already resolved via a run.app or LB-routed custom host.
+	if consumer == nil && appEngineNode != nil && strings.HasSuffix(host, ".appspot.com") {
+		consumer = appEngineNode
+	}
+	if consumer == nil {
 		return nil // external webhook / unknown consumer — no in-graph node
 	}
 
@@ -1276,6 +1804,7 @@ func (s *GCPSource) fetchAllGCPCLIData(reqCtx *security.RequestContext, req *cor
 		// Load Balancer components
 		forwardingRules: make(map[string]*GCPForwardingRule),
 		backendServices: make(map[string]*GCPBackendService),
+		serverlessNEGs:  make(map[string]*GCPServerlessNEG),
 		healthChecks:    make(map[string]*GCPHealthCheck),
 		urlMaps:         make(map[string]*GCPURLMap),
 		targetProxies:   make(map[string]*GCPTargetProxy),
@@ -1386,6 +1915,17 @@ func (s *GCPSource) fetchAllGCPCLIData(reqCtx *security.RequestContext, req *cor
 			data.backendServices[backendServices[i].Name] = &backendServices[i]
 		}
 		s.logger.Info("fetched GCP backend services via CLI", "count", len(backendServices))
+	}
+
+	// Serverless NEGs (resolve LB backend → Cloud Run / App Engine service)
+	serverlessNEGs, err := s.fetchServerlessNEGsFromGCP(reqCtx, accountID)
+	if err != nil {
+		s.logger.Warn("failed to fetch GCP serverless NEGs via CLI", "error", err)
+	} else {
+		for i := range serverlessNEGs {
+			data.serverlessNEGs[serverlessNEGs[i].Name] = &serverlessNEGs[i]
+		}
+		s.logger.Info("fetched GCP serverless NEGs via CLI", "count", len(serverlessNEGs))
 	}
 
 	// Health checks
@@ -1887,6 +2427,37 @@ func (s *GCPSource) fetchDNSRecordSetsFromGCP(reqCtx *security.RequestContext, a
 // fetchCDNBackendsFromGCP fetches backend services with Cloud CDN enabled via gcloud CLI.
 // Cloud CDN is configured on backend services (not as a separate resource), so we filter for
 // enableCDN=true to identify CDN-fronted backends.
+// fetchServerlessNEGsFromGCP lists serverless Network Endpoint Groups, which name
+// the Cloud Run / App Engine service that an LB backend service ultimately fronts.
+func (s *GCPSource) fetchServerlessNEGsFromGCP(reqCtx *security.RequestContext, accountID string) ([]GCPServerlessNEG, error) {
+	cmd := "gcloud compute network-endpoint-groups list --format=json"
+	s.logger.Info("fetching GCP serverless NEGs via CLI", "account_id", accountID)
+
+	resp, err := cloud.ExecuteCliWithRetry(reqCtx, cloud.CloudExecuteCliCommandRequest{
+		AccountID: accountID,
+		Command:   cmd,
+	}, 3)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute gcloud CLI: %w", err)
+	}
+	output, err := parseGCloudCLIResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+	var negs []GCPServerlessNEG
+	if err := json.Unmarshal([]byte(output), &negs); err != nil {
+		return nil, fmt.Errorf("failed to parse network-endpoint-groups response: %w", err)
+	}
+	// Keep only serverless NEGs that resolve to a Cloud Run / App Engine service.
+	serverless := negs[:0]
+	for _, n := range negs {
+		if n.CloudRun != nil || n.AppEngine != nil {
+			serverless = append(serverless, n)
+		}
+	}
+	return serverless, nil
+}
+
 func (s *GCPSource) fetchCDNBackendsFromGCP(reqCtx *security.RequestContext, accountID string) ([]GCPCDNBackendService, error) {
 	allBackends := []GCPCDNBackendService{}
 
@@ -3184,7 +3755,37 @@ func shouldSuppressGCPResource(r *CloudResourceRow) bool {
 	if strings.EqualFold(r.Type, "vm-manager") {
 		return true
 	}
+	// IAM policy binding rows feed HAS_ACCESS_TO / PUBLISHES_TO / SUBSCRIBES_TO
+	// edges (createHasAccessEdges); they are relationship data, not graph nodes.
+	if strings.EqualFold(r.ServiceName, gcpIAMPolicyServiceName) || strings.EqualFold(r.Type, gcpIAMBindingType) {
+		return true
+	}
+	// GCP billing-export rollup rows (meta.nb_source="billing") are cost-reporting
+	// aggregates — one per project per billed service, always named after the project
+	// — not real resources. They carry no topology data and would otherwise become
+	// orphaned nodes named after the project: phantom ComputeInstance (compute-engine),
+	// and generic CloudResource / LogAggregator / MonitoringService for Cloud Tasks,
+	// Secret Manager, KMS, Maps/Time-Zone APIs, Cloud Logging/Monitoring/Trace, etc.
+	// Real resources always arrive via nb_source "api"/"asset" with their own names
+	// and metadata, so they are unaffected. (Subsumes the vm-manager billing stub.)
+	if gcpResourceMetaSource(r) == "billing" {
+		return true
+	}
 	return false
+}
+
+// gcpResourceMetaSource returns the meta.nb_source marker ("billing", "api",
+// "asset", …) for a cloud_resourses row, or "" when absent/unparseable.
+func gcpResourceMetaSource(r *CloudResourceRow) string {
+	if r == nil || len(r.Meta) == 0 {
+		return ""
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(r.Meta, &m); err != nil {
+		return ""
+	}
+	source, _ := m["nb_source"].(string)
+	return source
 }
 
 // determineNodeType determines the knowledge graph node type from GCP resource type and service name

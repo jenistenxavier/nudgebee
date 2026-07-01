@@ -1010,6 +1010,14 @@ func (s *Service) BuildGraphs(ctx *security.RequestContext, req *BuildRequest) (
 	unifiedGraph.Nodes, unifiedGraph.Edges, _ = CollapseEnrichedExternalServices(
 		unifiedGraph.Nodes, unifiedGraph.Edges, s.logger,
 	)
+
+	// Phase 3.6: Resolve GCP managed-service ExternalService leaves the DNS
+	// enricher can't match ("GCP Datastore", "Redis", …) by repointing each CALLS
+	// edge to the collected node of that service type in the *caller's* GCP
+	// account. Runs after collapse so it only handles the leaves that survived it.
+	unifiedGraph.Nodes, unifiedGraph.Edges, _ = ResolveGCPManagedServiceCalls(
+		unifiedGraph.Nodes, unifiedGraph.Edges, s.logger,
+	)
 	unifiedGraph.Edges = DeduplicateEdgesWithPriority(unifiedGraph.Edges)
 
 	// Calculate metadata for unified graph

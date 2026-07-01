@@ -270,8 +270,9 @@ const (
 	RelationshipBuiltFrom RelationshipType = "BUILT_FROM"
 
 	// Identity relationships
-	RelationshipRunsAs  RelationshipType = "RUNS_AS" // Compute resource (Lambda/EC2/ECS) uses this IAM identity
-	RelationshipAssumes RelationshipType = "ASSUMES" // ServiceIdentity can assume another ServiceIdentity (trust policy)
+	RelationshipRunsAs      RelationshipType = "RUNS_AS"       // Compute resource (Lambda/EC2/ECS) uses this IAM identity
+	RelationshipAssumes     RelationshipType = "ASSUMES"       // ServiceIdentity can assume another ServiceIdentity (trust policy)
+	RelationshipHasAccessTo RelationshipType = "HAS_ACCESS_TO" // ServiceIdentity is IAM-granted access to a data resource (BigQuery/Storage/SecretVault/…)
 
 	// Deprecated - kept for reference (removed in favor of IS_ENCRYPTED_BY)
 	// RelationshipEncryptedBy RelationshipType = "ENCRYPTED_BY"
