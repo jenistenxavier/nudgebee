@@ -148,7 +148,7 @@ func (e *ElasticSaasMetricSource) FetchMetricsQuery(ctx *security.RequestContext
 		esURL := fmt.Sprintf("%s/%s/_search", cfg.Url, index)
 		slog.Info("ES metrics query debug", "url", esURL, "body", renderedQuery)
 
-		resp, err := esRequestJSON("POST", esURL, queryBody, cfg)
+		resp, err := esRequestJSON("POST", esURL, queryBody, cfg) //nolint:bodyclose
 		if err != nil {
 			errStr := fmt.Sprintf("failed to query metric: %v", err)
 			results = append(results, QueryResult{
@@ -217,7 +217,7 @@ func (e *ElasticSaasMetricSource) FetchMetricList(ctx *security.RequestContext, 
 		return nil, err
 	}
 
-	resp, err := esRequest("GET", fmt.Sprintf("%s/_cat/indices?format=json", cfg.Url), "", cfg)
+	resp, err := esRequest("GET", fmt.Sprintf("%s/_cat/indices?format=json", cfg.Url), "", cfg) //nolint:bodyclose
 	if err != nil {
 		return nil, fmt.Errorf("failed to query metric list: %w", err)
 	}
@@ -281,7 +281,7 @@ func (e *ElasticSaasMetricSource) FetchMetricLabelValues(ctx *security.RequestCo
 		}
 	}
 
-	resp, err := esRequestJSON("POST", fmt.Sprintf("%s/%s/_search", cfg.Url, index), buildDSL(labelField), cfg)
+	resp, err := esRequestJSON("POST", fmt.Sprintf("%s/%s/_search", cfg.Url, index), buildDSL(labelField), cfg) //nolint:bodyclose
 	if err != nil {
 		return nil, fmt.Errorf("failed to query metric label values: %w", err)
 	}
@@ -290,7 +290,7 @@ func (e *ElasticSaasMetricSource) FetchMetricLabelValues(ctx *security.RequestCo
 	if err != nil {
 		// If .keyword field doesn't exist, retry with original field name
 		if labelField != req.Label {
-			resp, err = esRequestJSON("POST", fmt.Sprintf("%s/%s/_search", cfg.Url, index), buildDSL(req.Label), cfg)
+			resp, err = esRequestJSON("POST", fmt.Sprintf("%s/%s/_search", cfg.Url, index), buildDSL(req.Label), cfg) //nolint:bodyclose
 			if err != nil {
 				return nil, fmt.Errorf("failed to query metric label values: %w", err)
 			}
@@ -341,7 +341,7 @@ func (e *ElasticSaasMetricSource) FetchMetricsLabels(ctx *security.RequestContex
 	}
 
 	// Fetch field names from the index mapping.
-	resp, err := esRequest("GET", fmt.Sprintf("%s/%s/_mapping", cfg.Url, index), "", cfg)
+	resp, err := esRequest("GET", fmt.Sprintf("%s/%s/_mapping", cfg.Url, index), "", cfg) //nolint:bodyclose
 	if err != nil {
 		return nil, fmt.Errorf("failed to query metrics labels: %w", err)
 	}
@@ -667,7 +667,7 @@ func fetchESMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTr
 		esURL := fmt.Sprintf("%s/%s/_search", cfg.Url, index)
 		slog.Info("ES utilisation query", "metric", metricKey, "otlp", otlpName, "url", esURL)
 
-		resp, reqErr := esRequestJSON("POST", esURL, queryBody, cfg)
+		resp, reqErr := esRequestJSON("POST", esURL, queryBody, cfg) //nolint:bodyclose
 		if reqErr != nil {
 			errStr := fmt.Sprintf("failed to query metric %s: %v", metricKey, reqErr)
 			results = append(results, QueryResult{QueryKey: metricKey, Query: renderedQuery, Error: &errStr})
