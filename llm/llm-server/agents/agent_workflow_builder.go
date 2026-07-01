@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"nudgebee/llm/agents/core"
@@ -15,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/llms"
@@ -42,6 +44,66 @@ const (
 	// turnIntentCreate: build a NEW workflow → handleIntentAndPlan.
 	turnIntentCreate turnIntent = "CREATE"
 )
+
+// providerAnnotationRegex matches a parenthetical annotation that leaks the cloud
+// provider into a clarifying-question option label, e.g.
+// "(AWS - assuming this is a K8s cluster)" (#30885). The provider alternation is derived
+// from cloudAccountConfigTypes (the single source of truth) so it stays in sync as
+// providers are added — no hardcoded list to drift. The benign "(recommended)" marker
+// does not start with a provider keyword, so it is preserved.
+var providerAnnotationRegex = buildProviderAnnotationRegex()
+
+func buildProviderAnnotationRegex() *regexp.Regexp {
+	keys := make([]string, 0, len(cloudAccountConfigTypes))
+	for k := range cloudAccountConfigTypes {
+		keys = append(keys, regexp.QuoteMeta(k))
+	}
+	sort.Strings(keys) // deterministic alternation order
+	return regexp.MustCompile(`(?i)\s*\((?:` + strings.Join(keys, "|") + `)\b[^)]*\)`)
+}
+
+// idAnnotationRegex matches a stray "id=<value>" fragment (parenthesized or not) that
+// survived provider-annotation stripping, e.g. a label of the form "prod-aws id=<uuid>".
+var idAnnotationRegex = regexp.MustCompile(`(?i)\s*\(?\bid\s*=\s*[^)\s]+\)?`)
+
+// sanitizeAccountOptionLabel strips internal identifiers (provider annotations, id=
+// fragments, bare UUIDs) from an LLM-generated clarifying-question option label so the
+// user never sees them. The provider annotation (#30885) is the primary target; the
+// id=/UUID stripping is a backstop, since the UUID is now withheld from the clarification
+// context entirely (#31141) so it should not appear in the first place. It is deliberately
+// surgical: a human-readable suffix like "gcp-dev - team-alpha" is left intact because it
+// may be the only thing distinguishing two accounts, and "(recommended)" is preserved.
+// Returns the trimmed display name; may return "" if the label was nothing but an identifier.
+func sanitizeAccountOptionLabel(label string) string {
+	out := providerAnnotationRegex.ReplaceAllString(label, "")
+	out = idAnnotationRegex.ReplaceAllString(out, "")
+	out = uuidRegex.ReplaceAllString(out, "")
+	// Trim trailing separators/brackets left behind by the removals
+	// (e.g. "prod-aws (" or "prod-aws - ").
+	out = strings.TrimRight(out, " -,(")
+	return strings.TrimSpace(out)
+}
+
+// sanitizeQuestionOptions applies sanitizeAccountOptionLabel to each option, drops any
+// that collapse to empty, and dedupes labels that become identical after stripping
+// (preserving first-occurrence order). Comparison is case-insensitive.
+func sanitizeQuestionOptions(options []string) []string {
+	seen := make(map[string]struct{}, len(options))
+	out := make([]string, 0, len(options))
+	for _, opt := range options {
+		clean := sanitizeAccountOptionLabel(opt)
+		if clean == "" {
+			continue
+		}
+		key := strings.ToLower(clean)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, clean)
+	}
+	return out
+}
 
 // ClarifyingQuestion represents a single question to ask the user before planning.
 type ClarifyingQuestion struct {
@@ -132,36 +194,16 @@ func (a *WorkflowBuilderAgent) GetModelCategory() core.ModelTier {
 	return core.ModelTierReasoning
 }
 
+// PostProcessResponse is a pass-through. The builder produces its terminal output
+// deterministically: create-mode returns the raw workflow JSON, and every other
+// path returns either clean json.MarshalIndent output (toolFinalize) or a
+// purpose-built markdown summary (finalizeWithAutoSave). The build path JSON must
+// already be valid (checkMissingConfigs/resolveCloudAccountIds parse it), so it is
+// never fenced; the read-only path returns prose that may legitimately contain a
+// fenced JSON example. The old line-shape reconstruction therefore did nothing on
+// the JSON path and could mangle a prose answer — pure risk. Final-JSON extraction
+// must never pass through any further transformation here (#31499).
 func (a *WorkflowBuilderAgent) PostProcessResponse(ctx *security.RequestContext, request core.NBAgentRequest, resp core.NBAgentResponse) core.NBAgentResponse {
-	if len(resp.Response) > 0 {
-		content := resp.Response[0]
-		// Clean up markdown code blocks only if the response contains JSON (workflow definition)
-		// Text responses (investigation, debugging) are passed through as-is
-		if strings.Contains(content, "```") && strings.Contains(content, "{") {
-			lines := strings.Split(content, "\n")
-			var jsonLines []string
-			inCodeBlock := false
-			for _, line := range lines {
-				trimmed := strings.TrimSpace(line)
-				if strings.HasPrefix(trimmed, "```") {
-					inCodeBlock = !inCodeBlock
-					continue
-				}
-				if inCodeBlock || (strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) {
-					jsonLines = append(jsonLines, line)
-				}
-			}
-			if len(jsonLines) > 0 {
-				content = strings.Join(jsonLines, "\n")
-			} else {
-				// Fallback: try to just strip the markers if logic above failed or simple wrapping
-				content = strings.TrimPrefix(content, "```json")
-				content = strings.TrimPrefix(content, "```")
-				content = strings.TrimSuffix(content, "```")
-			}
-			resp.Response = []string{content}
-		}
-	}
 	return resp
 }
 
@@ -473,21 +515,24 @@ CURRENT AUTOMATION DEFINITION:
 `, definitionContext)
 	}
 
-	return fmt.Sprintf(`You are a Nudgebee automation assistant answering a QUESTION about an automation. You must EXPLAIN or DIAGNOSE only — you must NOT build, modify, fix, or apply any change.
+	return fmt.Sprintf(`You are a Nudgebee automation assistant answering a QUESTION about an automation, or running a non-destructive dry-run when asked. You must NOT build, modify, fix, or apply any change to the saved definition.
 
 USER QUESTION:
 %s
 %s
-AVAILABLE READ-ONLY TOOLS (use ONLY these; never init_workflow / add_task / modify_task / delete_task / validate / finalize):
+AVAILABLE TOOLS (use ONLY these; never init_workflow / add_task / modify_task / delete_task / validate / finalize):
 - list_tasks — list the automation's tasks
 - get_task — inspect a specific task
 - list_executions — list recent runs (use status="FAILED" for failure questions)
 - get_execution — read a run's task-level errors and outputs
+- dry_run — execute the automation against the engine WITHOUT persisting external side effects, returning per-task status and errors. This is how you verify it works or reproduce a failure.
 
 INSTRUCTIONS:
-- Failure questions ("why did it fail", "what is this error"): gather evidence first — list_executions(status="FAILED"), then get_execution on the most recent failed run. Quote the actual error, name the failing task, and explain the cause. Do NOT propose or apply a fix unless the user explicitly asks to fix it.
+- Dry-run / test requests ("dry run this", "test it", "does this work", "run it safely"): call dry_run, then report the overall result and, for any failing task, its id + error. Do NOT claim the automation "has no dry-run mode" — the engine dry-runs it for you. Dry-run does not modify the saved automation.
+- Failure questions ("why did it fail", "what is this error"): gather evidence first — list_executions(status="FAILED"), then get_execution on the most recent failed run; or dry_run to reproduce. Quote the actual error, name the failing task, and explain the cause. Do NOT propose or apply a fix unless the user explicitly asks to fix it.
 - Explain/summarize questions: describe the trigger, tasks, and flow from the definition above.
-- Capability/greeting questions: briefly say you can build, modify, explain, and diagnose automations.
+- Capability/greeting questions: briefly say you can build, modify, explain, diagnose, and dry-run automations.
+- TONE: be a proactive collaborator, not a dead-end. After answering, close by conversationally offering the single most useful next step for where the user is (e.g. dry-run to verify it works, fix a failing task, publish a version) phrased as a brief question — keep the conversation moving. Suggest only what actually fits the situation; never invent steps.
 - When you have the answer, emit a <final_answer> whose <content> is your prose answer in Markdown. Do NOT output a workflow JSON definition. Do NOT call finalize.`, userQuery, defSection)
 }
 
@@ -749,6 +794,7 @@ QUESTION STYLE:
 - If an integration is needed but not configured: explain the situation and offer concrete alternatives from what IS configured, or suggest adding a placeholder.
 - If the user said "A or B?" — recommend one and explain why.
 - Each option must be a concrete, actionable value — not a generic label.
+- Option labels are the plain display NAME only. NEVER put a UUID, an "id=..." value, or a provider annotation like "(AWS ...)" or "(k8s, id=...)" in a label — the "id=" and provider shown in the ACCOUNT ENVIRONMENT context are for your internal account_id mapping only and must never be shown to the user. The ONLY parenthetical allowed in a label is the "(recommended)" marker.
 
 DO NOT INVENT RESOURCE VALUES:
 - Specific resource names (Slack channels, k8s namespaces, S3 buckets, DB tables, repo names, etc.) MUST come from the context above. Never guess or fabricate them.
@@ -775,7 +821,10 @@ Maximum 3 questions.`, envContext, configsContext, intent)
 }
 
 func (a *WorkflowBuilderAgent) generateClarifyingQuestions(ctx *security.RequestContext, request core.NBAgentRequest, intent string) ([]ClarifyingQuestion, error) {
-	envContext := a.buildEnvironmentContext(ctx)
+	// includeAccountIDs=false: clarification options are user-facing, so the id= UUID
+	// must never enter this context (#31141). The account_id→UUID mapping happens later
+	// in the plan prompt and resolveCloudAccountIds.
+	envContext := a.buildEnvironmentContext(ctx, false)
 	configsContext := fetchConfigsContext(ctx, a.accountId)
 
 	systemPrompt := getClarificationSystemPrompt(envContext, configsContext, intent)
@@ -821,6 +870,14 @@ func (a *WorkflowBuilderAgent) generateClarifyingQuestions(ctx *security.Request
 	// Cap at 3 questions
 	if len(result.Questions) > 3 {
 		result.Questions = result.Questions[:3]
+	}
+
+	// Strip internal identifiers (provider annotations, id=<uuid>, bare UUIDs) that the
+	// LLM copies from the ACCOUNT ENVIRONMENT context into user-facing option labels
+	// (#30885, #31141). The id is needed by the LLM for account_id mapping but must
+	// never be shown to the user.
+	for i := range result.Questions {
+		result.Questions[i].Options = sanitizeQuestionOptions(result.Questions[i].Options)
 	}
 
 	// Ensure every question has "Skip" as last option
@@ -1404,8 +1461,16 @@ func (a *WorkflowBuilderAgent) finalizeWithAutoSave(ctx *security.RequestContext
 		return core.NBAgentResponse{Response: []string{workflowJSON}, IsTerminal: true}
 	}
 
+	// When the assistant is invoked from inside the editor (the embedded "Automation
+	// Context" chat), the user is already on the automation's editor page, so an
+	// "Open in Editor" link points back to where they are. Only surface the link for
+	// off-editor surfaces (e.g. ask-nudgebee chat). The editor canvas refreshes in place.
+	inEditor := request.ConversationSource == core.ConversationSourceWorkflowBuilder
+
 	resp := core.NBAgentResponse{IsTerminal: true}
 	switch {
+	case saved && inEditor:
+		// Saved from the editor — no link, the canvas refreshes in place.
 	case saved:
 		link := a.buildWorkflowEditorLink(request, workflowId)
 		if link == "" {
@@ -1709,7 +1774,7 @@ func extractWorkflowId(resp []byte, fallback string) string {
 
 // extractIntent analyzes the user's request and extracts workflow requirements.
 func (a *WorkflowBuilderAgent) extractIntent(ctx *security.RequestContext, request core.NBAgentRequest) (string, error) {
-	envContext := a.buildEnvironmentContext(ctx)
+	envContext := a.buildEnvironmentContext(ctx, true)
 	taskTypeNames := a.fetchTaskTypeNames(ctx)
 
 	systemPrompt := fmt.Sprintf(`You are an automation intent analyzer for Nudgebee.
@@ -1777,7 +1842,14 @@ Return ONLY the JSON object.`, taskTypeNames, envContext)
 // buildEnvironmentContext fetches the account's configured integrations, cloud accounts,
 // and observability providers to give the LLM awareness of what is actually available.
 // Uses cached APIs (ListAllToolConfigs: 30min, GetAccountConfigSummary: 30min).
-func (a *WorkflowBuilderAgent) buildEnvironmentContext(ctx *security.RequestContext) string {
+//
+// includeAccountIDs controls whether each cloud account is rendered with its internal
+// UUID ("name (aws, id=<uuid>)") or by display name only ("name (aws)"). Plan/build
+// prompts need the UUID because they emit workflow JSON whose `account_id` must be a
+// UUID. The clarification prompt must NOT receive it: its output is user-facing option
+// labels, and the LLM was copying the id straight into them (#31141). Withholding the
+// id there fixes that at the source — there is simply nothing to leak.
+func (a *WorkflowBuilderAgent) buildEnvironmentContext(ctx *security.RequestContext, includeAccountIDs bool) string {
 	var parts []string
 
 	// 1. Named integrations + cloud accounts (cached 30 min)
@@ -1794,8 +1866,12 @@ func (a *WorkflowBuilderAgent) buildEnvironmentContext(ctx *security.RequestCont
 				continue
 			}
 			lowerType := strings.ToLower(configType)
-			if lowerType == "aws" || lowerType == "gcp" || lowerType == "azure" || lowerType == "k8s" {
-				cloudAccounts = append(cloudAccounts, fmt.Sprintf("%s (%s, id=%s)", cfg.Name, configType, cloudAccountId(cfg)))
+			if cloudAccountConfigTypes[lowerType] {
+				if includeAccountIDs {
+					cloudAccounts = append(cloudAccounts, fmt.Sprintf("%s (%s, id=%s)", cfg.Name, configType, cloudAccountId(cfg)))
+				} else {
+					cloudAccounts = append(cloudAccounts, fmt.Sprintf("%s (%s)", cfg.Name, configType))
+				}
 			} else {
 				integrationsByType[lowerType] = append(integrationsByType[lowerType], cfg.Name)
 			}
@@ -1834,9 +1910,16 @@ func (a *WorkflowBuilderAgent) buildEnvironmentContext(ctx *security.RequestCont
 		return currentContext
 	}
 
+	accountIDRule := ""
+	if includeAccountIDs {
+		// Only meaningful when the id= UUID is actually rendered above.
+		accountIDRule = "\nWhen a task requires `account_id` (k8s.cli, cloud.aws.cli, cloud.gcp.cli, cloud.azure.cli, etc.), use the UUID `id=` value shown for that cloud account above — NEVER the display name. The runbook server validates `account_id` as a UUID and rejects names." +
+			"\nThe `id=` UUID shown above is INTERNAL — use it only to populate `account_id`. Never display it to the user in a question or option label; refer to a cloud account by its display name only."
+	}
+
 	return "\nACCOUNT ENVIRONMENT (configured integrations and cloud accounts on this account):\n" + strings.Join(parts, "\n") +
 		"\n\nWhen the user references an integration by name (e.g., 'query dev-pg'), match it to the configured integration above and use {{ Configs.<name>_integration_id }} to reference it." +
-		"\nWhen a task requires `account_id` (k8s.cli, cloud.aws.cli, cloud.gcp.cli, cloud.azure.cli, etc.), use the UUID `id=` value shown for that cloud account above — NEVER the display name. The runbook server validates `account_id` as a UUID and rejects names." +
+		accountIDRule +
 		"\nIf a task REQUIRES an integration NOT listed above, warn the user that it is not currently configured." +
 		currentContext
 }
@@ -2082,7 +2165,7 @@ func (a *WorkflowBuilderAgent) generatePlan(ctx *security.RequestContext, reques
 
 	configsInfo := fetchConfigsContext(ctx, a.accountId)
 	planningContext := getWorkflowPlanningContext()
-	envContext := a.buildEnvironmentContext(ctx)
+	envContext := a.buildEnvironmentContext(ctx, true)
 
 	systemPrompt := fmt.Sprintf(`You are a world-class automation planner for Nudgebee. Your job is to create a precise, actionable plan that a user can review BEFORE we build the actual automation JSON. A great plan means the automation builds correctly on the first attempt.
 
@@ -2223,7 +2306,7 @@ func (a *WorkflowBuilderAgent) regeneratePlan(ctx *security.RequestContext, requ
 
 	configsInfo := fetchConfigsContext(ctx, a.accountId)
 	planningContext := getWorkflowPlanningContext()
-	envContext := a.buildEnvironmentContext(ctx)
+	envContext := a.buildEnvironmentContext(ctx, true)
 
 	systemPrompt := fmt.Sprintf(`You are a world-class automation planner for Nudgebee. The user has reviewed your previous plan and requested changes.
 
@@ -2974,6 +3057,47 @@ func (a *WorkflowBuilderAgent) toolValidate(ctx *security.RequestContext) string
 	return "Validation OK. The automation is valid."
 }
 
+// dryRunBuilderTimeout bounds the synchronous dry-run call from the builder loop. The
+// runbook dry-run handler can block up to its own ceiling; most automations finish in
+// seconds. A longer one is reported as still-running rather than hanging the loop.
+const dryRunBuilderTimeout = 3 * time.Minute
+
+// toolDryRun executes the current automation against the runbook engine WITHOUT
+// persisting external side effects, returning per-task status/errors. This is how the
+// editor's assistant verifies an automation works and diagnoses a failure with real
+// execution evidence (the engine supports dry-run even though there is no "dry-run
+// mode" baked into the definition). The dry-run endpoint takes the inner definition.
+func (a *WorkflowBuilderAgent) toolDryRun(ctx *security.RequestContext) string {
+	if a.state.WorkingWorkflow == nil {
+		return "Error: automation not initialized."
+	}
+	coerceWorkflowTypes(a.state.WorkingWorkflow)
+
+	// WorkingWorkflow is the full workflow object ({name, definition, ...}); the
+	// dry-run endpoint expects {definition: <inner>}. Fall back to sending the whole
+	// thing if there's no nested definition key.
+	var definition any = a.state.WorkingWorkflow
+	if inner, ok := a.state.WorkingWorkflow["definition"]; ok {
+		definition = inner
+	}
+	body := map[string]any{"definition": definition}
+	if name, ok := a.state.WorkingWorkflow["name"].(string); ok && name != "" {
+		body["name"] = name
+	}
+
+	reqCtx, cancel := context.WithTimeout(context.Background(), dryRunBuilderTimeout)
+	defer cancel()
+
+	resp, err := tools.DoRunbookRequestWithContext(reqCtx, "POST", "workflows/dry-run", body, a.accountId, ctx.GetSecurityContext().GetTenantId(), ctx.GetSecurityContext().GetUserId())
+	if err != nil {
+		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
+			return fmt.Sprintf("Dry-run is still running after %s — this automation is long-running. Trigger it as a real run and inspect the execution instead.", dryRunBuilderTimeout)
+		}
+		return fmt.Sprintf("Dry-run FAILED to start: %s", common.SanitizeErrorMessage(err.Error()))
+	}
+	return "Dry-run complete. Result (per-task status and errors):\n" + tools.SummarizeDryRunResponse(resp)
+}
+
 // isRealTemplateSyntaxError reports whether an "unable to execute template" error carries a marker
 // of a genuine syntax/filter mistake (bad filter, unsupported JMESPath/JSONPath projection,
 // malformed expression) rather than a value that is merely unknown until execution time. Such
@@ -3143,6 +3267,8 @@ func (a *WorkflowBuilderAgent) executeWorkflowTool(ctx *security.RequestContext,
 		return a.toolGetTaskSchema(args, cachedTaskTypes)
 	case "validate":
 		return a.toolValidate(ctx)
+	case "dry_run":
+		return a.toolDryRun(ctx)
 	case "finalize":
 		return a.toolFinalize()
 	case "list_executions":
@@ -3150,7 +3276,7 @@ func (a *WorkflowBuilderAgent) executeWorkflowTool(ctx *security.RequestContext,
 	case "get_execution":
 		return a.toolGetExecution(ctx, args)
 	default:
-		return fmt.Sprintf("Unknown tool: '%s'. Available tools: init_workflow, add_task, get_task, modify_task, delete_task, list_tasks, get_task_schema, validate, finalize, list_executions, get_execution", toolName)
+		return fmt.Sprintf("Unknown tool: '%s'. Available tools: init_workflow, add_task, get_task, modify_task, delete_task, list_tasks, get_task_schema, validate, dry_run, finalize, list_executions, get_execution", toolName)
 	}
 }
 
