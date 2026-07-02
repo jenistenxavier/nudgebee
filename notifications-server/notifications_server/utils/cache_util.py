@@ -3,8 +3,6 @@ from typing import Any, ClassVar, Dict, Optional
 
 from notifications_server.configs.settings import settings
 
-from notifications_server.configs.settings import settings
-
 
 class EventCache:
     _instance: ClassVar[Optional["EventCache"]] = None

@@ -1269,6 +1269,15 @@ func (a *cloudLogAction) CanAutoExecute(ctx playbooks.PlaybookActionContext) boo
 	// service.get) and returns nil when nothing resolves, so this is safe and covers the
 	// resource types the old per-service gating left evidence-starved (gae_app, l7_lb, gke).
 	if labels["gcp_account"] != "" || labels["gcp_project_id"] != "" {
+		// User-defined log-based metric alerts: the metric's own filter scopes the logs,
+		// even when the alert carries no monitored-resource type.
+		if strings.HasPrefix(labels["gcp_metric_type"], "logging.googleapis.com/user/") {
+			return true
+		}
+		// Native GCP log alerts — logs are the most valuable evidence for these.
+		if labels["gcp_alert_type"] == "log" {
+			return true
+		}
 		resourceType := labels["gcp_event_resource_type"]
 		if resourceType != "" && resourceType != "unknown" {
 			return true
@@ -1311,8 +1320,14 @@ func (a *cloudLogAction) AutoExecute(ctx playbooks.PlaybookActionContext) (playb
 	// from the resource (resource.labels / log-based metric / SLO service.get) and
 	// returns nil when nothing resolves, so broad firing is safe. This replaces the old
 	// per-service gating that left most resource types (gae_app, l7_lb, gke) evidence-starved.
+	// User-defined log-based metric alerts and native log alerts are also handled here even
+	// when they carry no monitored-resource type: their metric filter / log scope still
+	// yields useful evidence (kept in sync with CanAutoExecute).
 	resourceType := labels["gcp_event_resource_type"]
-	if (labels["gcp_account"] != "" || labels["gcp_project_id"] != "") && resourceType != "" && resourceType != "unknown" {
+	gcpLogMetric := strings.HasPrefix(labels["gcp_metric_type"], "logging.googleapis.com/user/")
+	gcpLogAlert := labels["gcp_alert_type"] == "log"
+	if (labels["gcp_account"] != "" || labels["gcp_project_id"] != "") &&
+		((resourceType != "" && resourceType != "unknown") || gcpLogMetric || gcpLogAlert) {
 
 		// gcp_event_instance falls back to the incident ID when the alert payload has
 		// no resource-scoped identifier. Scoping a per-service log filter by the
