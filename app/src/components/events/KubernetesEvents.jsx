@@ -47,6 +47,10 @@ import { getTriageStatusTooltip } from '@api1/triage';
 import useKubernetesEventFilters from '@hooks/useKubernetesEventFilters';
 import WorkflowIcon from '@assets/WorkflowIcon';
 
+// localStorage key for the Troubleshoot Events tab. Bump the suffix when the
+// shape of persisted filter values changes so old entries are ignored.
+export const TROUBLESHOOT_EVENTS_FILTER_STORAGE_KEY = 'troubleshoot:events:filters:v1';
+
 const DEFAULT_TABLE_COLUMNS = [
   {
     name: 'Severity',
