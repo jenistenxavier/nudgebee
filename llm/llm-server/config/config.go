@@ -251,8 +251,9 @@ type appConfig struct {
 	LlmServerWorkspaceLocalUrl             string `mapstructure:"llm_server_workspace_local_url"`
 	LlmServerWorkspaceFileMaxDownloadBytes int    `mapstructure:"llm_server_workspace_file_max_download_bytes"`
 
-	NotificationServerUrl string `mapstructure:"notification_service_url"`
-	TicketServerUrl       string `mapstructure:"ticket_server_url"`
+	NotificationServerUrl   string `mapstructure:"notification_service_url"`
+	NotificationServerToken string `mapstructure:"notification_server_token"`
+	TicketServerUrl         string `mapstructure:"ticket_server_url"`
 
 	LlmServerSecurityMode string `mapstructure:"llm_server_security_mode"`
 
@@ -488,6 +489,7 @@ func init() {
 	// viper requires default values or bind.. else Unmarshal skips fields with no default values
 	viper.SetDefault("action_api_server_token", "")
 	viper.SetDefault("llm_server_token", "")
+	viper.SetDefault("notification_server_token", "")
 	viper.SetDefault("base_url", "http://nudgebee")
 
 	viper.SetDefault("relay_server_endpoint", "http://127.0.0.1:52832")
