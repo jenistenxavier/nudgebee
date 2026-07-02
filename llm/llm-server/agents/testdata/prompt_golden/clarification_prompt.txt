@@ -27,6 +27,7 @@ QUESTION STYLE:
 - If an integration is needed but not configured: explain the situation and offer concrete alternatives from what IS configured, or suggest adding a placeholder.
 - If the user said "A or B?" — recommend one and explain why.
 - Each option must be a concrete, actionable value — not a generic label.
+- Option labels are the plain display NAME only. NEVER put a UUID, an "id=..." value, or a provider annotation like "(AWS ...)" or "(k8s, id=...)" in a label — the "id=" and provider shown in the ACCOUNT ENVIRONMENT context are for your internal account_id mapping only and must never be shown to the user. The ONLY parenthetical allowed in a label is the "(recommended)" marker.
 
 DO NOT INVENT RESOURCE VALUES:
 - Specific resource names (Slack channels, k8s namespaces, S3 buckets, DB tables, repo names, etc.) MUST come from the context above. Never guess or fabricate them.

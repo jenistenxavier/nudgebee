@@ -212,8 +212,29 @@ func processTroubleshootingEventFromMq(data []byte) error {
 		publishState.Error = "tenant lookup failed: " + err.Error()
 		return nil
 	}
+	// GetTenantIdFromAccountId can return "" without an error (no matching
+	// tenant). Fail fast rather than build a context scoped to an empty
+	// tenant, which would run tenant-wide queries against no tenant.
+	if tenantId == "" {
+		slog.Error("eventasync: empty tenant id for account", "accountId", eventAnalysisRequest.AccountId)
+		publishState.Status = string(events.AnalysisStatusFailed)
+		publishState.Error = "empty tenant id"
+		return nil
+	}
 
-	ctx = security.NewRequestContextForTenantAdmin(tenantId)
+	// Automated event analysis has no human user; stamp the system user so
+	// downstream writes (token usage, conversations) get a valid uuid instead
+	// of "" (which uuid columns reject — SQLSTATE 22P02).
+	ctx = security.NewRequestContextForTenantAdminWithUser(tenantId, security.GetSystemUserId())
+	// NewSecurityContextForTenantAccountAdmin returns nil if the account-id
+	// lookup fails; guard so downstream ctx.GetSecurityContext() calls don't
+	// nil-panic (otherwise only caught by the defer recover()).
+	if ctx.GetSecurityContext() == nil {
+		slog.Error("eventasync: failed to initialize security context", "tenantId", tenantId)
+		publishState.Status = string(events.AnalysisStatusFailed)
+		publishState.Error = "security context initialization failed"
+		return nil
+	}
 	response, err = getOrCreateEventAnalysisStatus(ctx, eventAnalysisRequest, dbManager, true)
 	if err != nil {
 		ctx.GetLogger().Error("eventasync: unable to get or create event analysis status", "error", err)
