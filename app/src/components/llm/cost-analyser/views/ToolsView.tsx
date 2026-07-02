@@ -22,7 +22,7 @@ import FormatListNumberedIcon from '@mui/icons-material/FormatListNumbered';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import TimerOutlinedIcon from '@mui/icons-material/TimerOutlined';
 import PaidOutlinedIcon from '@mui/icons-material/PaidOutlined';
-import CustomTable2 from '@shared/tables/CustomTable';
+import CustomTable2 from '@shared/tables/CustomTable2';
 import { Card } from '@ui/Card';
 import { Banner } from '@ui/Banner';
 import { Chip } from '@ui/Chip';

@@ -11,7 +11,7 @@
  */
 import * as React from 'react';
 import { Box } from '@mui/material';
-import CustomTable2 from '@shared/tables/CustomTable';
+import CustomTable2 from '@shared/tables/CustomTable2';
 import { Modal } from '@ui/Modal';
 import { Banner } from '@ui/Banner';
 import { Label } from '@ui/Label';
