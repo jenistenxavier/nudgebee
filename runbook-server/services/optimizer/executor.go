@@ -24,8 +24,12 @@ func (s *optimizerService) GenerateTasks(ctx context.Context, autoOptimizeID uui
 	}
 
 	// 1. Pre-flight Checks
-	if err := s.checkPreFlight(ctx, ao); err != nil {
+	skip, err := s.checkPreFlight(ctx, ao)
+	if err != nil {
 		return nil, err
+	}
+	if skip {
+		return nil, nil
 	}
 
 	ao.ExecutionStatus = string(model.AutopilotExecutionStatusInProgress)
@@ -257,9 +261,10 @@ func (s *optimizerService) sendToConfiguredChannels(ao *model.AutoOptimize, buil
 	}
 }
 
-func (s *optimizerService) checkPreFlight(ctx context.Context, ao *model.AutoOptimize) error {
+func (s *optimizerService) checkPreFlight(ctx context.Context, ao *model.AutoOptimize) (bool, error) {
 	if ao.Status != model.AutoOptimizeStatusActive && ao.Status != model.AutoOptimizeStatusDryrun {
-		return fmt.Errorf("auto optimize %s is not active (status: %s)", ao.ID, ao.Status)
+		slog.Info("Auto optimize is not active, skipping task generation", "id", ao.ID, "status", ao.Status)
+		return true, nil
 	}
 
 	now := time.Now().UTC()
@@ -267,7 +272,7 @@ func (s *optimizerService) checkPreFlight(ctx context.Context, ao *model.AutoOpt
 		slog.Info("Auto optimize expired, disabling", "id", ao.ID, "end_at", *ao.EndAt)
 		ao.Status = model.AutoOptimizeStatusDisabled
 		if err := s.dao.SaveAutoOptimize(ctx, *ao); err != nil {
-			return fmt.Errorf("failed to disable expired auto optimize %s: %w", ao.ID, err)
+			return false, fmt.Errorf("failed to disable expired auto optimize %s: %w", ao.ID, err)
 		}
 
 		err := s.temporalClient.ScheduleClient().GetHandle(ctx, s.scheduleID(ao.ID)).Pause(ctx, client.SchedulePauseOptions{
@@ -277,19 +282,19 @@ func (s *optimizerService) checkPreFlight(ctx context.Context, ao *model.AutoOpt
 			slog.Error("failed to pause schedule for expired auto optimize", "id", ao.ID, "error", err)
 		}
 
-		return fmt.Errorf("auto optimize %s has expired (EndAt: %s) and is now disabled", ao.ID, *ao.EndAt)
+		return true, nil
 	}
 
 	agent, err := s.dao.GetAgent(ctx, ao.AccountID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch agent for account %s: %w", ao.AccountID, err)
+		return false, fmt.Errorf("failed to fetch agent for account %s: %w", ao.AccountID, err)
 	}
 
 	if agent.Status == "NotConnected" {
-		return fmt.Errorf("agent for account %s is not connected", ao.AccountID)
+		return false, fmt.Errorf("agent for account %s is not connected", ao.AccountID)
 	}
 
-	return nil
+	return false, nil
 }
 
 func (s *optimizerService) updateExecutionState(ctx context.Context, ao *model.AutoOptimize) error {
