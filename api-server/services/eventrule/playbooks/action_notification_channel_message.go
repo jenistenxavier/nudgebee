@@ -60,6 +60,10 @@ func (a *notificationChannelMessageAction) Execute(ctx PlaybookActionContext, ra
 	headers := map[string]string{
 		"Content-Type": "application/json",
 	}
+	// Attach the optional X-ACTION-TOKEN when configured.
+	if config.Config.NotificationServiceToken != "" {
+		headers["X-ACTION-TOKEN"] = config.Config.NotificationServiceToken
+	}
 
 	ctx.GetLogger().Debug("sending message to notification channel",
 		"platform", params.Platform,

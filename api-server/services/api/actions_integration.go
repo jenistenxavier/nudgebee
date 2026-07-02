@@ -48,8 +48,11 @@ func notifyGoogleChatBinding(tenantId, spaceId, event string) {
 		return
 	}
 	headers := map[string]string{
-		"Content-Type":   "application/json",
-		"X-ACTION-TOKEN": config.Config.ServiceApiServerToken,
+		"Content-Type": "application/json",
+	}
+	// Attach the optional X-ACTION-TOKEN when configured.
+	if config.Config.NotificationServiceToken != "" {
+		headers["X-ACTION-TOKEN"] = config.Config.NotificationServiceToken
 	}
 	resp, err := common.HttpPost(
 		fmt.Sprintf("%s/api/integrations/google-chat/notify", config.Config.NotificationServiceUrl),
@@ -97,7 +100,10 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 		// Audit is persisted by core.CreateIntegrationConfig (CreateAudit, DB) —
 		// no MQ publish here to avoid a duplicate write.
 		llm.InvalidateLLMServerCacheForAccounts(ctx, request.AccountIds)
-		if request.IntegrationName == integrations.IntegrationGoogleChatSpace {
+		// Only announce on a genuine new binding (create). A config update of an
+		// existing space (e.g. toggling is_default) carries an IntegrationId and
+		// must not re-post the "now connected" card into the space.
+		if request.IntegrationName == integrations.IntegrationGoogleChatSpace && request.IntegrationId == "" {
 			notifyGoogleChatBinding(ctx.GetSecurityContext().GetTenantId(), request.IntegrationConfigName, "bound")
 		}
 		return
