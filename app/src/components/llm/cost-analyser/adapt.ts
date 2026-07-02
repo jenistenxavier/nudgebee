@@ -335,6 +335,9 @@ function agentModelCallToUi(mc: AgentModelCall, runId: string, agentName: string
           components: (mc.cost_breakdown.components ?? []).map((x) => ({ kind: x.kind, tokens: x.tokens, cost_usd: x.cost_usd })),
         }
       : undefined,
+    hasTrace: !!mc.has_trace,
+    promptMessages: mc.prompt_messages || undefined,
+    responseContent: mc.response_content || undefined,
   };
 }
 

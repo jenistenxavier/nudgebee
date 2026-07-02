@@ -1,7 +1,11 @@
 package user
 
 import (
+	"database/sql"
 	"fmt"
+	"strings"
+	"time"
+
 	"nudgebee/services/common"
 	core "nudgebee/services/integrations/core"
 	"nudgebee/services/internal/database"
@@ -20,16 +24,53 @@ import (
 // every query in this file uses for integration_user_accounts.
 const identityKeyExpr = `COALESCE(NULLIF(lower(iua.external_email), ''), lower(iua.external_user_id))`
 
-// upsertSyncedAccount inserts or updates one external account in the pool. It
-// never touches mapping columns (mapped_user_id / mapped_via / mapped_by) — those
-// are owned by autoMatchByEmail and the manual-mapping RPCs so a re-sync can't
-// clobber an existing link.
-func upsertSyncedAccount(db *sqlx.DB, tenantId, accountId, integrationType, integrationId string, acc core.ExternalUser) error {
-	_, err := db.Exec(`
-		INSERT INTO integration_user_accounts
+// syncedAccount is one (account scope, external user) tuple to upsert.
+type syncedAccount struct {
+	accountId string
+	acc       core.ExternalUser
+}
+
+// syncUpsertChunkSize bounds rows per statement: 500 rows × 8 params = 4000, well
+// under lib/pq's 65535-parameter cap.
+const syncUpsertChunkSize = 500
+
+// upsertSyncedAccounts batch-inserts/updates external accounts in the pool with a
+// single multi-row statement per chunk, instead of one round-trip per row. Against a
+// remote/high-latency database this is the difference between seconds and minutes
+// (a directory of N users was previously N sequential ~500ms round-trips). Like the
+// per-row form it never touches mapping columns (mapped_user_id / mapped_via /
+// mapped_by) — those are owned by autoMatchByEmail and the manual-mapping RPCs, so a
+// re-sync can't clobber an existing link. Returns the number of rows written across
+// successfully-committed chunks.
+func upsertSyncedAccounts(db *sqlx.DB, tenantId, integrationType, integrationId string, items []syncedAccount) (int, error) {
+	if tenantId == "" {
+		return 0, fmt.Errorf("upsertSyncedAccounts: tenantId is required")
+	}
+	written := 0
+	for start := 0; start < len(items); start += syncUpsertChunkSize {
+		end := start + syncUpsertChunkSize
+		if end > len(items) {
+			end = len(items)
+		}
+		chunk := items[start:end]
+
+		var b strings.Builder
+		b.WriteString(`INSERT INTO integration_user_accounts
 			(tenant_id, account_id, integration_type, integration_id, external_user_id,
 			 external_username, external_email, external_display_name, last_synced_at)
-		VALUES ($1, NULLIF($2,'')::uuid, $3, NULLIF($4,'')::uuid, $5, $6, NULLIF($7,''), $8, now())
+		VALUES `)
+		args := make([]any, 0, len(chunk)*8)
+		for i, it := range chunk {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			p := i * 8
+			fmt.Fprintf(&b, "($%d, NULLIF($%d,'')::uuid, $%d, NULLIF($%d,'')::uuid, $%d, $%d, NULLIF($%d,''), $%d, now())",
+				p+1, p+2, p+3, p+4, p+5, p+6, p+7, p+8)
+			args = append(args, tenantId, it.accountId, integrationType, integrationId, it.acc.ID,
+				it.acc.Username, it.acc.Email, it.acc.DisplayName)
+		}
+		b.WriteString(`
 		ON CONFLICT (tenant_id, COALESCE(account_id, '00000000-0000-0000-0000-000000000000'::uuid), integration_type, integration_id, external_user_id)
 		DO UPDATE SET
 			external_username     = EXCLUDED.external_username,
@@ -37,11 +78,33 @@ func upsertSyncedAccount(db *sqlx.DB, tenantId, accountId, integrationType, inte
 			external_display_name = EXCLUDED.external_display_name,
 			is_active             = true,
 			last_synced_at        = now(),
-			updated_at            = now()`,
-		tenantId, accountId, integrationType, integrationId, acc.ID,
-		acc.Username, acc.Email, acc.DisplayName,
-	)
-	return err
+			updated_at            = now()`)
+
+		if _, err := db.Exec(b.String(), args...); err != nil {
+			return written, err
+		}
+		written += len(chunk)
+	}
+	return written, nil
+}
+
+// integrationRecentlySynced reports whether this integration instance was synced
+// within `within` (max last_synced_at across its rows). Lets a sync skip an
+// integration already refreshed by a recent run, so a manual re-trigger or an
+// overlapping cron tick doesn't redo the (potentially large) fetch + upsert.
+func integrationRecentlySynced(db *sqlx.DB, tenantId, integrationId string, within time.Duration) (bool, error) {
+	if tenantId == "" {
+		return false, fmt.Errorf("integrationRecentlySynced: tenantId is required")
+	}
+	var last sql.NullTime
+	err := db.QueryRowx(
+		`SELECT max(last_synced_at) FROM integration_user_accounts WHERE tenant_id = $1::uuid AND integration_id = $2::uuid`,
+		tenantId, integrationId,
+	).Scan(&last)
+	if err != nil {
+		return false, err
+	}
+	return last.Valid && time.Since(last.Time) < within, nil
 }
 
 // reconcileIntegration prunes rows for one integration whose external user is no

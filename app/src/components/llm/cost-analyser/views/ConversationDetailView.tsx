@@ -6,15 +6,21 @@
  *   - Details                 — trace waterfall + cost composition
  */
 import * as React from 'react';
-import { Box, CircularProgress, Drawer } from '@mui/material';
+import { Box, CircularProgress, Collapse, Drawer } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
+import FullscreenIcon from '@mui/icons-material/Fullscreen';
+import FullscreenExitIcon from '@mui/icons-material/FullscreenExit';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import FormatListBulletedIcon from '@mui/icons-material/FormatListBulleted';
 import PaidOutlinedIcon from '@mui/icons-material/PaidOutlined';
 import TimerOutlinedIcon from '@mui/icons-material/TimerOutlined';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import OpenInNewOutlinedIcon from '@mui/icons-material/OpenInNewOutlined';
+import AutoAwesomeOutlinedIcon from '@mui/icons-material/AutoAwesomeOutlined';
 import { Button } from '@ui/Button';
 import { Banner } from '@ui/Banner';
+import { Modal } from '@ui/Modal';
 import { Card } from '@ui/Card';
 import { CostCallout } from '@ui/CostCallout';
 import { Chip } from '@ui/Chip';
@@ -28,16 +34,22 @@ import CostTreemap from '../components/CostTreemap';
 import ConversationUsagePanel from '../components/ConversationUsagePanel';
 import { MODEL_HUE } from '../components/palette';
 import HeaderLabel from '../components/HeaderLabel';
+import { makeSeverity, SeverityCell } from '../components/severity';
 import { fmtCost, fmtDuration, fmtTokens, runModelBreakdown, triggerLabel } from '../format';
 import { adaptAgentDetail, type AgentDetail } from '../adapt';
 import {
   getConversationAgent,
   generateConversationOptimization,
   getStoredConversationOptimization,
+  analyzePromptTrace,
+  getStoredPromptAnalysis,
   type ConversationUsageSummary,
   type ConversationOptimization,
   type OptFinding,
   type OptExemplar,
+  type PromptAnalysis,
+  type PromptComponent,
+  type PromptOptimization,
 } from '@api1/ai-cost';
 import type { ModelCall, Run, RunStatus, Step, StepToolCall } from '../types';
 
@@ -162,8 +174,1144 @@ const MODEL_CALL_SORT: Record<string, (c: ModelCall) => number | string> = {
   Latency: (c) => c.latencyMs,
 };
 
+/** One parsed prompt message (role + flattened text) for the trace modal. */
+interface ParsedPromptMessage {
+  role: string;
+  text: string;
+}
+
+/** Flatten one message "part" to a string. Our trace serializes text parts with
+ * `text` and tool parts with `name`/`content`; we also tolerate string parts and
+ * arbitrary objects (stringified) so a part is NEVER rendered as a raw object. */
+function partToText(p: unknown): string {
+  if (typeof p === 'string') return p;
+  if (p && typeof p === 'object') {
+    const o = p as { text?: string; name?: string; content?: string };
+    if (typeof o.text === 'string' && o.text) return o.text;
+    if (o.name || o.content) return [o.name, o.content].filter(Boolean).join(': ');
+    return JSON.stringify(p);
+  }
+  return p == null ? '' : String(p);
+}
+
+/** Parse the stored `prompt_messages` JSON (`[{role, parts:[{type,text|name|content}]}]`)
+ * into readable role/text blocks. `text` is ALWAYS a string — tolerates array /
+ * object `content` (other providers), string parts, and malformed JSON (shown raw)
+ * so the modal can never render a non-string child. */
+function parsePromptMessages(raw: string): ParsedPromptMessage[] {
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [{ role: '', text: raw }];
+    return arr.map((m: { role?: string; parts?: unknown[]; content?: unknown }) => {
+      let text = '';
+      if (Array.isArray(m?.parts)) text = m.parts.map(partToText).join('');
+      else if (Array.isArray(m?.content)) text = (m.content as unknown[]).map(partToText).join('');
+      else if (m?.content != null) text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+      else text = typeof m === 'string' ? m : '';
+      return { role: m?.role || '', text };
+    });
+  } catch {
+    return [{ role: '', text: raw }];
+  }
+}
+
+const traceFetchState = { loading: true, error: null as string | null, prompt: '', response: '' };
+type TraceFetchState = typeof traceFetchState;
+
+const preBox = {
+  fontFamily: 'var(--ds-font-mono, monospace)',
+  fontSize: 'var(--ds-text-caption)',
+  color: 'var(--ds-gray-700)',
+  whiteSpace: 'pre-wrap' as const,
+  wordBreak: 'break-word' as const,
+  backgroundColor: 'var(--ds-background-200)',
+  borderRadius: 'var(--ds-radius-md)',
+  padding: 'var(--ds-space-3)',
+  maxHeight: '40vh',
+  overflowY: 'auto' as const,
+};
+
+// Single-block tabs (Raw, Response) show one section at a time, so they use most
+// of the modal's height (header + tabs take the rest) instead of the 40vh card cap.
+const preBoxTall = { ...preBox, maxHeight: '66vh' };
+
+/** Small copy-to-clipboard action with brief "Copied" feedback. Renders nothing
+ * when there's no text to copy. */
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = React.useState(false);
+  if (!text) return null;
+  const onCopy = () => {
+    navigator.clipboard?.writeText(text).then(
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      },
+      () => {}
+    );
+  };
+  return (
+    <Button tone='link' size='sm' onClick={onCopy} aria-label='Copy to clipboard'>
+      {copied ? 'Copied' : 'Copy'}
+    </Button>
+  );
+}
+
+/** role → display label, Chip tone, and left-accent colour for message cards. */
+const ROLE_META: Record<string, { label: string; tone: 'neutral' | 'info' | 'success' | 'warning'; accent: string }> = {
+  system: { label: 'System', tone: 'neutral', accent: 'var(--ds-gray-400)' },
+  human: { label: 'Human', tone: 'info', accent: 'var(--ds-blue-500)' },
+  user: { label: 'Human', tone: 'info', accent: 'var(--ds-blue-500)' },
+  ai: { label: 'Assistant', tone: 'success', accent: 'var(--ds-green-500)' },
+  assistant: { label: 'Assistant', tone: 'success', accent: 'var(--ds-green-500)' },
+  tool: { label: 'Tool', tone: 'warning', accent: 'var(--ds-amber-500)' },
+};
+function roleMeta(role: string) {
+  return ROLE_META[(role || '').toLowerCase()] ?? { label: role || 'Message', tone: 'neutral' as const, accent: 'var(--ds-gray-300)' };
+}
+
+// TextEncoder is SSR-safe (global in modern Node + browsers) and avoids allocating
+// a Blob per call; reuse one instance for the UTF-8 byte count.
+const utf8Encoder = new TextEncoder();
+const byteSize = (s: string): number => utf8Encoder.encode(s).length;
+const sizeLabel = (s: string): string => {
+  const b = byteSize(s);
+  return b >= 1024 ? `${(b / 1024).toFixed(1)} KB` : `${b} B`;
+};
+const lineCount = (s: string): number => (s ? s.split('\n').length : 0);
+// Format an already-known byte count (vs sizeLabel, which measures a string).
+const fmtBytes = (b: number): string => (b >= 1024 ? `${(b / 1024).toFixed(1)} KB` : `${b} B`);
+
+/** Compact "label value" metadata pair for the trace header strip. */
+function MetaChip({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <Box sx={{ display: 'inline-flex', alignItems: 'baseline', gap: '4px', fontSize: 'var(--ds-text-caption)' }}>
+      <Box component='span' sx={{ color: 'var(--ds-gray-500)' }}>
+        {label}
+      </Box>
+      <Box component='span' sx={{ color: 'var(--ds-gray-700)', fontVariantNumeric: 'tabular-nums' }}>
+        {value}
+      </Box>
+    </Box>
+  );
+}
+
+/** One prompt message as a role-coded card: accent border, role badge, size/lines
+ * metadata, a relative size bar (where the bytes go), and a per-message copy. */
+function MessageCard({ m, maxBytes }: { m: ParsedPromptMessage; maxBytes: number }) {
+  const meta = roleMeta(m.role);
+  const pct = maxBytes > 0 ? Math.max(2, Math.round((byteSize(m.text) / maxBytes) * 100)) : 0;
+  return (
+    <Box
+      sx={{
+        borderLeft: `3px solid ${meta.accent}`,
+        borderRadius: 'var(--ds-radius-md)',
+        backgroundColor: 'var(--ds-background-200)',
+        overflow: 'hidden',
+      }}
+    >
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)', px: 'var(--ds-space-3)', py: 'var(--ds-space-2)' }}>
+        <Chip size='2xs' variant='tag' tone={meta.tone}>
+          {meta.label}
+        </Chip>
+        <Box sx={{ flex: 1 }} />
+        <Box component='span' sx={{ fontSize: '10px', color: 'var(--ds-gray-500)', fontVariantNumeric: 'tabular-nums' }}>
+          {sizeLabel(m.text)} · {lineCount(m.text)} lines
+        </Box>
+        <CopyButton text={m.text} />
+      </Box>
+      <Box sx={{ height: 3, backgroundColor: 'var(--ds-background-300)' }}>
+        <Box sx={{ width: `${pct}%`, height: '100%', backgroundColor: meta.accent, opacity: 0.7 }} />
+      </Box>
+      <Box sx={{ ...preBox, borderRadius: 0, backgroundColor: 'transparent', maxHeight: '32vh' }}>
+        {m.text || (
+          <Box component='span' sx={{ color: 'var(--ds-gray-400)' }}>
+            (empty)
+          </Box>
+        )}
+      </Box>
+    </Box>
+  );
+}
+
+/** Heuristic: split a system prompt into sections on markdown headings (# .. ######).
+ * Returns a single untitled section when there are no headings (nothing to split). */
+function splitSections(text: string): { title: string; body: string }[] {
+  const headingRe = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/;
+  const out: { title: string; body: string[] }[] = [];
+  let cur: { title: string; body: string[] } | null = null;
+  for (const line of text.split('\n')) {
+    const m = headingRe.exec(line);
+    if (m) {
+      if (cur) out.push(cur);
+      cur = { title: m[2].trim(), body: [] };
+    } else {
+      if (!cur) cur = { title: '', body: [] };
+      cur.body.push(line);
+    }
+  }
+  if (cur) out.push(cur);
+  return out.map((s) => ({ title: s.title, body: s.body.join('\n').trim() })).filter((s) => s.title || s.body);
+}
+
+/** Collapsible section card for the System tab: heading + size/lines + copy, body
+ * in a scroll box. */
+function SectionCard({ title, body, defaultOpen }: { title: string; body: string; defaultOpen: boolean }) {
+  const [open, setOpen] = React.useState(defaultOpen);
+  return (
+    <Box sx={{ border: '1px solid var(--ds-gray-200)', borderRadius: 'var(--ds-radius-md)', overflow: 'hidden' }}>
+      <Box
+        onClick={() => setOpen((o) => !o)}
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--ds-space-2)',
+          px: 'var(--ds-space-3)',
+          py: 'var(--ds-space-2)',
+          cursor: 'pointer',
+          backgroundColor: 'var(--ds-background-200)',
+        }}
+      >
+        {open ? (
+          <ExpandMoreIcon sx={{ fontSize: 16, color: 'var(--ds-gray-500)' }} />
+        ) : (
+          <ChevronRightIcon sx={{ fontSize: 16, color: 'var(--ds-gray-500)' }} />
+        )}
+        <Box
+          component='span'
+          sx={{ flex: 1, fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-medium)', color: 'var(--ds-gray-700)' }}
+        >
+          {title || 'Section'}
+        </Box>
+        <Box component='span' sx={{ fontSize: '10px', color: 'var(--ds-gray-500)', fontVariantNumeric: 'tabular-nums' }}>
+          {sizeLabel(body)} · {lineCount(body)} lines
+        </Box>
+        <CopyButton text={body} />
+      </Box>
+      <Collapse in={open}>
+        <Box sx={{ ...preBox, borderRadius: 0, maxHeight: '52vh' }}>
+          {body || (
+            <Box component='span' sx={{ color: 'var(--ds-gray-400)' }}>
+              (empty)
+            </Box>
+          )}
+        </Box>
+      </Collapse>
+    </Box>
+  );
+}
+
+/** System tab: sub-tabs per system message (when >1), each split into collapsible
+ * section cards by heading. Falls back to a single scroll block when a message has
+ * no detectable headings. */
+function SystemTab({ msgs }: { msgs: ParsedPromptMessage[] }) {
+  const [active, setActive] = React.useState(0);
+  const idx = Math.min(active, Math.max(0, msgs.length - 1));
+  const text = msgs[idx]?.text ?? '';
+  const sections = React.useMemo(() => splitSections(text), [text]);
+  if (!msgs.length) {
+    return <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>No system prompt captured.</Box>;
+  }
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-2)' }}>
+      {msgs.length > 1 && (
+        <ToggleGroup
+          selection='single'
+          size='sm'
+          ariaLabel='System message'
+          value={String(idx)}
+          onChange={(v) => setActive(Number(v))}
+          options={msgs.map((_, i) => ({ value: String(i), label: `System ${i + 1}` }))}
+        />
+      )}
+      {sections.length > 1 ? (
+        sections.map((s, i) => <SectionCard key={i} title={s.title} body={s.body} defaultOpen={sections.length <= 3} />)
+      ) : (
+        <Box sx={preBoxTall}>{text || 'No system prompt captured.'}</Box>
+      )}
+    </Box>
+  );
+}
+
+// ─── Prompt analysis ("Analyze" action) ────────────────────────────────────
+// Follows the "Analyze & Optimize an LLM Prompt for Token Cost" methodology. The
+// FRONTEND owns measurement: it builds and measures the component tree from the real
+// prompt (a macro node per message → section leaves), and the header total uses the
+// call's ACTUAL billed tokens — the model never defines sizes (it can't reproduce a
+// large prompt verbatim, which would collapse the totals). The model only classifies
+// each component by id (static/dynamic) and returns the qualitative judgment: cache
+// verdict, declared-vs-used dead weight, and ranked optimizations. Phase model mirrors
+// the Optimize tab: init = cheap stored read (no LLM), idle, loading, data/error.
+type PromptAnalysisPhase = 'init' | 'idle' | 'loading' | 'data' | 'error';
+
+interface PromptAnalysisState {
+  phase: PromptAnalysisPhase;
+  error: string | null;
+  data: PromptAnalysis | null;
+}
+
+interface MeasuredTree {
+  components: PromptComponent[];
+  serialized: string; // the id|parent|name|role|loc|size|tokens|%|preview table for the LLM
+  totalBytes: number;
+  totalTokens: number; // chars ÷ 4 text estimate (header shows billed tokens instead)
+}
+
+/** Build and MEASURE the component tree from the real prompt — the source of truth.
+ * One macro node per message, split on markdown headings (splitSections) into section
+ * leaves. Send order (message, then section) is preserved for the cache-prefix check;
+ * leaves carry the real content; macros roll up their children. Exact bytes/lines and
+ * ~tokens (chars ÷ 4). Also emits the compact table (with content previews) the model
+ * classifies by id. */
+function measurePromptComponents(messages: ParsedPromptMessage[]): MeasuredTree {
+  const components: PromptComponent[] = [];
+  const measure = (text: string) => ({ size: byteSize(text), loc: lineCount(text), tokens: Math.round(text.length / 4) });
+
+  messages.forEach((m, i) => {
+    const role = m.role || 'message';
+    const label = roleMeta(role).label;
+    const macroId = `${i + 1}`;
+    const sections = splitSections(m.text).filter((s) => s.title || s.body);
+    if (sections.length > 1) {
+      // Macro group + one leaf per section.
+      components.push({ id: macroId, name: `${label} #${i + 1}`, role, loc: 0, size: 0, tokens: 0, pct: 0 });
+      sections.forEach((s, j) => {
+        const text = s.title ? `${s.title}\n${s.body}` : s.body;
+        components.push({
+          id: `${macroId}.${j + 1}`,
+          parent: macroId,
+          name: s.title || `part ${j + 1}`,
+          role,
+          ...measure(text),
+          pct: 0,
+          content: text,
+        });
+      });
+    } else {
+      // Single leaf for the whole message.
+      const text = sections[0] ? (sections[0].title ? `${sections[0].title}\n${sections[0].body}` : sections[0].body) : m.text;
+      components.push({ id: macroId, name: `${label} #${i + 1}`, role, ...measure(text), pct: 0, content: text });
+    }
+  });
+
+  // Roll macros up from their children, then compute the leaf-token total + per-node %.
+  const childrenOf = new Map<string, PromptComponent[]>();
+  for (const c of components) {
+    if (c.parent) {
+      if (!childrenOf.has(c.parent)) childrenOf.set(c.parent, []);
+      childrenOf.get(c.parent)!.push(c);
+    }
+  }
+  const isLeaf = (c: PromptComponent) => !childrenOf.has(c.id);
+  for (const c of components) {
+    if (!isLeaf(c)) {
+      const kids = childrenOf.get(c.id)!;
+      c.size = kids.reduce((a, k) => a + k.size, 0);
+      c.loc = kids.reduce((a, k) => a + k.loc, 0);
+      c.tokens = kids.reduce((a, k) => a + k.tokens, 0);
+    }
+  }
+  const totalTokens = components.filter(isLeaf).reduce((a, c) => a + c.tokens, 0) || 1;
+  const totalBytes = components.filter(isLeaf).reduce((a, c) => a + c.size, 0);
+  for (const c of components) c.pct = (c.tokens / totalTokens) * 100;
+
+  const preview = (s?: string) => (s ? `"${s.replace(/\s+/g, ' ').trim().slice(0, 160)}${s.length > 160 ? '…' : ''}"` : '(group)');
+  const serialized = components
+    .map(
+      (c) =>
+        `${c.id} | parent=${c.parent || '-'} | ${c.name} | role=${c.role} | loc=${c.loc} | size=${c.size}B | tokens≈${c.tokens} | ${c.pct.toFixed(
+          1
+        )}% | ${preview(c.content)}`
+    )
+    .join('\n');
+  return { components, serialized, totalBytes, totalTokens };
+}
+
+/** Merge the model's per-id classifications/notes onto the frontend-measured tree. */
+function applyClassifications(components: PromptComponent[], classifications?: PromptAnalysis['classifications']): PromptComponent[] {
+  if (!classifications) return components;
+  return components.map((c) => {
+    const ann = classifications[c.id];
+    if (!ann) return c;
+    if (typeof ann === 'string') return { ...c, classification: ann };
+    return { ...c, classification: ann.classification ?? c.classification, note: ann.note ?? c.note };
+  });
+}
+
+interface PromptAnalysisInput {
+  callId?: string;
+  accountId?: string;
+  promptJson: string;
+  measured: string;
+  responseContent: string;
+}
+
+function usePromptAnalysis(input: PromptAnalysisInput): PromptAnalysisState & { run: () => void } {
+  const { callId, accountId, promptJson, measured, responseContent } = input;
+  const [state, setState] = React.useState<PromptAnalysisState>({ phase: 'init', error: null, data: null });
+  const ctrlRef = React.useRef<AbortController | null>(null);
+
+  // Cheap cached-result read on open / call change (no LLM).
+  React.useEffect(() => {
+    if (!callId || !accountId) {
+      setState({ phase: 'idle', error: null, data: null });
+      return;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    setState({ phase: 'init', error: null, data: null });
+    getStoredPromptAnalysis({ accountId, callId }, controller.signal)
+      .then((cached) => {
+        if (cancelled) return;
+        if (cached) setState({ phase: 'data', error: null, data: cached.analysis });
+        else setState({ phase: 'idle', error: null, data: null });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ phase: 'idle', error: null, data: null }); // read failure → offer to analyze
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [callId, accountId]);
+
+  const run = React.useCallback(() => {
+    if (!callId || !accountId || !promptJson) return;
+    ctrlRef.current?.abort();
+    const controller = new AbortController();
+    ctrlRef.current = controller;
+    setState((s) => ({ ...s, phase: 'loading', error: null }));
+    analyzePromptTrace({ accountId, callId, promptJson, measured, responseContent }, controller.signal)
+      .then((d) => {
+        if (controller.signal.aborted) return;
+        if (d) setState({ phase: 'data', error: null, data: d });
+        else setState({ phase: 'error', error: 'The analysis response could not be parsed', data: null });
+      })
+      .catch((e) => {
+        if (controller.signal.aborted) return;
+        setState({ phase: 'error', error: e instanceof Error ? e.message : 'Failed to analyze', data: null });
+      });
+  }, [callId, accountId, promptJson, measured, responseContent]);
+
+  React.useEffect(() => () => ctrlRef.current?.abort(), []);
+
+  return { ...state, run };
+}
+
+// static = byte-identical every call (cacheable, good); dynamic = varies; mixed = both.
+const CLASSIFICATION_TONE: Record<string, 'success' | 'warning' | 'neutral'> = {
+  static: 'success',
+  dynamic: 'warning',
+  mixed: 'neutral',
+};
+// The three levers, in priority order, each with a distinct hue for its chip.
+const LEVER_META: Record<string, { label: string; hue: 'blue' | 'violet' | 'teal' }> = {
+  count: { label: 'token count', hue: 'blue' },
+  cache: { label: 'cache rate', hue: 'violet' },
+  relevance: { label: 'relevance', hue: 'teal' },
+};
+// Implementation effort: low = quick text edit/reorder, high = cross-agent code change.
+const EFFORT_TONE: Record<string, 'success' | 'warning' | 'critical' | 'neutral'> = {
+  low: 'success',
+  medium: 'warning',
+  high: 'critical',
+};
+
+const numCell = { fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)', fontVariantNumeric: 'tabular-nums' } as const;
+
+// Index the flat component list into a parent→children tree (children keep their
+// returned order) plus an id→component lookup for resolving parent names.
+function buildComponentTree(components: PromptComponent[]): {
+  childrenOf: Map<string, PromptComponent[]>;
+  byId: Map<string, PromptComponent>;
+  roots: PromptComponent[];
+} {
+  const childrenOf = new Map<string, PromptComponent[]>();
+  const byId = new Map<string, PromptComponent>();
+  for (const c of components) byId.set(c.id, c);
+  for (const c of components) {
+    const p = c.parent && byId.has(c.parent) ? c.parent : '';
+    if (!childrenOf.has(p)) childrenOf.set(p, []);
+    childrenOf.get(p)!.push(c);
+  }
+  const roots = childrenOf.get('') ?? [];
+  return { childrenOf, byId, roots };
+}
+
+/** One node of the component tree as an accordion. Macro nodes group sub-components
+ * (rendered nested + indented); the toggle reveals the metadata grid and, for leaf
+ * nodes, the verbatim content as a copyable JSON block (component / parent / loc /
+ * size / content). */
+function ComponentNode({
+  c,
+  childrenOf,
+  byId,
+  depth,
+  defaultOpen,
+}: {
+  c: PromptComponent;
+  childrenOf: Map<string, PromptComponent[]>;
+  byId: Map<string, PromptComponent>;
+  depth: number;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = React.useState(!!defaultOpen);
+  const kids = childrenOf.get(c.id) ?? [];
+  const isGroup = kids.length > 0;
+  const tone = CLASSIFICATION_TONE[(c.classification || '').toLowerCase()] ?? 'neutral';
+  const bar = Math.min(100, Math.max(2, Math.round(c.pct)));
+  const parentName = c.parent ? byId.get(c.parent)?.name : undefined;
+  // The "json which shows the content of the component" — component / parent / loc / size / content.
+  const contentJson = React.useMemo(
+    () =>
+      JSON.stringify(
+        { component: c.name, parent: parentName ?? null, loc: c.loc, size: fmtBytes(c.size), tokens: c.tokens, content: c.content ?? '' },
+        null,
+        2
+      ),
+    [c.name, parentName, c.loc, c.size, c.tokens, c.content]
+  );
+  return (
+    <Box sx={{ borderTop: depth === 0 ? '1px solid var(--ds-gray-200)' : 'none' }}>
+      <Box
+        onClick={() => setOpen((o) => !o)}
+        role='button'
+        aria-expanded={open}
+        sx={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '4px',
+          py: 'var(--ds-space-2)',
+          pl: `calc(${depth} * var(--ds-space-4))`,
+          cursor: 'pointer',
+          '&:hover': { backgroundColor: 'var(--ds-background-200)' },
+        }}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)', flexWrap: 'wrap' }}>
+          {open ? (
+            <ExpandMoreIcon sx={{ fontSize: 16, color: 'var(--ds-gray-500)' }} />
+          ) : (
+            <ChevronRightIcon sx={{ fontSize: 16, color: 'var(--ds-gray-500)' }} />
+          )}
+          <Box
+            component='span'
+            sx={{
+              fontSize: 'var(--ds-text-caption)',
+              fontWeight: depth === 0 ? 'var(--ds-font-weight-semibold)' : 'var(--ds-font-weight-medium)',
+              color: 'var(--ds-gray-700)',
+            }}
+          >
+            {c.name}
+          </Box>
+          {isGroup && (
+            <Chip size='2xs' variant='tag' hue='slate'>
+              {kids.length}
+            </Chip>
+          )}
+          {c.classification && (
+            <Chip size='2xs' variant='tag' tone={tone}>
+              {c.classification}
+            </Chip>
+          )}
+          <Box sx={{ flex: 1 }} />
+          <Box component='span' sx={numCell}>
+            {fmtTokens(c.tokens)} tok · {Math.round(c.pct)}%
+          </Box>
+          <Box component='span' sx={{ ...numCell, color: 'var(--ds-gray-500)' }}>
+            {fmtBytes(c.size)} · {c.loc} LOC
+          </Box>
+        </Box>
+        <Box sx={{ height: 4, backgroundColor: 'var(--ds-background-300)', borderRadius: 2, ml: 'calc(16px + var(--ds-space-2))' }}>
+          <Box sx={{ width: `${bar}%`, height: '100%', backgroundColor: 'var(--ds-blue-400)', borderRadius: 2, opacity: 0.7 }} />
+        </Box>
+      </Box>
+      <Collapse in={open}>
+        <Box sx={{ pl: `calc(${depth} * var(--ds-space-4))` }}>
+          <Box
+            sx={{
+              ml: 'calc(16px + var(--ds-space-2))',
+              mb: 'var(--ds-space-2)',
+              p: 'var(--ds-space-3)',
+              backgroundColor: 'var(--ds-background-200)',
+              borderRadius: 'var(--ds-radius-md)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 'var(--ds-space-2)',
+            }}
+          >
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--ds-space-2) var(--ds-space-4)' }}>
+              <MetaChip label='Component' value={c.name} />
+              <MetaChip label='Parent' value={parentName ?? '—'} />
+              {c.role && <MetaChip label='Role' value={c.role} />}
+              {c.classification && <MetaChip label='Class' value={c.classification} />}
+              <MetaChip label='LOC' value={c.loc} />
+              <MetaChip label='Size' value={fmtBytes(c.size)} />
+              <MetaChip label='Tokens' value={`~${fmtTokens(c.tokens)}`} />
+              <MetaChip label='Share' value={`${Math.round(c.pct)}%`} />
+            </Box>
+            {c.note && <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)' }}>{c.note}</Box>}
+            {isGroup ? (
+              <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-400)' }}>
+                Macro group of {kids.length} sub-component{kids.length === 1 ? '' : 's'} — content lives in the children below.
+              </Box>
+            ) : (
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <Box component='span' sx={{ fontSize: '10px', color: 'var(--ds-gray-500)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                    content (json)
+                  </Box>
+                  <CopyButton text={contentJson} />
+                </Box>
+                <Box sx={{ ...preBox, maxHeight: '32vh' }}>{contentJson}</Box>
+              </Box>
+            )}
+          </Box>
+          {kids.map((k) => (
+            <ComponentNode key={k.id} c={k} childrenOf={childrenOf} byId={byId} depth={depth + 1} defaultOpen={false} />
+          ))}
+        </Box>
+      </Collapse>
+    </Box>
+  );
+}
+
+/** One ranked optimization: lever + technique chips, projected saving, the explicit
+ * accuracy-impact note (always shown — the methodology's core guardrail), and detail. */
+function OptimizationCard({ o }: { o: PromptOptimization }) {
+  const lever = LEVER_META[(o.lever || '').toLowerCase()];
+  return (
+    <Box
+      sx={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--ds-space-3)', py: 'var(--ds-space-3)', borderTop: '1px solid var(--ds-gray-200)' }}
+    >
+      <Box sx={{ minWidth: 96 }}>
+        <Box
+          sx={{
+            fontSize: 'var(--ds-text-body)',
+            fontWeight: 'var(--ds-font-weight-semibold)',
+            color: 'var(--ds-green-700)',
+            fontVariantNumeric: 'tabular-nums',
+          }}
+        >
+          −{fmtTokens(o.projected_token_saving)} tok
+        </Box>
+        {o.projected_cost_saving_pct != null && o.projected_cost_saving_pct > 0 && (
+          <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>~{Math.round(o.projected_cost_saving_pct)}% cost</Box>
+        )}
+      </Box>
+      <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)', minWidth: 0 }}>
+        <Box sx={{ display: 'flex', gap: 'var(--ds-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+          {lever && (
+            <Chip size='2xs' variant='tag' hue={lever.hue}>
+              {lever.label}
+            </Chip>
+          )}
+          {o.technique && (
+            <Chip size='2xs' variant='tag' hue='slate'>
+              {o.technique}
+            </Chip>
+          )}
+          {o.effort && <Label tone={EFFORT_TONE[(o.effort || '').toLowerCase()] ?? 'neutral'} text={`${o.effort} effort`} />}
+          <Box sx={{ fontWeight: 'var(--ds-font-weight-semibold)', color: 'var(--ds-gray-700)' }}>{o.title}</Box>
+        </Box>
+        {o.detail && <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)' }}>{o.detail}</Box>}
+        {o.accuracy_impact && (
+          <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)' }}>
+            <Box component='span' sx={{ color: 'var(--ds-gray-500)' }}>
+              accuracy:
+            </Box>{' '}
+            {o.accuracy_impact}
+          </Box>
+        )}
+      </Box>
+    </Box>
+  );
+}
+
+function AnalysisSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <Box>
+      <Box
+        sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-semibold)', color: 'var(--ds-gray-600)', mb: 'var(--ds-space-1)' }}
+      >
+        {title}
+      </Box>
+      {children}
+    </Box>
+  );
+}
+
+/** The Analysis tab body: drives off the usePromptAnalysis phase. */
+function PromptAnalysisPanel({
+  state,
+  measured,
+  billedTokens,
+  cachedTokens,
+  rawTruncated,
+  canRun,
+  onRun,
+}: {
+  state: PromptAnalysisState;
+  measured: MeasuredTree;
+  billedTokens?: number;
+  cachedTokens?: number;
+  rawTruncated?: boolean;
+  canRun: boolean;
+  onRun: () => void;
+}) {
+  if (state.phase === 'init') {
+    return (
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--ds-space-3)', minHeight: 120 }}>
+        <CircularProgress size={20} />
+        <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>Checking for a previous analysis…</Box>
+      </Box>
+    );
+  }
+  if (state.phase === 'loading') {
+    return (
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--ds-space-3)', minHeight: 140 }}>
+        <CircularProgress size={22} />
+        <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>
+          Analyzing this prompt… this runs an LLM analysis and can take up to a minute.
+        </Box>
+      </Box>
+    );
+  }
+  if (state.phase === 'idle') {
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 'var(--ds-space-3)', py: 'var(--ds-space-2)' }}>
+        <Box sx={{ fontSize: 'var(--ds-text-body)', color: 'var(--ds-gray-600)', maxWidth: 640 }}>
+          Measure this prompt and find where to cut token cost and latency without hurting accuracy — the components that dominate the tokens, the
+          static-vs-dynamic split and cache-prefix layout, declared-but-unused dead weight, and ranked fixes. Runs one on-demand analysis.
+        </Box>
+        <Button
+          tone='primary'
+          size='sm'
+          onClick={onRun}
+          disabled={!canRun}
+          icon={<AutoAwesomeOutlinedIcon sx={{ fontSize: 16 }} />}
+          id='analyze-prompt-run'
+        >
+          Analyze prompt
+        </Button>
+        {!canRun && (
+          <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>No prompt is available to analyze for this call.</Box>
+        )}
+      </Box>
+    );
+  }
+  if (state.phase === 'error') {
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)' }}>
+        <Banner tone='critical' title='Could not analyze prompt' message={state.error ?? 'Analysis failed'} />
+        <Box>
+          <Button tone='secondary' size='sm' onClick={onRun} disabled={!canRun} id='analyze-prompt-retry'>
+            Try again
+          </Button>
+        </Box>
+      </Box>
+    );
+  }
+  if (!state.data) return null;
+  const a = state.data;
+  const optimizations = a.optimizations ?? [];
+  const deadWeight = a.dead_weight ?? [];
+  // Frontend-owned tree + the model's per-id classifications merged in.
+  const components = applyClassifications(measured.components, a.classifications);
+  const tree = buildComponentTree(components);
+  const verdict = a.cache_verdict;
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-4)', maxHeight: '64vh', overflowY: 'auto', pr: 'var(--ds-space-1)' }}>
+      {rawTruncated && (
+        <Banner
+          tone='warning'
+          title='Raw sample was truncated'
+          message='The prompt exceeded the analysis size cap, so the model saw a truncated sample — its classifications/optimizations may miss content past the cap. The measured component sizes below are complete.'
+        />
+      )}
+
+      {/* Verdict + authoritative totals (billed tokens from the call). */}
+      <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--ds-space-4)', flexWrap: 'wrap' }}>
+        <Box sx={{ flex: 1, minWidth: 240 }}>
+          <Box sx={{ fontSize: 'var(--ds-text-body)', color: 'var(--ds-gray-700)' }}>{a.summary}</Box>
+          {a.dominant_buckets && (
+            <Box sx={{ mt: 'var(--ds-space-1)', fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)' }}>
+              <Box component='span' sx={{ color: 'var(--ds-gray-500)' }}>
+                Dominant:
+              </Box>{' '}
+              {a.dominant_buckets}
+            </Box>
+          )}
+          <Box sx={{ mt: 'var(--ds-space-2)' }}>
+            <Button tone='link' size='sm' onClick={onRun} disabled={!canRun} id='analyze-prompt-rerun'>
+              Re-analyze
+            </Button>
+          </Box>
+        </Box>
+        <Box sx={{ textAlign: 'right' }}>
+          <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>Billed input</Box>
+          <Box
+            sx={{
+              fontSize: 'var(--ds-text-body-lg)',
+              fontWeight: 'var(--ds-font-weight-semibold)',
+              color: 'var(--ds-gray-700)',
+              fontVariantNumeric: 'tabular-nums',
+            }}
+          >
+            {billedTokens != null ? `${fmtTokens(billedTokens)} tok` : `~${fmtTokens(measured.totalTokens)} tok`}
+          </Box>
+          <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>
+            {cachedTokens ? `${fmtTokens(cachedTokens)} cached · ` : ''}
+            {fmtBytes(measured.totalBytes)}
+          </Box>
+        </Box>
+      </Box>
+
+      {/* Component tree (macro → sub) with LOC / size / tokens / % and content JSON. */}
+      <AnalysisSection title='Components (macro → sub)'>
+        {tree.roots.length ? (
+          tree.roots.map((c) => <ComponentNode key={c.id} c={c} childrenOf={tree.childrenOf} byId={tree.byId} depth={0} defaultOpen />)
+        ) : (
+          <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>No components measured.</Box>
+        )}
+      </AnalysisSection>
+
+      {/* Static/dynamic + cache-prefix verdict. */}
+      {verdict && (
+        <AnalysisSection title='Cache-prefix verdict'>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)', flexWrap: 'wrap' }}>
+            <Label
+              tone={verdict.prefix_contiguous ? 'success' : 'critical'}
+              text={verdict.prefix_contiguous ? 'Static prefix is contiguous' : 'Prefix is poisoned'}
+            />
+            <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)' }}>{verdict.detail}</Box>
+          </Box>
+          {verdict.poisoning && (
+            <Box sx={{ mt: 'var(--ds-space-1)', fontSize: 'var(--ds-text-caption)', color: 'var(--ds-red-700)' }}>Poisoning: {verdict.poisoning}</Box>
+          )}
+        </AnalysisSection>
+      )}
+
+      {/* Declared-vs-used dead weight. */}
+      <AnalysisSection title='Dead weight (declared but unused)'>
+        {deadWeight.length ? (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)' }}>
+            {deadWeight.map((d, i) => (
+              <Box key={i} sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)' }}>
+                <Box component='span' sx={{ fontWeight: 'var(--ds-font-weight-medium)' }}>
+                  {d.name}
+                </Box>
+                <Box component='span' sx={{ color: 'var(--ds-gray-500)', fontVariantNumeric: 'tabular-nums' }}>
+                  {' '}
+                  · ~{fmtTokens(d.tokens)} tok
+                </Box>
+                {d.detail && (
+                  <Box component='span' sx={{ color: 'var(--ds-gray-600)' }}>
+                    {' '}
+                    — {d.detail}
+                  </Box>
+                )}
+              </Box>
+            ))}
+          </Box>
+        ) : (
+          <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>None found — every declared section appears to be used.</Box>
+        )}
+      </AnalysisSection>
+
+      {/* Ranked optimizations w/ projected saving + explicit accuracy impact. */}
+      <AnalysisSection title='Optimizations (ranked by saving)'>
+        {optimizations.length ? (
+          <Box>
+            {optimizations.map((o, i) => (
+              <OptimizationCard key={i} o={o} />
+            ))}
+          </Box>
+        ) : (
+          <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>No optimizations suggested — the prompt looks tight.</Box>
+        )}
+      </AnalysisSection>
+
+      {a.concrete_instance && (
+        <AnalysisSection title='Validated against one call'>
+          <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)' }}>{a.concrete_instance}</Box>
+        </AnalysisSection>
+      )}
+
+      <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-400)' }}>
+        Billed input is the call&apos;s actual usage; component LOC/size are measured client-side from the stored prompt and component tokens are a
+        chars÷4 estimate (so the per-component total can differ from billed). The static/dynamic split, cache verdict, dead weight, and optimizations
+        are the model&apos;s judgment.
+      </Box>
+    </Box>
+  );
+}
+
+type TraceTab = 'conversation' | 'system' | 'tools' | 'response' | 'raw' | 'analysis';
+
+/** Lazy "view prompt" modal: fetches one model call's prompt/response by id (the
+ * same ai_get_conversation_agent action, scoped to model_call_id) only on open.
+ * Renders a metadata header + purpose tabs (Conversation / System / Tools /
+ * Response / Raw) over role-coded message cards. */
+function PromptTraceModal({
+  call,
+  conversationId,
+  accountId,
+  agentId,
+  onClose,
+}: {
+  call: ModelCall | null;
+  conversationId?: string;
+  accountId?: string;
+  agentId?: string;
+  onClose: () => void;
+}) {
+  const [state, setState] = React.useState<TraceFetchState>(traceFetchState);
+  // Depend on the id (primitive), not the call object — a new object reference with
+  // the same id must not trigger a redundant refetch.
+  const callId = call?.callId;
+
+  React.useEffect(() => {
+    if (!callId || !conversationId || !accountId || !agentId) return;
+    const ac = new AbortController();
+    setState({ loading: true, error: null, prompt: '', response: '' });
+    getConversationAgent({ conversationId, accountId, agentId, modelCallId: callId }, ac.signal)
+      .then((d) => {
+        if (ac.signal.aborted) return;
+        const mc = d?.model_calls?.[0];
+        setState({ loading: false, error: null, prompt: mc?.prompt_messages ?? '', response: mc?.response_content ?? '' });
+      })
+      .catch((e) => {
+        if (!ac.signal.aborted)
+          setState({ loading: false, error: e instanceof Error ? e.message : 'Failed to load trace', prompt: '', response: '' });
+      });
+    return () => ac.abort();
+  }, [callId, conversationId, accountId, agentId]);
+
+  const messages = React.useMemo(() => parsePromptMessages(state.prompt), [state.prompt]);
+  // Readable, copyable form of the whole prompt: each message as "[role]\n<text>".
+  const promptCopyText = React.useMemo(() => messages.map((m) => (m.role ? `[${m.role}]\n` : '') + m.text).join('\n\n'), [messages]);
+
+  const lc = (r: string) => (r || '').toLowerCase();
+  const systemMsgs = React.useMemo(() => messages.filter((m) => lc(m.role) === 'system'), [messages]);
+  const toolMsgs = React.useMemo(() => messages.filter((m) => lc(m.role) === 'tool'), [messages]);
+  const convoMsgs = React.useMemo(() => messages.filter((m) => !['system', 'tool'].includes(lc(m.role))), [messages]);
+  const maxBytes = React.useMemo(() => messages.reduce((mx, m) => Math.max(mx, byteSize(m.text)), 0), [messages]);
+  // Pretty-print the raw prompt JSON for the Raw tab (fall back to the literal string).
+  const rawPretty = React.useMemo(() => {
+    try {
+      return JSON.stringify(JSON.parse(state.prompt), null, 2);
+    } catch {
+      return state.prompt;
+    }
+  }, [state.prompt]);
+
+  // Prompt analysis ("Analyze" action) — measure the real artifact client-side,
+  // then send the measured component table + raw JSON + response to @LLM for the
+  // judgment (classifications + optimizations). The header uses the call's ACTUAL
+  // billed tokens, not a text estimate.
+  const measured = React.useMemo(() => measurePromptComponents(messages), [messages]);
+  const promptTruncated = state.prompt.length > 120_000;
+  const analysis = usePromptAnalysis({
+    callId,
+    accountId,
+    promptJson: state.prompt,
+    measured: measured.serialized,
+    responseContent: state.response,
+  });
+  const analysisCanRun = !!callId && !!accountId && !!state.prompt;
+
+  const [tab, setTab] = React.useState<TraceTab>('conversation');
+  const [maximized, setMaximized] = React.useState(false);
+  // Tabs by purpose; only non-empty buckets show (Response/Raw/Analysis always). If
+  // the current tab has no content for this trace, fall back to the first available.
+  const tabs: { value: TraceTab; label: string }[] = [
+    ...(convoMsgs.length ? [{ value: 'conversation' as const, label: `Conversation (${convoMsgs.length})` }] : []),
+    ...(systemMsgs.length ? [{ value: 'system' as const, label: `System (${systemMsgs.length})` }] : []),
+    ...(toolMsgs.length ? [{ value: 'tools' as const, label: `Tools (${toolMsgs.length})` }] : []),
+    { value: 'response' as const, label: 'Response' },
+    { value: 'raw' as const, label: 'Raw' },
+    { value: 'analysis' as const, label: 'Analysis' },
+  ];
+  const activeTab = tabs.some((t) => t.value === tab) ? tab : tabs[0].value;
+
+  const truncated = (call?.stopReason || '').toUpperCase().includes('MAX');
+  const cardList = (list: ParsedPromptMessage[], empty: string) =>
+    list.length ? (
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-2)' }}>
+        {list.map((m, i) => (
+          <MessageCard key={i} m={m} maxBytes={maxBytes} />
+        ))}
+      </Box>
+    ) : (
+      <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>{empty}</Box>
+    );
+
+  return (
+    <Modal
+      width={maximized ? 'xl' : 'lg'}
+      title='Prompt & Response'
+      open={!!call}
+      handleClose={onClose}
+      onClose={onClose}
+      maxHeight={maximized ? '96vh' : '85vh'}
+    >
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)', padding: '0 var(--ds-space-5) var(--ds-space-5)' }}>
+        {state.loading ? (
+          <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 160 }}>
+            <CircularProgress size={22} />
+          </Box>
+        ) : state.error ? (
+          <Banner tone='critical' title='Could not load trace' message={state.error} />
+        ) : (
+          <>
+            {/* Metadata header: provenance + real token/cost figures + quality badges. */}
+            {call && (
+              <Box
+                sx={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  alignItems: 'center',
+                  gap: 'var(--ds-space-2) var(--ds-space-4)',
+                  padding: 'var(--ds-space-3)',
+                  backgroundColor: 'var(--ds-background-200)',
+                  borderRadius: 'var(--ds-radius-md)',
+                }}
+              >
+                <MetaChip
+                  label='Model'
+                  value={`${call.model}${call.provider && call.provider !== ('—' as typeof call.provider) ? ` · ${call.provider}` : ''}`}
+                />
+                {call.agentName && <MetaChip label='Agent' value={call.agentName} />}
+                <MetaChip
+                  label='In'
+                  value={`${fmtTokens(call.inputTokens)}${call.cachedInputTokens ? ` (${fmtTokens(call.cachedInputTokens)} cached)` : ''}`}
+                />
+                <MetaChip label='Out' value={fmtTokens(call.outputTokens)} />
+                {!!call.thinkingTokens && <MetaChip label='Thinking' value={fmtTokens(call.thinkingTokens)} />}
+                <MetaChip label='Cost' value={fmtCost(call.totalCost)} />
+                <MetaChip label='Latency' value={fmtDuration(call.latencyMs)} />
+                {messages.length > 0 && <MetaChip label='Prompt' value={`${sizeLabel(state.prompt)} · ${messages.length} msgs`} />}
+                <Box sx={{ flex: 1 }} />
+                <Box sx={{ display: 'inline-flex', gap: 'var(--ds-space-1)' }}>
+                  {call.cached && (
+                    <Chip size='2xs' variant='tag' tone='success'>
+                      cached
+                    </Chip>
+                  )}
+                  {call.retry && (
+                    <Chip size='2xs' variant='tag' tone='warning'>
+                      retry
+                    </Chip>
+                  )}
+                  {truncated && (
+                    <Box component='span' title={`stop_reason: ${call.stopReason}`} sx={{ display: 'inline-flex' }}>
+                      <Chip size='2xs' variant='tag' tone='warning'>
+                        truncated
+                      </Chip>
+                    </Box>
+                  )}
+                  {call.error && (
+                    <Box component='span' title={call.errorMessage || 'Request failed'} sx={{ display: 'inline-flex' }}>
+                      <Chip size='2xs' variant='tag' tone='critical'>
+                        error
+                      </Chip>
+                    </Box>
+                  )}
+                </Box>
+              </Box>
+            )}
+
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--ds-space-2)' }}>
+              <ToggleGroup
+                selection='single'
+                size='sm'
+                ariaLabel='Trace section'
+                value={activeTab}
+                onChange={(v) => setTab(v as TraceTab)}
+                options={tabs}
+              />
+              <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
+                {/* Analyze the raw prompt with @LLM, beside the copy action. Switches
+                    to the Analysis tab and runs if not already analyzed. */}
+                <Button
+                  tone='link'
+                  size='sm'
+                  icon={<AutoAwesomeOutlinedIcon sx={{ fontSize: 14 }} />}
+                  disabled={!analysisCanRun || analysis.phase === 'loading'}
+                  onClick={() => {
+                    setTab('analysis');
+                    if (analysis.phase === 'idle' || analysis.phase === 'error') analysis.run();
+                  }}
+                  aria-label='Analyze prompt'
+                  id={`analyze-prompt-${callId ?? ''}`}
+                >
+                  {analysis.phase === 'loading' ? 'Analyzing…' : 'Analyze'}
+                </Button>
+                {activeTab === 'response' ? (
+                  <CopyButton text={state.response} />
+                ) : activeTab === 'raw' ? (
+                  <CopyButton text={rawPretty} />
+                ) : activeTab === 'analysis' ? null : (
+                  <CopyButton text={promptCopyText} />
+                )}
+                <Box
+                  component='button'
+                  type='button'
+                  onClick={() => setMaximized((m) => !m)}
+                  aria-label={maximized ? 'Restore size' : 'Maximize'}
+                  title={maximized ? 'Restore size' : 'Maximize'}
+                  sx={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    border: 'none',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    color: 'var(--ds-gray-500)',
+                    padding: '2px',
+                    '&:hover': { color: 'var(--ds-gray-700)' },
+                  }}
+                >
+                  {maximized ? <FullscreenExitIcon sx={{ fontSize: 18 }} /> : <FullscreenIcon sx={{ fontSize: 18 }} />}
+                </Box>
+              </Box>
+            </Box>
+
+            {activeTab === 'conversation' && cardList(convoMsgs, 'No conversation messages in this prompt.')}
+            {activeTab === 'system' && <SystemTab msgs={systemMsgs} />}
+            {activeTab === 'tools' && cardList(toolMsgs, 'No tool messages in this prompt.')}
+            {activeTab === 'response' && <Box sx={preBoxTall}>{state.response || 'No response captured.'}</Box>}
+            {activeTab === 'raw' && <Box sx={preBoxTall}>{rawPretty || 'No prompt captured.'}</Box>}
+            {activeTab === 'analysis' && (
+              <PromptAnalysisPanel
+                state={analysis}
+                measured={measured}
+                billedTokens={call?.inputTokens}
+                cachedTokens={call?.cachedInputTokens}
+                rawTruncated={promptTruncated}
+                canRun={analysisCanRun}
+                onRun={analysis.run}
+              />
+            )}
+          </>
+        )}
+      </Box>
+    </Modal>
+  );
+}
+
 /** The model-call table (expanded-row content) — one row per LLM call for the agent. */
-function ModelCallsTable({ calls }: { calls: ModelCall[] }) {
+function ModelCallsTable({
+  calls,
+  conversationId,
+  accountId,
+  agentId,
+}: {
+  calls: ModelCall[];
+  conversationId?: string;
+  accountId?: string;
+  agentId?: string;
+}) {
+  const [traceCall, setTraceCall] = React.useState<ModelCall | null>(null);
   const [sort, setSort] = React.useState<{ name: string; order: 'asc' | 'desc' }>({ name: '', order: 'desc' });
   const rows = React.useMemo(() => {
     const val = MODEL_CALL_SORT[sort.name];
@@ -175,6 +1323,10 @@ function ModelCallsTable({ calls }: { calls: ModelCall[] }) {
     });
     return sort.order === 'desc' ? sorted.reverse() : sorted;
   }, [calls, sort]);
+
+  // Relative outlier highlighting: rank cost/latency within these calls.
+  const costSev = React.useMemo(() => makeSeverity(calls.map((c) => c.totalCost)), [calls]);
+  const latSev = React.useMemo(() => makeSeverity(calls.map((c) => c.latencyMs)), [calls]);
 
   if (!calls.length) {
     return <Box sx={{ p: 'var(--ds-space-3)', fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>No model calls for this agent.</Box>;
@@ -209,6 +1361,11 @@ function ModelCallsTable({ calls }: { calls: ModelCall[] }) {
     },
     { name: 'Latency', width: '9%', sortEnabled: true },
     { name: 'Flags', width: '9%', component: <HeaderLabel label='Flags' info='cached · retry · error indicators for the call.' /> },
+    {
+      name: 'Prompt',
+      width: '7%',
+      component: <HeaderLabel label='Prompt' info='View the exact prompt sent and the response received for this call (when captured).' />,
+    },
   ];
   const tableData = rows.map((c) => [
     { component: <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)' }}>{c.model}</Box> },
@@ -225,12 +1382,22 @@ function ModelCallsTable({ calls }: { calls: ModelCall[] }) {
     { component: <Box sx={cellNum}>{c.ttftMs ? `${Math.round(c.ttftMs)}ms` : '—'}</Box> },
     {
       component: (
-        <Box component='span' title={costBreakdownTitle(c)} sx={{ display: 'inline-flex' }}>
-          <CostCallout value={c.totalCost} size='sm' tone='neutral' fractionDigits={2} />
-        </Box>
+        <SeverityCell severity={costSev(c.totalCost)} metric='cost'>
+          <Box component='span' title={costBreakdownTitle(c)} sx={{ display: 'inline-flex' }}>
+            <CostCallout value={c.totalCost} size='sm' tone='neutral' fractionDigits={2} />
+          </Box>
+        </SeverityCell>
       ),
     },
-    { component: <Box sx={cellNum}>{fmtDuration(c.latencyMs)}</Box> },
+    {
+      component: (
+        <SeverityCell severity={latSev(c.latencyMs)} metric='latency'>
+          <Box component='span' sx={cellNum}>
+            {fmtDuration(c.latencyMs)}
+          </Box>
+        </SeverityCell>
+      ),
+    },
     {
       component: (
         <Box sx={{ display: 'inline-flex', gap: 'var(--ds-space-1)' }}>
@@ -259,9 +1426,23 @@ function ModelCallsTable({ calls }: { calls: ModelCall[] }) {
         </Box>
       ),
     },
+    {
+      component: c.hasTrace ? (
+        <Button tone='link' size='sm' onClick={() => setTraceCall(c)} id={`view-prompt-${c.callId}`}>
+          View
+        </Button>
+      ) : (
+        <Box component='span' sx={{ color: 'var(--ds-gray-400)' }}>
+          —
+        </Box>
+      ),
+    },
   ]);
   return (
-    <CustomTable2 headers={headers} tableData={tableData} sort={sort} onSortChange={(s: { name: string; order: 'asc' | 'desc' }) => setSort(s)} />
+    <>
+      <CustomTable2 headers={headers} tableData={tableData} sort={sort} onSortChange={(s: { name: string; order: 'asc' | 'desc' }) => setSort(s)} />
+      <PromptTraceModal call={traceCall} conversationId={conversationId} accountId={accountId} agentId={agentId} onClose={() => setTraceCall(null)} />
+    </>
   );
 }
 
@@ -403,7 +1584,7 @@ function FocusedAgentPanel({ conversationId, accountId, agentId }: { conversatio
             >
               Model calls
             </Box>
-            <ModelCallsTable calls={state.data.calls} />
+            <ModelCallsTable calls={state.data.calls} conversationId={conversationId} accountId={accountId} agentId={agentId} />
           </Box>
           {state.data.tools && state.data.tools.length > 0 && (
             <Box>
@@ -633,7 +1814,7 @@ function AgentDetailTab({ mode, step, conversationId, accountId }: { mode: Agent
   ) : null;
 
   let body: React.ReactNode;
-  if (mode === 'models') body = <ModelCallsTable calls={data.calls} />;
+  if (mode === 'models') body = <ModelCallsTable calls={data.calls} conversationId={conversationId} accountId={accountId} agentId={step.stepId} />;
   else if (mode === 'tools') body = <ToolCallsTable tools={data.tools} />;
   else {
     const hasExec = data.query || data.thought || data.response;
@@ -991,7 +2172,7 @@ function BackingCallsDrawer({
               >
                 Model calls ({data.calls.length})
               </Box>
-              <ModelCallsTable calls={data.calls} />
+              <ModelCallsTable calls={data.calls} conversationId={conversationId} accountId={accountId} agentId={agentId ?? undefined} />
             </Box>
             {data.tools.length > 0 && (
               <Box>
@@ -1374,7 +2555,7 @@ export function ConversationDetailView({
               disabled={!conversationId || !accountId}
               id='cost-analyze-header'
             >
-              Analyze cost
+              Analyze Cost
             </Button>
           </Box>
         </Box>

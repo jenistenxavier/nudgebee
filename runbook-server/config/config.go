@@ -90,7 +90,8 @@ type appConfig struct {
 
 	MlServerUrl string `mapstructure:"ml_server_url"`
 
-	NotificationServerUrl string `mapstructure:"notification_service_url"`
+	NotificationServerUrl   string `mapstructure:"notification_service_url"`
+	NotificationServerToken string `mapstructure:"notification_server_token"`
 
 	RunbookServerRelayCommandExecutionTimeoutSeconds int `mapstructure:"runbook_server_relay_command_execution_timeout_seconds"`
 	RunbookServerRelayPodExecutionTimeoutSeconds     int `mapstructure:"runbook_server_relay_pod_execution_timeout_seconds"`

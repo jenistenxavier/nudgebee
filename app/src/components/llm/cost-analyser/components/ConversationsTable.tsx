@@ -29,6 +29,7 @@ import { ToggleGroup } from '@ui/ToggleGroup';
 import Tooltip from '@ui/Tooltip';
 import HeaderLabel from './HeaderLabel';
 import { fmtCost, fmtDuration, fmtTokens, runCallCount, runModelBreakdown, stepModelBreakdown, triggerLabel, type ModelStat } from '../format';
+import { makeSeverity, SeverityCell } from './severity';
 import type { Run, RunStatus, Step } from '../types';
 
 export type ConvSortKey = 'start' | 'trigger' | 'cost' | 'tokens' | 'duration' | 'latency' | 'calls';
@@ -328,6 +329,10 @@ export function ConversationsTable({
         { name: 'Actions', width: '4%' },
       ];
 
+  // Relative outlier highlighting: rank cost / model-latency within the rows shown.
+  const costSev = React.useMemo(() => makeSeverity(sortedRuns.map((r) => r.totalCost)), [sortedRuns]);
+  const latSev = React.useMemo(() => makeSeverity(sortedRuns.map((r) => r.totalModelLatencyMs)), [sortedRuns]);
+
   const tableData = sortedRuns.map((run) => {
     const models = runModelBreakdown(run);
     const titleCell = {
@@ -373,11 +378,23 @@ export function ConversationsTable({
     const modelsCell = { component: <ModelBadges models={models} /> };
     const start = { component: <StartTime iso={run.startedAt} /> };
     const duration = { component: <Box sx={numCell}>{fmtDuration(run.wallClockMs)}</Box> };
-    const llmLatency = { component: <Box sx={numCell}>{fmtDuration(run.totalModelLatencyMs)}</Box> };
+    const llmLatency = {
+      component: (
+        <SeverityCell severity={latSev(run.totalModelLatencyMs)} metric='latency'>
+          <Box sx={numCell}>{fmtDuration(run.totalModelLatencyMs)}</Box>
+        </SeverityCell>
+      ),
+    };
     const calls = { component: <Box sx={numCell}>{runCallCount(run)}</Box> };
     // Cost rendered as normal dark numeric text (matches the other metric
     // columns) rather than CostCallout's muted gray cost-axis neutral tone.
-    const cost = { component: <Box sx={{ ...numCell, fontWeight: 'var(--ds-font-weight-semibold)' }}>{fmtCost(run.totalCost)}</Box> };
+    const cost = {
+      component: (
+        <SeverityCell severity={costSev(run.totalCost)} metric='cost'>
+          <Box sx={{ ...numCell, fontWeight: 'var(--ds-font-weight-semibold)' }}>{fmtCost(run.totalCost)}</Box>
+        </SeverityCell>
+      ),
+    };
     const tokens = {
       component: (
         <Box sx={numCell}>

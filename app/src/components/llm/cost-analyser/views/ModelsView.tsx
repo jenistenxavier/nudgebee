@@ -18,6 +18,7 @@ import BarSeries from '../components/BarSeries';
 import LineSeries from '../components/LineSeries';
 import SectionHeader from '../components/Section';
 import { fmtCost, fmtDuration, fmtTokens } from '../format';
+import { makeSeverity, SeverityCell } from '../components/severity';
 import { timeSeriesToChart } from '../adapt';
 import type { UsageGroupRow, UsageMetrics } from '@api1/ai-cost';
 import type { CostFilters } from '../types';
@@ -104,13 +105,23 @@ export function ModelsView({ metrics, filters }: ModelsViewProps) {
     { name: 'Avg latency', width: '14%', sortEnabled: true },
   ];
 
+  // Relative outlier highlighting: rank total cost / avg latency across models.
+  const costSev = React.useMemo(() => makeSeverity(summaries.map((m) => m.totalCost)), [summaries]);
+  const latSev = React.useMemo(() => makeSeverity(summaries.map((m) => m.avgLatencyMs)), [summaries]);
+
   const tableData = summaries.map((m) => [
     {
       component: (
         <Box sx={{ fontSize: 'var(--ds-text-body)', color: 'var(--ds-gray-700)', fontWeight: 'var(--ds-font-weight-medium)' }}>{m.model}</Box>
       ),
     },
-    { component: <CostCallout value={m.totalCost} size='sm' tone='neutral' fractionDigits={2} /> },
+    {
+      component: (
+        <SeverityCell severity={costSev(m.totalCost)} metric='cost'>
+          <CostCallout value={m.totalCost} size='sm' tone='neutral' fractionDigits={2} />
+        </SeverityCell>
+      ),
+    },
     { component: <Box sx={numSx}>{m.calls}</Box> },
     { component: <Box sx={numSx}>{m.conversations}</Box> },
     { component: <Box sx={numSx}>{fmtCost(m.avgCostPerCall)}</Box> },
@@ -121,7 +132,13 @@ export function ModelsView({ metrics, filters }: ModelsViewProps) {
         </Box>
       ),
     },
-    { component: <Box sx={numSx}>{fmtDuration(m.avgLatencyMs)}</Box> },
+    {
+      component: (
+        <SeverityCell severity={latSev(m.avgLatencyMs)} metric='latency'>
+          <Box sx={numSx}>{fmtDuration(m.avgLatencyMs)}</Box>
+        </SeverityCell>
+      ),
+    },
   ]);
 
   return (

@@ -9,10 +9,14 @@ import (
 // `integrations.type` values and the `integration_type` column on
 // integration_user_accounts.
 const (
-	IdentityTypeSlack     = "slack"
-	IdentityTypeGithub    = "github"
-	IdentityTypePagerDuty = "pagerduty"
-	IdentityTypeZenDuty   = "zenduty"
+	IdentityTypeSlack      = "slack"
+	IdentityTypeGithub     = "github"
+	IdentityTypePagerDuty  = "pagerduty"
+	IdentityTypeZenDuty    = "zenduty"
+	IdentityTypeServiceNow = "servicenow"
+	IdentityTypeGitlab     = "gitlab"
+	IdentityTypeJira       = "jira"
+	IdentityTypeMsTeams    = "ms_teams"
 )
 
 // mappedVia values record how an account became linked to an internal user.

@@ -156,7 +156,7 @@ func TestGetConversationAgentDetail_FullRecord(t *testing.T) {
 			nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		))
 
-	detail, err := dao.GetConversationAgentDetail("sess-1", "acc-1", "agent-1")
+	detail, err := dao.GetConversationAgentDetail("sess-1", "acc-1", "agent-1", "")
 	require.NoError(t, err)
 
 	// Agent execution content.
@@ -200,10 +200,66 @@ func TestGetConversationAgentDetail_NotFound(t *testing.T) {
 
 	mock.ExpectQuery("FROM llm_conversation_agent").WillReturnError(sql.ErrNoRows)
 
-	detail, err := dao.GetConversationAgentDetail("sess-1", "acc-1", "missing")
+	detail, err := dao.GetConversationAgentDetail("sess-1", "acc-1", "missing", "")
 	require.NoError(t, err)
 	assert.Empty(t, detail.Agent.ID)
 	assert.Empty(t, detail.ToolCalls)
 	assert.Empty(t, detail.ModelCalls)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestGetConversationAgentDetail_TraceMode verifies that passing a model_call_id
+// returns that single call WITH its prompt/response trace populated (the lazy
+// "view prompt" fetch), while the default listing leaves the trace text empty.
+func TestGetConversationAgentDetail_TraceMode(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	dao := &ConversationDao{dbManager: &common.DatabaseManager{Db: sqlx.NewDb(db, "postgres")}}
+	now := time.Now()
+
+	mock.ExpectQuery("FROM llm_conversation_agent").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "message_id", "parent_agent_id", "agent_name", "status",
+			"query", "thought", "response", "created_at", "updated_at", "duration_seconds",
+		}).AddRow("agent-1", "msg-1", "", "k8s_debug", "success", "q", "t", "r", now, now, 1.0))
+
+	mock.ExpectQuery("FROM llm_conversation_tool_calls").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "tool_name", "tool_id", "tool_type", "status",
+			"parameters", "response", "thought", "child_agent_id",
+			"created_at", "updated_at", "duration_seconds",
+		}))
+
+	// model_calls in trace mode also returns has_trace + the raw trace columns.
+	mock.ExpectQuery("FROM llm_conversation_token_usage").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "llm_model", "llm_provider", "input_tokens", "output_tokens",
+			"cached_input_tokens", "cache_creation_tokens", "thinking_tokens",
+			"latency_seconds", "ttft_ms", "retry_attempt", "is_cache_hit",
+			"request_status", "stop_reason", "error_message", "created_at",
+			"has_trace", "prompt_messages", "response_content",
+		}).AddRow("mc-1", "claude", "bedrock", 1000, 500, 0, 0, 0,
+			2.0, 300, 0, false, "success", "end_turn", "", now,
+			true, `[{"role":"system","parts":[{"type":"text","text":"hi"}]}]`, "the answer"))
+
+	mock.ExpectQuery("FROM llm_model_pricing").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"provider_name", "model_name",
+			"cost_per_million_input_tokens", "cost_per_million_output_tokens",
+			"cache_cost_per_million_tokens_per_hour", "cost_per_million_cached_input_tokens",
+			"cost_per_million_cache_creation_tokens", "cost_per_million_cached_storage_per_hour",
+			"context_threshold_tokens", "cost_per_million_input_tokens_long_ctx",
+			"cost_per_million_output_tokens_long_ctx", "cost_per_million_cached_input_tokens_long_ctx",
+			"cost_per_million_cache_creation_tokens_long_ctx",
+		}).AddRow("bedrock", "claude", 3.0, 15.0, nil, nil, nil, nil, nil, nil, nil, nil, nil))
+
+	detail, err := dao.GetConversationAgentDetail("sess-1", "acc-1", "agent-1", "mc-1")
+	require.NoError(t, err)
+	require.Len(t, detail.ModelCalls, 1)
+	assert.True(t, detail.ModelCalls[0].HasTrace)
+	assert.Contains(t, detail.ModelCalls[0].PromptMessages, `"role":"system"`)
+	assert.Equal(t, "the answer", detail.ModelCalls[0].ResponseContent)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }

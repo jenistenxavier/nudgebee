@@ -757,6 +757,7 @@ function FilterDropdownButton({
   popoverWidth,
   popoverAlign = 'left',
   onSelect,
+  onOpen,
   disabled = false,
   isOptionsLoading = false,
   limitTag = 1,
@@ -958,7 +959,15 @@ function FilterDropdownButton({
         component='button'
         type='button'
         id={inputId ? `auto-complete-${inputId}` : 'auto-complete'}
-        onClick={(e) => !disabled && setAnchorEl(e.currentTarget)}
+        onClick={(e) => {
+          if (disabled) {
+            return;
+          }
+          // Lets callers lazy-load options on first open instead of eagerly on
+          // mount. Fired before opening so the loading state shows immediately.
+          onOpen?.();
+          setAnchorEl(e.currentTarget);
+        }}
         onKeyDown={handleKeyDown}
         disabled={disabled}
         sx={{
@@ -1269,6 +1278,7 @@ FilterDropdownButton.propTypes = {
   selectionWithinGroup: PropTypes.bool,
   freeSolo: PropTypes.bool,
   onSelect: PropTypes.func,
+  onOpen: PropTypes.func,
   disabled: PropTypes.bool,
   isOptionsLoading: PropTypes.bool,
   limitTag: PropTypes.number,
