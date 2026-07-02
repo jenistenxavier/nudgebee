@@ -844,26 +844,37 @@ func init() {
 
 	viper.SetDefault("llm_trace_enabled", false)
 
-	// Memory Module defaults — all off
+	// Memory Module defaults. LLM_MEMORY_MODULE_ENABLED is the single master
+	// switch — when false the entire subsystem (writes, reads, event log) is
+	// off, so an unchanged deployment sees zero memory behaviour. The
+	// LLM_MEMORY_COMPOSE_ENABLED flag stays as a sub-master under the master
+	// (only checked when MODULE is on) and defaults to true so flipping the
+	// master alone is enough to turn the whole feature on; set it to false
+	// to run shadow mode (write but don't inject). The per-layer flags
+	// default to true and act as emergency kill-switches: once the master
+	// is flipped on, every layer is active unless explicitly opted out.
+	// Avoids the prior trap where turning the module on yielded no
+	// observable effect because each per-layer write/read gate still
+	// required its own opt-in.
 	viper.SetDefault("llm_memory_module_enabled", false)
-	viper.SetDefault("llm_memory_layer_soul_enabled", false)
-	viper.SetDefault("llm_memory_layer_preferences_enabled", false)
-	viper.SetDefault("llm_memory_compose_enabled", false)
+	viper.SetDefault("llm_memory_compose_enabled", true)
+	viper.SetDefault("llm_memory_layer_soul_enabled", true)
+	viper.SetDefault("llm_memory_layer_preferences_enabled", true)
 	viper.SetDefault("llm_memory_tenant_allowlist", "")
 	viper.SetDefault("llm_memory_soul_max_tokens", 100)
 	viper.SetDefault("llm_memory_prefs_max_tokens", 400)
 	viper.SetDefault("llm_memory_cache_ttl_seconds", 300)
 	viper.SetDefault("llm_memory_projection_workers", 4)
 
-	viper.SetDefault("llm_memory_layer_patterns_enabled", false)
-	viper.SetDefault("llm_memory_layer_decisions_enabled", false)
-	viper.SetDefault("llm_memory_layer_collective_enabled", false)
+	viper.SetDefault("llm_memory_layer_patterns_enabled", true)
+	viper.SetDefault("llm_memory_layer_decisions_enabled", true)
+	viper.SetDefault("llm_memory_layer_collective_enabled", true)
 	viper.SetDefault("llm_memory_patterns_max_tokens", 300)
 	viper.SetDefault("llm_memory_patterns_per_kind_limit", 2)
 	viper.SetDefault("llm_memory_decisions_max_tokens", 200)
 	viper.SetDefault("llm_memory_collective_max_tokens", 300)
 
-	viper.SetDefault("llm_memory_layer_session_enabled", false)
+	viper.SetDefault("llm_memory_layer_session_enabled", true)
 	viper.SetDefault("llm_memory_session_max_tokens", 400)
 	viper.SetDefault("llm_memory_session_idle_minutes", 30)
 
