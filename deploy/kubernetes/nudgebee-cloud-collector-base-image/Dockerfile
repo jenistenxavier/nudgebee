@@ -1,4 +1,8 @@
-FROM alpine:3.19
+FROM alpine:3.22
+
+# Refresh OS packages to the latest patch level (alpine:3.19 was EOL — no more
+# security updates; 3.22 is current). apk upgrade keeps subsequent rebuilds fresh.
+RUN apk upgrade --no-cache
 
 # Install system deps + AWS CLI
 RUN apk add --no-cache \
