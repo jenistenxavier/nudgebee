@@ -70,7 +70,6 @@ func ListRecommendationResolutions(context *security.RequestContext, rescommenda
 	if err != nil {
 		return []models.RecommendationResolution{}, err
 	}
-	defer func() { _ = r.Close() }()
 
 	resolutions := []models.RecommendationResolution{}
 	for r.Next() {
@@ -80,9 +79,6 @@ func ListRecommendationResolutions(context *security.RequestContext, rescommenda
 			return []models.RecommendationResolution{}, err
 		}
 		resolutions = append(resolutions, resolution)
-	}
-	if err := r.Err(); err != nil {
-		return []models.RecommendationResolution{}, fmt.Errorf("error iterating recommendation resolution rows: %w", err)
 	}
 	return resolutions, nil
 }
@@ -665,6 +661,11 @@ var recommendationJobProviderMap = map[string]string{
 	// volume rightsizing for every metrics provider — see
 	// services/ml/service.go:TriggerVolumeRightsizing. Routed via "nb".
 	"volume_analyzer": "nb",
+	// image_scanner is server-orchestrated (per-image): the "nb" branch runs
+	// runImageScannerServerOrchestrated (schedule trivy fs Job per pending image,
+	// poll, parse, UPSERT). The legacy "agent" path dispatched an image_scanner
+	// agent_task the current agent doesn't implement ("action not registered").
+	"image_scanner": "nb",
 	// krr_scan (pod/vertical rightsizing) is owned by ml-k8s-server — see
 	// services/ml/service.go:TriggerVerticalRightsizing (also driven by the
 	// daily "Vertical Rightsizing Refresh" cron). The legacy agent_task path
@@ -673,13 +674,11 @@ var recommendationJobProviderMap = map[string]string{
 	// so on-demand refresh triggers the server-side generator directly.
 	"krr_scan": "nb",
 	// Not yet migrated — these stay on the legacy agent_task path.
-	// image_scanner: needs per-image orchestration (Phase 2b).
 	// unused_pv: ml-k8s-server owns rightsizing already; agent_task path is
 	//   dead but the entry is kept until Wave 3 cleans up.
-	// k8s_version_upgrade / certificate_scanner: not Job-based — Robusta
-	//   implemented them as in-process K8s API calls; api-server will
-	//   reimplement using existing get_resource primitives in a follow-up.
-	"image_scanner":       "agent",
+	// k8s_version_upgrade / certificate_scanner: not Job-based — the legacy agent
+	//   implemented them as in-process K8s API calls; api-server will reimplement
+	//   using existing get_resource primitives in a follow-up.
 	"unused_pv":           "agent",
 	"k8s_version_upgrade": "agent",
 	"certificate_scanner": "agent",
