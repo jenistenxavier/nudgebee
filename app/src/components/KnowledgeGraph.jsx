@@ -19,8 +19,6 @@ import AccountTreeOutlinedIcon from '@mui/icons-material/AccountTreeOutlined';
 import WarningAmberRoundedIcon from '@mui/icons-material/WarningAmberRounded';
 import AutoAwesomeRoundedIcon from '@mui/icons-material/AutoAwesomeRounded';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
-import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
-import FilterListIcon from '@mui/icons-material/FilterList';
 import CloseIcon from '@mui/icons-material/Close';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
@@ -669,8 +667,6 @@ const ServiceMapContent = () => {
   const [searchResetKey, setSearchResetKey] = useState(0);
   const [focusedNodeId, setFocusedNodeId] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  // Collapse the left filter sidebar to give the graph canvas more room.
-  const [isFilterCollapsed, setIsFilterCollapsed] = useState(false);
 
   const graphWrapperRef = useRef(null);
   const edgesByNodeRef = useRef(new Map());
@@ -1610,22 +1606,6 @@ const ServiceMapContent = () => {
     return [...options, ...selectedNotInOptions];
   }, [kgFilterOptions?.nodeTypes, draftNodeTypes]);
 
-  // Filters passed to the label/attribute value dropdowns so the value list is
-  // scoped to the user's currently-composed (draft) selections. The backend
-  // strips the key being edited from its matching type, so we can safely send
-  // both label and attribute chips here. Mirrors the chip parse in fetchGraph.
-  const kgFilters = useMemo(() => {
-    const labelArr = safeJSONParse(draftLabelFilters) || [];
-    const attrArr = safeJSONParse(draftAttributeFilters) || [];
-    return {
-      accountIds: (draftAccountIds || []).map((e) => e.value),
-      nodeTypes: (draftNodeTypes || []).map((e) => e.value),
-      nodeIds: (draftNodes || []).map((e) => e.value),
-      labels: Array.isArray(labelArr) ? Object.fromEntries(labelArr.map((x) => [x.key, x.value])) : {},
-      attributes: Array.isArray(attrArr) ? Object.fromEntries(attrArr.map((x) => [x.key, x.value])) : {},
-    };
-  }, [draftAccountIds, draftNodeTypes, draftNodes, draftLabelFilters, draftAttributeFilters]);
-
   // Update refs for path computation in handleInfoClick
   useEffect(() => {
     pathComputationRef.current = {
@@ -1941,48 +1921,31 @@ const ServiceMapContent = () => {
 
       <Box
         display='grid'
-        gridTemplateColumns={`${isFilterCollapsed ? ds.space.mul(0, 20) : ds.space.mul(0, 185)} 1fr`}
+        gridTemplateColumns={`${ds.space.mul(0, 140)} 1fr`}
         gap='var(--ds-space-2)'
         sx={{ height: 'calc(100vh - 148px)', overflow: 'hidden', padding: 'var(--ds-space-2) 0px' }}
       >
-        {/* Collapsed rail — a slim strip with an expand control so the canvas can be broadened */}
-        {isFilterCollapsed && (
-          <WidgetCard
+        {/* Left Sidebar - Filters */}
+        <WidgetCard
+          sx={{
+            mt: 0,
+            p: 'var(--ds-space-4)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 'var(--ds-space-4)',
+            overflowY: 'auto',
+          }}
+        >
+          <Box
             sx={{
-              mt: 0,
-              p: 'var(--ds-space-2)',
+              padding: '0px var(--ds-space-1)',
               display: 'flex',
               flexDirection: 'column',
-              alignItems: 'center',
-              gap: 'var(--ds-space-2)',
             }}
           >
-            <Tooltip title='Show filters'>
-              <Button
-                data-testid='kg-expand-filters-btn'
-                tone='ghost'
-                size='sm'
-                composition='icon-only'
-                aria-label='Show filters'
-                icon={<ChevronRightIcon sx={{ width: '18px' }} />}
-                onClick={() => setIsFilterCollapsed(false)}
-              />
-            </Tooltip>
-            <FilterListIcon sx={{ width: '18px', color: 'var(--ds-gray-400)' }} />
-            <Typography
-              sx={{
-                fontSize: 'var(--ds-text-caption)',
-                fontFamily: 'Poppins',
-                color: 'var(--ds-gray-500)',
-                writingMode: 'vertical-rl',
-                transform: 'rotate(180deg)',
-                letterSpacing: '0.04em',
-              }}
-            >
+            <Typography variant='subtitle1' sx={{ fontSize: 'var(--ds-text-title)', fontFamily: 'Poppins', color: ds.gray[700] }}>
               Filters
             </Typography>
-          </WidgetCard>
-        )}
 
             {kgFilterOptions?.lastSyncTime && (
               <Datetime
@@ -2033,132 +1996,63 @@ const ServiceMapContent = () => {
                   setQueryItemsLabel([]);
                 }
               }}
-            >
-              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--ds-space-1)' }}>
-                <Typography variant='subtitle1' sx={{ fontSize: 'var(--ds-text-title)', fontFamily: 'Poppins', color: ds.gray[700] }}>
-                  Filters
-                </Typography>
-                <Tooltip title='Hide filters'>
-                  <Button
-                    data-testid='kg-collapse-filters-btn'
-                    tone='ghost'
-                    size='sm'
-                    composition='icon-only'
-                    aria-label='Hide filters'
-                    icon={<ChevronLeftIcon sx={{ width: '18px' }} />}
-                    onClick={() => setIsFilterCollapsed(true)}
-                  />
-                </Tooltip>
-              </Box>
+              multiple
+              isOptionsLoading={isFilterLoading || isFilterOptionsRefreshing}
+              width='100%'
+            />
+            <FilterDropdown
+              label='Node Type'
+              options={mergedNodeTypeOptions}
+              value={draftNodeTypes}
+              onSelect={(e) => setDraftNodeTypes(e.target.value)}
+              multiple
+              isOptionsLoading={isFilterLoading || isFilterOptionsRefreshing}
+              width='100%'
+            />
+            <FilterDropdown
+              label='Level'
+              options={levelOptions}
+              value={draftLevel}
+              onSelect={(e) => setDraftLevel(Number(e.target.value))}
+              width='100%'
+            />
+          </Box>
 
-              {kgFilterOptions?.lastSyncTime && (
-                <Datetime
-                  value={kgFilterOptions.lastSyncTime}
-                  prefix='Last synced: '
-                  sxPrefix={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-400)', fontFamily: 'Poppins', mr: 'var(--ds-space-1)' }}
-                  sxPrefixSecondary={false}
-                  sx={{
-                    fontSize: 'var(--ds-text-caption)',
-                    fontWeight: 'var(--ds-font-weight-semibold)',
-                    color: 'var(--ds-gray-500)',
-                    fontFamily: 'Poppins',
-                  }}
-                  sxSuffix={{
-                    fontSize: 'var(--ds-text-caption)',
-                    fontWeight: 'var(--ds-font-weight-semibold)',
-                    color: 'var(--ds-gray-500)',
-                    fontFamily: 'Poppins',
-                  }}
-                  sxSecondary={false}
-                  sxSuffixSecondary={false}
-                />
-              )}
-            </Box>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)' }}>
+            <LogQueryBuilderAutocomplete
+              logProvider='knowledge_graph'
+              accountId={''}
+              onQueryChange={(e) => setDraftLabelFilters(e?.query ?? '')}
+              queryItems={queryItemsLabel}
+              onQueryItemsChange={setQueryItemsLabel}
+              getLabelsFromProps={kgFilterOptions.labelMap}
+              allowMultipleQueries={false}
+              height='auto'
+              width='100%'
+            />
+            <LogQueryBuilderAutocomplete
+              logProvider='knowledge_graph'
+              accountId={''}
+              onQueryChange={(e) => setDraftAttributeFilters(e?.query ?? '')}
+              queryItems={queryItems}
+              onQueryItemsChange={setQueryItems}
+              getLabelsFromProps={kgFilterOptions.attributeMap}
+              allowMultipleQueries={false}
+              heading={'Attribute'}
+              height='auto'
+              width='100%'
+            />
+          </Box>
 
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)' }}>
-              <FilterDropdown
-                label='Account'
-                options={accountOptions}
-                value={draftAccountIds}
-                onSelect={(e) => setDraftAccountIds(e.target.value)}
-                multiple
-                width='100%'
-              />
-              <FilterDropdown
-                label='Node'
-                options={filterNodeOptions}
-                value={draftNodes}
-                onSelect={(e) => {
-                  setDraftNodes(e.target.value);
-                  if (e.target.value.length > 0) {
-                    setDraftAccountIds([]);
-                    setDraftNodeTypes([]);
-                    setDraftLabelFilters('');
-                    setDraftAttributeFilters('');
-                    setQueryItems([]);
-                    setQueryItemsLabel([]);
-                  }
-                }}
-                multiple
-                isOptionsLoading={isFilterLoading || isFilterOptionsRefreshing}
-                width='100%'
-              />
-              <FilterDropdown
-                label='Node Type'
-                options={mergedNodeTypeOptions}
-                value={draftNodeTypes}
-                onSelect={(e) => setDraftNodeTypes(e.target.value)}
-                multiple
-                isOptionsLoading={isFilterLoading || isFilterOptionsRefreshing}
-                width='100%'
-              />
-              <FilterDropdown
-                label='Level'
-                options={levelOptions}
-                value={draftLevel}
-                onSelect={(e) => setDraftLevel(Number(e.target.value))}
-                width='100%'
-              />
-            </Box>
-
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)' }}>
-              <LogQueryBuilderAutocomplete
-                logProvider='knowledge_graph'
-                accountId={''}
-                onQueryChange={(e) => setDraftLabelFilters(e?.query ?? '')}
-                queryItems={queryItemsLabel}
-                onQueryItemsChange={setQueryItemsLabel}
-                getLabelsFromProps={kgFilterOptions.labelMap}
-                allowMultipleQueries={false}
-                height='auto'
-                width='100%'
-                kgFilters={kgFilters}
-              />
-              <LogQueryBuilderAutocomplete
-                logProvider='knowledge_graph'
-                accountId={''}
-                onQueryChange={(e) => setDraftAttributeFilters(e?.query ?? '')}
-                queryItems={queryItems}
-                onQueryItemsChange={setQueryItems}
-                getLabelsFromProps={kgFilterOptions.attributeMap}
-                allowMultipleQueries={false}
-                heading={'Attribute'}
-                height='auto'
-                width='100%'
-                kgFilters={kgFilters}
-              />
-            </Box>
-
-            <Box sx={{ display: 'flex', gap: 'var(--ds-space-2)', pt: 'var(--ds-space-1)' }}>
-              <Button data-testid='kg-apply-filters-btn' tone='primary' size='sm' onClick={handleApply} disabled={!hasChanges} fullWidth>
-                Apply Filters
-              </Button>
-              <Button data-testid='kg-clear-filters-btn' tone='secondary' size='sm' onClick={handleClear} fullWidth>
-                Clear All
-              </Button>
-            </Box>
-          </WidgetCard>
-        )}
+          <Box sx={{ display: 'flex', gap: 'var(--ds-space-2)', pt: 'var(--ds-space-1)' }}>
+            <Button data-testid='kg-apply-filters-btn' tone='primary' size='sm' onClick={handleApply} disabled={!hasChanges} fullWidth>
+              Apply Filters
+            </Button>
+            <Button data-testid='kg-clear-filters-btn' tone='secondary' size='sm' onClick={handleClear} fullWidth>
+              Clear All
+            </Button>
+          </Box>
+        </WidgetCard>
 
         {/* Right Side - Graph */}
         <Box

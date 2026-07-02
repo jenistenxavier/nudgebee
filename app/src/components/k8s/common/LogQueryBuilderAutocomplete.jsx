@@ -178,7 +178,6 @@ const LogQueryBuilderAutocomplete = ({
   heading = 'Label',
   providerType = '',
   suggestionsMinWidth = 280,
-  kgFilters,
 }) => {
   // State for multiple query blocks
   const [queryBlocks, setQueryBlocks] = useState(() => initializeQueryBlocks(prebuildQueryBlocks, logProvider));
@@ -573,10 +572,8 @@ const LogQueryBuilderAutocomplete = ({
           return [];
         } else if (logProvider === 'knowledge_graph') {
           const res = await apiKubernetes1.knowledgeGraphFilterOptionLabelValues({
-            filterType: heading === 'Attribute' ? 'attribute' : 'label',
+            filterType: heading == 'Attribute Filter' ? 'attribute' : 'label',
             filterKey: findLabel.label,
-            // Scope candidate values to the user's currently-composed (draft) filters.
-            ...(kgFilters || {}),
           });
           const labelValues = res?.data?.data?.kg_get_filter_values?.data?.values || [];
           setValues((prev) => ({
