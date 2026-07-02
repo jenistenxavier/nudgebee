@@ -446,29 +446,73 @@ type appConfig struct {
 	LlmTraceEnabled bool `mapstructure:"llm_trace_enabled"`
 
 	// Memory Module — layered memory architecture (Phase 1+)
-	MemoryModuleEnabled     bool   `mapstructure:"memory_module_enabled"`
-	MemoryLayerSoulEnabled  bool   `mapstructure:"memory_layer_soul_enabled"`
-	MemoryLayerPrefsEnabled bool   `mapstructure:"memory_layer_preferences_enabled"`
-	MemoryComposeEnabled    bool   `mapstructure:"memory_compose_enabled"`
-	MemoryTenantAllowlist   string `mapstructure:"memory_tenant_allowlist"`
-	MemorySoulMaxTokens     int    `mapstructure:"memory_soul_max_tokens"`
-	MemoryPrefsMaxTokens    int    `mapstructure:"memory_prefs_max_tokens"`
-	MemoryCacheTTLSeconds   int    `mapstructure:"memory_cache_ttl_seconds"`
-	MemoryProjectionWorkers int    `mapstructure:"memory_projection_workers"`
+	MemoryModuleEnabled     bool   `mapstructure:"llm_memory_module_enabled"`
+	MemoryLayerSoulEnabled  bool   `mapstructure:"llm_memory_layer_soul_enabled"`
+	MemoryLayerPrefsEnabled bool   `mapstructure:"llm_memory_layer_preferences_enabled"`
+	MemoryComposeEnabled    bool   `mapstructure:"llm_memory_compose_enabled"`
+	MemoryTenantAllowlist   string `mapstructure:"llm_memory_tenant_allowlist"`
+	MemorySoulMaxTokens     int    `mapstructure:"llm_memory_soul_max_tokens"`
+	MemoryPrefsMaxTokens    int    `mapstructure:"llm_memory_prefs_max_tokens"`
+	MemoryCacheTTLSeconds   int    `mapstructure:"llm_memory_cache_ttl_seconds"`
+	MemoryProjectionWorkers int    `mapstructure:"llm_memory_projection_workers"`
 
 	// Phase 2 layer toggles
-	MemoryLayerPatternsEnabled   bool `mapstructure:"memory_layer_patterns_enabled"`
-	MemoryLayerDecisionsEnabled  bool `mapstructure:"memory_layer_decisions_enabled"`
-	MemoryLayerCollectiveEnabled bool `mapstructure:"memory_layer_collective_enabled"`
-	MemoryPatternsMaxTokens      int  `mapstructure:"memory_patterns_max_tokens"`
-	MemoryDecisionsMaxTokens     int  `mapstructure:"memory_decisions_max_tokens"`
-	MemoryCollectiveMaxTokens    int  `mapstructure:"memory_collective_max_tokens"`
+	MemoryLayerPatternsEnabled   bool `mapstructure:"llm_memory_layer_patterns_enabled"`
+	MemoryLayerDecisionsEnabled  bool `mapstructure:"llm_memory_layer_decisions_enabled"`
+	MemoryLayerCollectiveEnabled bool `mapstructure:"llm_memory_layer_collective_enabled"`
+	MemoryPatternsMaxTokens      int  `mapstructure:"llm_memory_patterns_max_tokens"`
+	// MemoryPatternsPerKindLimit caps how many rows of a single pattern_kind
+	// reach Compose. Without it one chatty kind (e.g. lots of
+	// frequent_service rows) can crowd out frequent_namespace /
+	// preferred_diagnostic_flow / etc. Within each kind the rows are
+	// ordered by last_seen_at DESC (most recent first); pinned rows still
+	// bypass this cap because pinning is an explicit "always show me this"
+	// signal. Set to 0 to disable.
+	MemoryPatternsPerKindLimit int `mapstructure:"llm_memory_patterns_per_kind_limit"`
+	MemoryDecisionsMaxTokens   int `mapstructure:"llm_memory_decisions_max_tokens"`
+	MemoryCollectiveMaxTokens  int `mapstructure:"llm_memory_collective_max_tokens"`
 
-	// Phase 2 migration mode: shadow | dual | cutover | retired
-	// Gated per-tenant at runtime via MemoryTenantAllowlist.
-	MemoryMigrationMode string `mapstructure:"memory_migration_mode"`
-	// Sample fraction for Shadow-mode parallel writes (0.0-1.0).
-	MemoryShadowSampleFraction float64 `mapstructure:"memory_shadow_sample_fraction"`
+	// Phase 4 layer toggles
+	MemoryLayerSessionEnabled bool `mapstructure:"llm_memory_layer_session_enabled"`
+	MemorySessionMaxTokens    int  `mapstructure:"llm_memory_session_max_tokens"`
+	MemorySessionIdleMinutes  int  `mapstructure:"llm_memory_session_idle_minutes"`
+
+	// Phase 8 — scheduled maintenance jobs (per-layer distill / consolidate /
+	// summarise). Each schedule is a standard 5-field cron string. The master
+	// switch must be on for any of the per-job schedules to register.
+	MemoryMaintenanceEnabled                 bool   `mapstructure:"llm_memory_maintenance_enabled"`
+	MemoryMaintenanceSessionExpireSchedule   string `mapstructure:"llm_memory_maintenance_session_expire_schedule"`
+	MemoryMaintenanceSessionDistillSchedule  string `mapstructure:"llm_memory_maintenance_session_distill_schedule"`
+	MemoryMaintenanceSessionDistillBatchSize int    `mapstructure:"llm_memory_maintenance_session_distill_batch_size"`
+	MemoryMaintenancePreferencesSchedule     string `mapstructure:"llm_memory_maintenance_preferences_schedule"`
+	MemoryMaintenancePatternsSchedule        string `mapstructure:"llm_memory_maintenance_patterns_schedule"`
+	MemoryMaintenanceEventsRotateSchedule    string `mapstructure:"llm_memory_maintenance_events_rotate_schedule"`
+	MemoryMaintenanceCollectiveSchedule      string `mapstructure:"llm_memory_maintenance_collective_schedule"`
+	MemoryMaintenanceSoulSchedule            string `mapstructure:"llm_memory_maintenance_soul_schedule"`
+	MemoryMaintenanceDecisionsSchedule       string `mapstructure:"llm_memory_maintenance_decisions_schedule"`
+	// MemoryMaintenancePatternsExtractSchedule drives the cross-conversation
+	// pattern-extract job. Daily cadence
+	// keeps the LLM bill bounded while still catching new recurrences within
+	// a day of the second observation.
+	MemoryMaintenancePatternsExtractSchedule string `mapstructure:"llm_memory_maintenance_patterns_extract_schedule"`
+	MemoryMaintenancePreferencesDecayDays    int    `mapstructure:"llm_memory_maintenance_preferences_decay_days"`
+	MemoryMaintenancePatternsRetireDays      int    `mapstructure:"llm_memory_maintenance_patterns_retire_days"`
+	// MemoryMaintenancePatternsFadingDays / StaleDays drive the
+	// active → fading → stale lifecycle that RunPatternsConsolidate writes
+	// onto llm_memory_patterns.decay_state. The UI's filter chips read this
+	// column; without the consolidator update they stay 'active' forever.
+	// Defaults: 14 / 60.
+	MemoryMaintenancePatternsFadingDays  int `mapstructure:"llm_memory_maintenance_patterns_fading_days"`
+	MemoryMaintenancePatternsStaleDays   int `mapstructure:"llm_memory_maintenance_patterns_stale_days"`
+	MemoryMaintenanceEventsRetentionDays int `mapstructure:"llm_memory_maintenance_events_retention_days"`
+
+	// OSS-forward: kept for the pre-memory2 migration shim in
+	// llm/llm-server/memory/migration.go (Phase 1 legacy → Shadow → Dual →
+	// Cutover → Retired). EE prod removed these when the full memory2 module
+	// landed; OSS retains them until the memory2 consumer path is picked.
+	// Bind to LLM_MEMORY_MIGRATION_MODE / LLM_MEMORY_SHADOW_SAMPLE_FRACTION.
+	MemoryMigrationMode        string  `mapstructure:"llm_memory_migration_mode"`
+	MemoryShadowSampleFraction float64 `mapstructure:"llm_memory_shadow_sample_fraction"`
 
 	// Productivity dashboard tunables. The "Time Saved" widget compares each
 	// completed investigation's AI runtime against a flat per-task manual
@@ -785,25 +829,44 @@ func init() {
 	viper.SetDefault("llm_trace_enabled", false)
 
 	// Memory Module defaults — all off
-	viper.SetDefault("memory_module_enabled", false)
-	viper.SetDefault("memory_layer_soul_enabled", false)
-	viper.SetDefault("memory_layer_preferences_enabled", false)
-	viper.SetDefault("memory_compose_enabled", false)
-	viper.SetDefault("memory_tenant_allowlist", "")
-	viper.SetDefault("memory_soul_max_tokens", 100)
-	viper.SetDefault("memory_prefs_max_tokens", 400)
-	viper.SetDefault("memory_cache_ttl_seconds", 300)
-	viper.SetDefault("memory_projection_workers", 4)
+	viper.SetDefault("llm_memory_module_enabled", false)
+	viper.SetDefault("llm_memory_layer_soul_enabled", false)
+	viper.SetDefault("llm_memory_layer_preferences_enabled", false)
+	viper.SetDefault("llm_memory_compose_enabled", false)
+	viper.SetDefault("llm_memory_tenant_allowlist", "")
+	viper.SetDefault("llm_memory_soul_max_tokens", 100)
+	viper.SetDefault("llm_memory_prefs_max_tokens", 400)
+	viper.SetDefault("llm_memory_cache_ttl_seconds", 300)
+	viper.SetDefault("llm_memory_projection_workers", 4)
 
-	viper.SetDefault("memory_layer_patterns_enabled", false)
-	viper.SetDefault("memory_layer_decisions_enabled", false)
-	viper.SetDefault("memory_layer_collective_enabled", false)
-	viper.SetDefault("memory_patterns_max_tokens", 300)
-	viper.SetDefault("memory_decisions_max_tokens", 200)
-	viper.SetDefault("memory_collective_max_tokens", 300)
+	viper.SetDefault("llm_memory_layer_patterns_enabled", false)
+	viper.SetDefault("llm_memory_layer_decisions_enabled", false)
+	viper.SetDefault("llm_memory_layer_collective_enabled", false)
+	viper.SetDefault("llm_memory_patterns_max_tokens", 300)
+	viper.SetDefault("llm_memory_patterns_per_kind_limit", 2)
+	viper.SetDefault("llm_memory_decisions_max_tokens", 200)
+	viper.SetDefault("llm_memory_collective_max_tokens", 300)
 
-	viper.SetDefault("memory_migration_mode", "off") // off | shadow | dual | cutover | retired
-	viper.SetDefault("memory_shadow_sample_fraction", 1.0)
+	viper.SetDefault("llm_memory_layer_session_enabled", false)
+	viper.SetDefault("llm_memory_session_max_tokens", 400)
+	viper.SetDefault("llm_memory_session_idle_minutes", 30)
+
+	viper.SetDefault("llm_memory_maintenance_enabled", false)
+	viper.SetDefault("llm_memory_maintenance_session_expire_schedule", "*/30 * * * *")
+	viper.SetDefault("llm_memory_maintenance_session_distill_schedule", "*/30 * * * *")
+	viper.SetDefault("llm_memory_maintenance_session_distill_batch_size", 50)
+	viper.SetDefault("llm_memory_maintenance_preferences_schedule", "0 3 * * *")
+	viper.SetDefault("llm_memory_maintenance_patterns_schedule", "0 4 * * *")
+	viper.SetDefault("llm_memory_maintenance_events_rotate_schedule", "0 2 * * *")
+	viper.SetDefault("llm_memory_maintenance_collective_schedule", "0 5 * * *")
+	viper.SetDefault("llm_memory_maintenance_soul_schedule", "0 6 * * 0")
+	viper.SetDefault("llm_memory_maintenance_decisions_schedule", "0 7 * * 0")
+	viper.SetDefault("llm_memory_maintenance_patterns_extract_schedule", "0 5 * * *")
+	viper.SetDefault("llm_memory_maintenance_preferences_decay_days", 60)
+	viper.SetDefault("llm_memory_maintenance_patterns_retire_days", 30)
+	viper.SetDefault("llm_memory_maintenance_patterns_fading_days", 14)
+	viper.SetDefault("llm_memory_maintenance_patterns_stale_days", 60)
+	viper.SetDefault("llm_memory_maintenance_events_retention_days", 90)
 
 	viper.SetDefault("llm_productivity_manual_baseline_minutes", 25)
 	viper.SetDefault("llm_productivity_engineer_hourly_rate_usd", 5.0)
