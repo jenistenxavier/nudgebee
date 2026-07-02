@@ -271,6 +271,13 @@ type IConversationDao interface {
 	GetConversationToolCallsStats(conversationId string) (ToolCallsStats, error)
 	GetConversationTimeBreakdown(conversationId string) (TimeBreakdown, error)
 	GetConversationTimeAggregates(filter ConversationTimeAggregatesFilter) (ConversationTimeAggregates, error)
+	GetUsageMetrics(filter UsageMetricsFilter, dims []string, topN int, granularity string) (UsageMetrics, error)
+	GetUsageFilters(filter UsageMetricsFilter) (UsageFilters, error)
+	ListConversationCosts(filter UsageMetricsFilter, sortBy, sortDir string, limit, offset int) (ConversationCostList, error)
+	GetConversationTree(sessionID, accountID string) (ConversationTree, error)
+	GetConversationAgentDetail(sessionID, accountID, agentID string) (AgentDetail, error)
+	GetConversationOptimizationProfile(sessionID, accountID string) (OptimizationProfile, *optSavingsIndex, error)
+	ListAgentCalls(filter UsageMetricsFilter, sortBy string, limit, latencyPercentile int) (AgentCallList, error)
 	InsertTokenUsage(record *TokenUsageRecord) error
 	InsertCacheLifecycle(ctx context.Context, record *CacheLifecycleRecord) error
 	SetCacheLifecycleInvalidated(ctx context.Context, cacheName string) error

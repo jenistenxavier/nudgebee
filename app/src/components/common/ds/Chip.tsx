@@ -24,9 +24,11 @@
  *                    micro is the *secondary-signal* tier (9px / 14px) — used
  *                    inside dense cells (Comparison delta etc.). Don't use it
  *                    for the primary label of a row.
- *   tone           = 'neutral' | 'info' | 'success' | 'warning' | 'critical' | 'savings' | 'waste' | 'agent'
- *                    V1's `danger` → use `critical`; V1's `pending` → use `neutral`
- *                    with `dotVariant='hollow'` (auto-hollow when omitted).
+ *   tone           = 'neutral' | 'subtle' | 'info' | 'success' | 'warning' | 'critical' | 'savings' | 'waste' | 'agent'
+ *                    `subtle` is a lighter, lower-emphasis neutral (background-200
+ *                    surface + gray-600 text) for dense, repeated tags that should
+ *                    recede. V1's `danger` → use `critical`; V1's `pending` → use
+ *                    `neutral` with `dotVariant='hollow'` (auto-hollow when omitted).
  *   shape          = 'pill' | 'rect'
  *   hue            = 'slate' | 'green' | 'amber' | 'red' | 'blue' | 'violet' | 'pink' | 'teal'
  *                    Categorical, tag chips only. Use `hashHue(key)` for stable mapping.
@@ -49,7 +51,7 @@ import Tooltip from '@ui/Tooltip';
 
 export type ChipSize = 'micro' | '2xs' | 'xs' | 'sm' | 'md';
 export type ChipVariant = 'filter' | 'tag' | 'status' | 'input' | 'action' | 'count' | 'avatar';
-export type ChipTone = 'neutral' | 'info' | 'success' | 'warning' | 'critical' | 'savings' | 'waste' | 'agent';
+export type ChipTone = 'neutral' | 'subtle' | 'info' | 'success' | 'warning' | 'critical' | 'savings' | 'waste' | 'agent';
 export type ChipShape = 'pill' | 'rect';
 /** 8 categorical hues for tag chips. */
 export type ChipHue = 'slate' | 'green' | 'amber' | 'red' | 'blue' | 'violet' | 'pink' | 'teal';
@@ -130,6 +132,13 @@ const TONE_PALETTE: Record<ChipTone, TonePalette> = {
     bg: 'var(--ds-gray-100)',
     bgHover: 'var(--ds-gray-200)',
     text: 'var(--ds-gray-700)',
+    border: 'var(--ds-gray-200)',
+    dot: 'var(--ds-gray-500)',
+  },
+  subtle: {
+    bg: 'var(--ds-background-200)',
+    bgHover: 'var(--ds-gray-200)',
+    text: 'var(--ds-gray-600)',
     border: 'var(--ds-gray-200)',
     dot: 'var(--ds-gray-500)',
   },

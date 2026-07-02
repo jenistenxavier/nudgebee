@@ -67,6 +67,10 @@ export interface StatProps {
   sub?: React.ReactNode;
   /** Optional left-aligned icon (size-scaled automatically) */
   icon?: React.ReactNode;
+  /** Where the icon sits: 'rail' (default — vertically-centered left rail) or 'inline' (beside the label). */
+  iconPlacement?: 'rail' | 'inline';
+  /** Where the delta sits: 'below' (default — under the value) or 'inline' (beside the value, baseline-aligned). */
+  deltaPlacement?: 'below' | 'inline';
   /** Optional info hint with tooltip */
   info?: StatInfoSlot;
   /** Optional right-aligned content in the header row */
@@ -112,7 +116,7 @@ function deriveDirection(d: StatDelta): 'up' | 'down' | 'flat' {
   return 'flat';
 }
 
-function DeltaPill({ delta, size }: { delta: StatDelta; size: StatSize }) {
+function DeltaPill({ delta, size, inline }: { delta: StatDelta; size: StatSize; inline?: boolean }) {
   const tone = delta.tone ?? 'neutral';
   const color = DELTA_TONE_COLOR[tone];
   const dir = deriveDirection(delta);
@@ -125,7 +129,7 @@ function DeltaPill({ delta, size }: { delta: StatDelta; size: StatSize }) {
   }
 
   return (
-    <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, mt: 0.5, color, fontSize }}>
+    <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, mt: inline ? 0 : 0.5, color, fontSize }}>
       {Arrow && <Arrow sx={{ fontSize: size === 'hero' ? 14 : 12 }} />}
       <Box component='span' sx={{ fontWeight: 'var(--ds-font-weight-medium)' }}>
         {formattedValue}
@@ -145,6 +149,8 @@ export function Stat({
   delta,
   sub,
   icon,
+  iconPlacement = 'rail',
+  deltaPlacement = 'below',
   info,
   headerRight,
   format = 'plain',
@@ -154,7 +160,16 @@ export function Stat({
   sx,
 }: StatProps) {
   const tokens = SIZE_TOKENS[size];
-  const isHorizontal = !!icon;
+  // 'inline' icons render next to the label, so the card stays a vertical stack.
+  const isHorizontal = !!icon && iconPlacement === 'rail';
+  const valueTypoSx = {
+    fontSize: tokens.value,
+    fontWeight: tokens.valueWeight,
+    color: 'var(--ds-gray-700)',
+    lineHeight: tokens.lineHeight,
+    wordBreak: 'break-word',
+  } as const;
+  const showInlineDelta = deltaPlacement === 'inline' && !!delta;
 
   return (
     <Box
@@ -175,7 +190,7 @@ export function Stat({
         ...sx,
       }}
     >
-      {icon && (
+      {icon && iconPlacement === 'rail' && (
         <Box
           aria-hidden='true'
           sx={{
@@ -199,6 +214,11 @@ export function Stat({
           }}
         >
           <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, minWidth: 0 }}>
+            {icon && iconPlacement === 'inline' && (
+              <Box aria-hidden='true' sx={{ display: 'inline-flex', color: 'var(--ds-gray-500)', flexShrink: 0 }}>
+                {icon}
+              </Box>
+            )}
             <Typography
               component='span'
               sx={{
@@ -220,20 +240,20 @@ export function Stat({
           </Box>
           {headerRight && <Box sx={{ flexShrink: 0 }}>{headerRight}</Box>}
         </Box>
-        <Typography
-          component='div'
-          sx={{
-            fontSize: tokens.value,
-            fontWeight: tokens.valueWeight,
-            color: 'var(--ds-gray-700)',
-            lineHeight: tokens.lineHeight,
-            wordBreak: 'break-word',
-          }}
-        >
-          {formatValue(value, format)}
-        </Typography>
+        {showInlineDelta ? (
+          <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 'var(--ds-space-2)', flexWrap: 'wrap' }}>
+            <Typography component='div' sx={valueTypoSx}>
+              {formatValue(value, format)}
+            </Typography>
+            <DeltaPill delta={delta!} size={size} inline />
+          </Box>
+        ) : (
+          <Typography component='div' sx={valueTypoSx}>
+            {formatValue(value, format)}
+          </Typography>
+        )}
         {sub !== undefined && <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)', mt: 0.25 }}>{sub}</Box>}
-        {delta && <DeltaPill delta={delta} size={size} />}
+        {!showInlineDelta && delta && <DeltaPill delta={delta} size={size} />}
       </Box>
     </Box>
   );
