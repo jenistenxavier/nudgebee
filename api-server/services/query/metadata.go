@@ -4770,7 +4770,7 @@ var table_metadata = map[string]TableDefinition{
 		  sr.timestamp, sr.status) as sro`,
 		Name:                "slo_report_observation_v2",
 		TenantIdColumnName:  "tenant_id",
-		AccountIdColumnName: "cloud_account_id",
+		AccountIdColumnName: "account_id",
 		Columns: map[string]ColumnDefinition{
 			"tenant_id": {
 				Type: ColumnDefinitionTypeString,
