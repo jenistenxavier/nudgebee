@@ -252,7 +252,7 @@ const AdaptiveServiceNode = memo(
           </div>
           <div className='node-content'>
             <div className='node-title'>{data.name}</div>
-            <span className='node-sub'>{ROLE_BADGE_LABELS[data.role] ? `${data.subtitle} · ${ROLE_BADGE_LABELS[data.role]}` : data.subtitle}</span>
+            <span className='node-sub'>{[data.subtitle, ROLE_BADGE_LABELS[data.role], data.location].filter(Boolean).join(' · ')}</span>
             <span className='node-sub'>{data.accountName}</span>
           </div>
           <button
@@ -285,7 +285,11 @@ const AdaptiveServiceNode = memo(
       </div>
     );
   },
-  (prev, next) => prev.data.name === next.data.name && prev.data.subtitle === next.data.subtitle && prev.data.accountName === next.data.accountName
+  (prev, next) =>
+    prev.data.name === next.data.name &&
+    prev.data.subtitle === next.data.subtitle &&
+    prev.data.accountName === next.data.accountName &&
+    prev.data.location === next.data.location
 );
 AdaptiveServiceNode.displayName = 'AdaptiveServiceNode';
 AdaptiveServiceNode.propTypes = {
@@ -297,6 +301,7 @@ AdaptiveServiceNode.propTypes = {
     type: PropTypes.string,
     subType: PropTypes.string,
     role: PropTypes.string,
+    location: PropTypes.string,
     properties: PropTypes.object,
     onInfoClick: PropTypes.func,
     onFocusClick: PropTypes.func,
@@ -598,6 +603,7 @@ const useGraphBuilder = (rawData, onInfoClick, accMap, onFocusClick) => {
           borderColor: n.kind === 'Workload' ? 'var(--ds-blue-500)' : 'var(--ds-green-400)',
           subType: n.logo_id,
           role: n.role, // datastore facet: 'database' | 'cache' | 'messagequeue' (in-cluster datastores)
+          location: n.location, // region/zone/AZ for cloud resources; disambiguates same-named nodes (e.g. "default" subnets)
           id: n.id,
           properties: { node_id: n.id },
           accountId: n.account_id,
@@ -2060,6 +2066,15 @@ const ServiceMapContent = () => {
                 width='100%'
               />
               <FilterDropdown
+                label='Node Type'
+                options={mergedNodeTypeOptions}
+                value={draftNodeTypes}
+                onSelect={(e) => setDraftNodeTypes(e.target.value)}
+                multiple
+                isOptionsLoading={isFilterLoading || isFilterOptionsRefreshing}
+                width='100%'
+              />
+              <FilterDropdown
                 label='Node'
                 options={filterNodeOptions}
                 value={draftNodes}
@@ -2074,15 +2089,6 @@ const ServiceMapContent = () => {
                     setQueryItemsLabel([]);
                   }
                 }}
-                multiple
-                isOptionsLoading={isFilterLoading || isFilterOptionsRefreshing}
-                width='100%'
-              />
-              <FilterDropdown
-                label='Node Type'
-                options={mergedNodeTypeOptions}
-                value={draftNodeTypes}
-                onSelect={(e) => setDraftNodeTypes(e.target.value)}
                 multiple
                 isOptionsLoading={isFilterLoading || isFilterOptionsRefreshing}
                 width='100%'

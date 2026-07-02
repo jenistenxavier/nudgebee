@@ -638,6 +638,20 @@ func getNodeProp(properties map[string]interface{}, key string) string {
 	return ""
 }
 
+// extractNodeLocation returns the most specific region/zone/AZ available for a cloud
+// resource, used by the UI to disambiguate identically-named nodes (e.g. many "default"
+// subnets across zones). Different sources store it under different keys — zone (GCP
+// compute), availability_zone (AWS), region (subnets, Azure, GKE, global services) — so we
+// probe them most-specific first. Returns "" for nodes with no location (e.g. K8s workloads).
+func extractNodeLocation(properties map[string]interface{}) string {
+	for _, key := range []string{"zone", "availability_zone", "region", "location"} {
+		if v := getNodeProp(properties, key); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // languageLogoID normalizes a backend canonical language name to the logo_id expected by LangTypeIcon.jsx.
 // LangTypeIcon lowercases before matching, so keys here must align with its switch cases.
 func languageLogoID(lang string) string {
@@ -891,12 +905,14 @@ func ConvertKgNodeToKgNodeSlim(kgNode KgNode) KgNodeSlim {
 	name := ""
 	role := ""
 	engine := ""
+	location := ""
 	if kgNode.Properties != nil {
 		if nameVal, ok := kgNode.Properties["name"]; ok {
 			name = fmt.Sprintf("%v", nameVal)
 		}
 		role = getNodeProp(kgNode.Properties, "role")
 		engine = getNodeProp(kgNode.Properties, "engine")
+		location = extractNodeLocation(kgNode.Properties)
 	}
 	return KgNodeSlim{
 		ID:        kgNode.ID,
@@ -909,6 +925,7 @@ func ConvertKgNodeToKgNodeSlim(kgNode KgNode) KgNodeSlim {
 		LogoID:    kgNode.LogoID,
 		Role:      role,
 		Engine:    engine,
+		Location:  location,
 	}
 }
 
