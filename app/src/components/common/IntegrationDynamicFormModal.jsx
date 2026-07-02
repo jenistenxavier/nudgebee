@@ -22,44 +22,6 @@ import cache from '@lib/cache';
 import VmAgentCredentialsDialog from './VmAgentCredentialsDialog';
 import { docsUrl } from '@lib/externalUrls';
 
-const COMMON_WEBHOOK_LABEL_KEYS = [
-  'alertname',
-  'severity',
-  'priority',
-  'level',
-  'namespace',
-  'destination_workload_namespace',
-  'k8s_namespace',
-  'k8s.namespace.name',
-  'service_name',
-  'service.name',
-  'app_id',
-  'app_name',
-  'deployment',
-  'daemonset',
-  'statefulset',
-  'pod',
-  'pod_name',
-  'container',
-  'job',
-  'instance',
-  'cluster',
-  'team',
-  'env',
-  'environment',
-  'executor_name',
-  'saas_env',
-  'destination_workload_name',
-  'src_workload_name',
-  'nb_alert_job',
-  'nb_resource_id',
-  'monitorName',
-  'rulename',
-  'related_logs',
-  'rule_id',
-  'rule_type',
-];
-
 const IntegrationDynamicFormModal = ({
   integrationName,
   openModal,
@@ -86,9 +48,6 @@ const IntegrationDynamicFormModal = ({
   const autogenCacheRef = useRef(new Map());
   const autogenDebounceRef = useRef(null);
   const [rules, setRules] = useState([{ match: [{ key: '', value: '' }], accountId: '' }]);
-  // Per-source subject/namespace/severity label mapping (webhook_label_mapping).
-  // Each field is a comma-separated list of label key specs; persisted as arrays.
-  const [labelMapping, setLabelMapping] = useState({ subject_name_labels: [], namespace_labels: [], severity_labels: [] });
   const [agentAccountProviders, setAgentAccountProviders] = useState([]);
   const [providerFields, setProviderFields] = useState([]);
   const [vmAgentCredentials, setVmAgentCredentials] = useState(null);
@@ -414,20 +373,6 @@ const IntegrationDynamicFormModal = ({
     }
   }, [editData]);
 
-  // Hydrate the per-source label mapping (webhook_label_mapping) from the saved
-  // config value. Stored as arrays; rendered as arrays for FilterDropdown multi-select.
-  useEffect(() => {
-    const raw = editData?.integration_config_values?.webhook_label_mapping;
-    if (!raw) return;
-    const parsed = safeJSONParse(raw) || {};
-    const toArr = (arr) => (Array.isArray(arr) ? arr.filter(Boolean) : []);
-    setLabelMapping({
-      subject_name_labels: toArr(parsed.subject_name_labels),
-      namespace_labels: toArr(parsed.namespace_labels),
-      severity_labels: toArr(parsed.severity_labels),
-    });
-  }, [editData]);
-
   // Helper function to check if condition values match current value
   const checkConditionMatch = (conditionValues, currentValue) => {
     if (Array.isArray(conditionValues)) {
@@ -690,7 +635,6 @@ const IntegrationDynamicFormModal = ({
     setErrors({});
     setShowModal(false);
     setRules([{ match: [{ key: '', value: '' }], accountId: '' }]);
-    setLabelMapping({ subject_name_labels: [], namespace_labels: [], severity_labels: [] });
     setAgentAccountProviders([]);
     setProviderFields([]);
     setVmAgentCredentials(null);
@@ -949,31 +893,6 @@ const IntegrationDynamicFormModal = ({
         transformedValues.push({
           name: 'account_mapping',
           value: JSON.stringify({ rules: cleanedRules }),
-          is_encrypted: false,
-        });
-      }
-    }
-
-    // Per-source subject/namespace/severity mapping → webhook_label_mapping.
-    // Each field is a comma-separated list of label key specs; serialize to
-    // arrays. Emit when any field is set, or when a saved mapping is being
-    // cleared (empty arrays parse to a no-op on the backend) so users can
-    // remove a previously-configured mapping.
-    if (integrationName.includes('_webhook') && integrationName !== 'workflow_webhook') {
-      const labelMappingPayload = {
-        subject_name_labels: (labelMapping.subject_name_labels || []).filter(Boolean),
-        namespace_labels: (labelMapping.namespace_labels || []).filter(Boolean),
-        severity_labels: (labelMapping.severity_labels || []).filter(Boolean),
-      };
-      const hasAnyLabelMapping =
-        labelMappingPayload.subject_name_labels.length > 0 ||
-        labelMappingPayload.namespace_labels.length > 0 ||
-        labelMappingPayload.severity_labels.length > 0;
-      const previouslySet = !!editData?.integration_config_values?.webhook_label_mapping;
-      if (hasAnyLabelMapping || previouslySet) {
-        transformedValues.push({
-          name: 'webhook_label_mapping',
-          value: JSON.stringify(labelMappingPayload),
           is_encrypted: false,
         });
       }
@@ -1939,64 +1858,6 @@ const IntegrationDynamicFormModal = ({
                   >
                     If no rule matches, the webhook is routed to the account selected above.
                   </Typography>
-                </Box>
-
-                <Typography
-                  variant='body2'
-                  sx={{
-                    color: ds.brand[500],
-                    fontSize: 'var(--ds-text-body-lg)',
-                    fontWeight: 'var(--ds-font-weight-medium)',
-                    mt: ds.space[6],
-                    mb: ds.space[2],
-                  }}
-                >
-                  Webhook Label Mapping (Optional)
-                </Typography>
-                <Typography
-                  variant='body2'
-                  sx={{
-                    color: ds.gray[400],
-                    fontSize: 'var(--ds-text-small)',
-                    mb: ds.space[4],
-                    pl: ds.space[1],
-                  }}
-                >
-                  Map alert label keys to event fields. Order matters — first non-empty value is used.
-                  You can type custom label keys not in the suggestions. For advanced extraction, use Jinja2 templates (e.g.{' '}
-                  {"{{ labels.app_id | split(sep='/') | last }}"}) or regex (e.g. app_id|/k8s/[^/]+/(.+)).
-                </Typography>
-                <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[3] }}>
-                  <FilterDropdown
-                    multiple
-                    freeSolo
-                    label='Subject Name Labels'
-                    value={labelMapping.subject_name_labels}
-                    options={[...new Set([...COMMON_WEBHOOK_LABEL_KEYS, ...labelMapping.subject_name_labels])]}
-                    onSelect={(e) => setLabelMapping((prev) => ({ ...prev, subject_name_labels: e.target.value }))}
-                    limitTag={3}
-                    data-testid='label-mapping-subject-input'
-                  />
-                  <FilterDropdown
-                    multiple
-                    freeSolo
-                    label='Namespace Labels'
-                    value={labelMapping.namespace_labels}
-                    options={[...new Set([...COMMON_WEBHOOK_LABEL_KEYS, ...labelMapping.namespace_labels])]}
-                    onSelect={(e) => setLabelMapping((prev) => ({ ...prev, namespace_labels: e.target.value }))}
-                    limitTag={3}
-                    data-testid='label-mapping-namespace-input'
-                  />
-                  <FilterDropdown
-                    multiple
-                    freeSolo
-                    label='Severity Labels'
-                    value={labelMapping.severity_labels}
-                    options={[...new Set([...COMMON_WEBHOOK_LABEL_KEYS, ...labelMapping.severity_labels])]}
-                    onSelect={(e) => setLabelMapping((prev) => ({ ...prev, severity_labels: e.target.value }))}
-                    limitTag={3}
-                    data-testid='label-mapping-severity-input'
-                  />
                 </Box>
               </>
             )}
