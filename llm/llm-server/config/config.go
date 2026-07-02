@@ -135,6 +135,17 @@ type appConfig struct {
 	LlmServerEgressFilterSecretsEnabled bool   `mapstructure:"llm_server_egressfilter_secrets_enabled"`
 	LlmServerEgressFilterSecretsMode    string `mapstructure:"llm_server_egressfilter_secrets_mode"`
 
+	// LlmServerEgressFilterAllowlist is a comma-separated list of values that
+	// will be excluded from detection even when they match a rule. Typical
+	// use is canonical docs samples (AWS's AKIAIOSFODNN7EXAMPLE, a GCP
+	// "AIzaSyExampleKey…" snippet, etc.) that legitimately appear in prompts.
+	// Without entries here, enforce mode would block any prompt quoting
+	// vendor docs.
+	//
+	// Loaded once at startup; runtime changes require a process restart.
+	// Whitespace around each value is trimmed; empty entries are skipped.
+	LlmServerEgressFilterAllowlist string `mapstructure:"llm_server_egressfilter_allowlist"`
+
 	// LlmServerMaxIndividualCallTimeoutMinutes caps the duration of a single LLM request.
 	// Prevents the system from hanging indefinitely if a provider (like Google AI) stalls.
 	LlmServerMaxIndividualCallTimeoutMinutes int `mapstructure:"llm_server_max_individual_call_timeout_minutes"`
@@ -631,6 +642,11 @@ func init() {
 	viper.SetDefault("llm_server_egressfilter_enabled", false)
 	viper.SetDefault("llm_server_egressfilter_secrets_enabled", false)
 	viper.SetDefault("llm_server_egressfilter_secrets_mode", "audit")
+	// Required even though "" is the natural zero — viper.Unmarshal skips
+	// fields with no default set, so without this line the env var
+	// LLM_SERVER_EGRESSFILTER_ALLOWLIST is silently ignored in any
+	// deployment that doesn't read a `.env` file (i.e. prod k8s).
+	viper.SetDefault("llm_server_egressfilter_allowlist", "")
 	viper.SetDefault("llm_server_max_individual_call_timeout_minutes", 5)
 	viper.SetDefault("llm_server_global_retry_budget_minutes", 10)
 
