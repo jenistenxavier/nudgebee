@@ -9,7 +9,7 @@ import * as React from 'react';
 import { Box } from '@mui/material';
 import TimelineOutlinedIcon from '@mui/icons-material/TimelineOutlined';
 import ShowChartIcon from '@mui/icons-material/ShowChart';
-import CustomTable2 from '@shared/tables/CustomTable';
+import CustomTable2 from '@shared/tables/CustomTable2';
 import { Card } from '@ui/Card';
 import { Banner } from '@ui/Banner';
 import { CostCallout } from '@ui/CostCallout';

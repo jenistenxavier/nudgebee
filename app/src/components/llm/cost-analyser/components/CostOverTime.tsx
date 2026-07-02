@@ -14,7 +14,7 @@ import StackedLineChartIcon from '@mui/icons-material/StackedLineChart';
 import TableRowsOutlinedIcon from '@mui/icons-material/TableRowsOutlined';
 import { ToggleGroup } from '@ui/ToggleGroup';
 import { Card } from '@ui/Card';
-import CustomTable2 from '@shared/tables/CustomTable';
+import CustomTable2 from '@shared/tables/CustomTable2';
 import SectionHeader from './Section';
 import BarSeries from './BarSeries';
 import LineSeries from './LineSeries';

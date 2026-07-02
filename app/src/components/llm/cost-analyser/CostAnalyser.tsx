@@ -15,7 +15,7 @@ import DashboardOutlinedIcon from '@mui/icons-material/DashboardOutlined';
 import ForumOutlinedIcon from '@mui/icons-material/ForumOutlined';
 import AutoAwesomeOutlinedIcon from '@mui/icons-material/AutoAwesomeOutlined';
 import SmartToyOutlinedIcon from '@mui/icons-material/SmartToyOutlined';
-import CustomTabs from '@shared/navigation/Tabs';
+import CustomTabs from '@shared/CustomTabs';
 import { Banner } from '@ui/Banner';
 import { Chip } from '@ui/Chip';
 import { Modal } from '@ui/Modal';

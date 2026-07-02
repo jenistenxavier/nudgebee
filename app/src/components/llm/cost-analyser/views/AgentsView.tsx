@@ -21,7 +21,7 @@ import { Box } from '@mui/material';
 import PaidOutlinedIcon from '@mui/icons-material/PaidOutlined';
 import TimerOutlinedIcon from '@mui/icons-material/TimerOutlined';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
-import CustomTable2 from '@shared/tables/CustomTable';
+import CustomTable2 from '@shared/tables/CustomTable2';
 import { Card } from '@ui/Card';
 import { Banner } from '@ui/Banner';
 import { Chip } from '@ui/Chip';

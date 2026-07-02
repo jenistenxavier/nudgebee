@@ -10,7 +10,7 @@
  */
 import * as React from 'react';
 import { Box } from '@mui/material';
-import CustomTable2 from '@shared/tables/CustomTable';
+import CustomTable2 from '@shared/tables/CustomTable2';
 import { Chip } from '@ui/Chip';
 import { fmtDuration, fmtTokens } from '../format';
 import { MODEL_HUE } from './palette';

@@ -19,7 +19,7 @@ import RepeatOutlinedIcon from '@mui/icons-material/RepeatOutlined';
 import VisibilityOutlinedIcon from '@mui/icons-material/VisibilityOutlined';
 import OpenInNewOutlinedIcon from '@mui/icons-material/OpenInNewOutlined';
 import ArrowForwardRoundedIcon from '@mui/icons-material/ArrowForwardRounded';
-import CustomTable2 from '@shared/tables/CustomTable';
+import CustomTable2 from '@shared/tables/CustomTable2';
 import { Button } from '@ui/Button';
 import { Label } from '@ui/Label';
 import { Chip } from '@ui/Chip';
