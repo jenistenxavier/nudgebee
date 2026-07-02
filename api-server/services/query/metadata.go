@@ -7127,30 +7127,23 @@ var table_metadata = map[string]TableDefinition{
 		},
 	},
 	"cloud_resource_details_v2": {
-		Type:                Derived,
-		Source:              database.Metastore,
-		TenantIdColumnName:  "tenant_id",
-		AccountIdColumnName: "",
-		Name:                "cloud_resource_details_v2",
-		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
-			tenantId := ctx.GetSecurityContext().GetTenantId()
-			def := fmt.Sprintf(`(
-				SELECT
-					id,
-					cloud_provider,
-					service_name,
-					service_type,
-					resource_type,
-					resource_region,
-					resource_cost,
-					resource_capacity,
-					database_engine,
-					deployment_option,
-					'%s'::text as tenant_id
-				FROM cloud_resource_details
-			) as cloud_resource_details_v2`, tenantId)
-			return def, request, nil
-		},
+		Type:   Derived,
+		Source: database.Metastore,
+		Name:   "cloud_resource_details_v2",
+		Def: `(
+			SELECT
+				id,
+				cloud_provider,
+				service_name,
+				service_type,
+				resource_type,
+				resource_region,
+				resource_cost,
+				resource_capacity,
+				database_engine,
+				deployment_option
+			FROM cloud_resource_details
+		) as cloud_resource_details_v2`,
 		Columns: map[string]ColumnDefinition{
 			"id": {
 				Type: ColumnDefinitionTypeInt,
@@ -7191,10 +7184,6 @@ var table_metadata = map[string]TableDefinition{
 			"deployment_option": {
 				Type: ColumnDefinitionTypeString,
 				Def:  "deployment_option",
-			},
-			"tenant_id": {
-				Type: ColumnDefinitionTypeString,
-				Def:  "tenant_id",
 			},
 		},
 	},
