@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build integration
 
 // TestWorkspaceIntegration drives a real Kubernetes workspace pod and requires a
 // kubeconfig + reachable cluster, so it is gated behind the `integration` build
