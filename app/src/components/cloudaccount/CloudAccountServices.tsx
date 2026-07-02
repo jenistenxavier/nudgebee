@@ -31,7 +31,7 @@ import CopyableText from '@shared/CopyableText';
 import TagsCell from './TagsCell';
 import apiCloudAccount from '@api1/cloud-account';
 import Datetime from '@shared/format/Datetime';
-import { parseJSONSafely } from '@utils/common';
+import { safeJSONParse } from '@utils/common';
 import Trend from '@ui/Trend';
 import Chip from '@ui/Chip';
 import { ds } from '@utils/colors';
@@ -494,6 +494,14 @@ interface IResourceDetail {
   // Ensure all fields accessed from 'item' below are included here
 }
 
+const parseMaybeJSON = (val: unknown): unknown => {
+  if (val == null || typeof val === 'object') return val;
+  if (typeof val !== 'string') return val;
+  return safeJSONParse(val) ?? safeJSONParse(val.replace(/'/g, '"'));
+};
+
+const isPlainObject = (val: unknown): val is Record<string, unknown> => val != null && typeof val === 'object' && !Array.isArray(val);
+
 // Component to display detailed resource information
 const ResourceDetails = (props: { resourceData: IResourceDetail }) => {
   const [detailedResource, setDetailedResource] = useState<any>(null);
@@ -511,8 +519,8 @@ const ResourceDetails = (props: { resourceData: IResourceDetail }) => {
       .then((res: any) => {
         const data = res.data;
         if (data) {
-          data.meta = parseJSONSafely(data.meta) as any;
-          data.tags = parseJSONSafely(data.tags) as any;
+          data.meta = parseMaybeJSON(data.meta);
+          data.tags = parseMaybeJSON(data.tags);
         }
         setDetailedResource(data);
         setLoading(false);
@@ -600,7 +608,7 @@ const ResourceDetails = (props: { resourceData: IResourceDetail }) => {
       </Box>
 
       {/* Display meta configuration if available */}
-      {detailedResource.meta && Object.keys(detailedResource.meta).length > 0 && (
+      {isPlainObject(detailedResource.meta) && Object.keys(detailedResource.meta).length > 0 && (
         <Box sx={{ mb: ds.space[5] }}>
           <Box
             sx={{
@@ -659,7 +667,7 @@ const ResourceDetails = (props: { resourceData: IResourceDetail }) => {
       )}
 
       {/* Display tags if available */}
-      {detailedResource.tags && Object.keys(detailedResource.tags).length > 0 && (
+      {isPlainObject(detailedResource.tags) && Object.keys(detailedResource.tags).length > 0 && (
         <Box sx={{ mb: ds.space[5] }}>
           <Box
             sx={{
