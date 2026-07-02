@@ -91,6 +91,12 @@ type Workflow struct {
 	// Identifies the user who triggered this run (manual/retrigger). Empty for
 	// scheduled/webhook/event-rule triggers.
 	TriggeredByUser *WorkflowUser `json:"triggered_by_user,omitempty" yaml:"triggered_by_user,omitempty"`
+	// RestrictToAccountConfigs is set when the triggering user lacks tenant read
+	// access. When true, FetchWorkflowConfigsActivity drops tenant-scoped configs
+	// from the run so a `{{ Configs.<tenant_key> }}` reference cannot resolve.
+	// Default (zero value) preserves existing behavior for scheduled / event-rule
+	// / child-workflow triggers.
+	RestrictToAccountConfigs bool `json:"-" yaml:"-"`
 	// LiveVersionID is the workflow_versions.id pointed at by
 	// workflows.live_version_id. Determines which snapshot Execute runs against;
 	// independent of Status. Null only for legacy rows without any published
