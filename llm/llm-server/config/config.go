@@ -115,6 +115,26 @@ type appConfig struct {
 	LlmCacheTTLMinutes int  `mapstructure:"llm_cache_ttl_minutes"`
 	LlmEnableCaching   bool `mapstructure:"llm_enable_caching"`
 
+	// Outbound egressfilter master switch. When false, the LLM factory does NOT
+	// install the egressfilter decorator at all — GetLLMModel returns the raw
+	// provider unchanged, no payload serialization, no metric emission. Per-
+	// detector flags below only take effect when this is true.
+	//
+	// This umbrella flag exists so the entire egressfilter subsystem can be
+	// disabled with a single env, independent of which detectors are wired in.
+	// Default false (off).
+	LlmServerEgressFilterEnabled bool `mapstructure:"llm_server_egressfilter_enabled"`
+
+	// Per-detector knobs. These only apply when LlmServerEgressFilterEnabled is true.
+	//
+	// Secrets detector — scans every outbound LLM payload for high-confidence
+	// credential patterns. Mode controls action on a hit:
+	//   "audit"   — detect + emit metrics/logs, do NOT block (safe rollout)
+	//   "enforce" — block the call and return a EgressFilterError to the caller
+	// Any other value is treated as "audit".
+	LlmServerEgressFilterSecretsEnabled bool   `mapstructure:"llm_server_egressfilter_secrets_enabled"`
+	LlmServerEgressFilterSecretsMode    string `mapstructure:"llm_server_egressfilter_secrets_mode"`
+
 	// LlmServerMaxIndividualCallTimeoutMinutes caps the duration of a single LLM request.
 	// Prevents the system from hanging indefinitely if a provider (like Google AI) stalls.
 	LlmServerMaxIndividualCallTimeoutMinutes int `mapstructure:"llm_server_max_individual_call_timeout_minutes"`
@@ -556,6 +576,17 @@ func init() {
 	viper.SetDefault("llm_provider_thinking_budget", -1) // -1: model default, 0: disable, >0: token budget
 	viper.SetDefault("llm_cache_ttl_minutes", 10)
 	viper.SetDefault("llm_enable_caching", true)
+
+	// Outbound egressfilter — entire subsystem disabled by default. The master
+	// switch (llm_server_egressfilter_enabled) gates whether the LLM factory
+	// installs the wrapper at all; per-detector flags (e.g.
+	// llm_server_egressfilter_secrets_enabled) only apply when master is on.
+	// Default mode for any enabled detector is "audit" so a rollout never
+	// causes outage. Flip to "enforce" only after metrics confirm a clean
+	// false-positive baseline.
+	viper.SetDefault("llm_server_egressfilter_enabled", false)
+	viper.SetDefault("llm_server_egressfilter_secrets_enabled", false)
+	viper.SetDefault("llm_server_egressfilter_secrets_mode", "audit")
 	viper.SetDefault("llm_server_max_individual_call_timeout_minutes", 5)
 	viper.SetDefault("llm_server_global_retry_budget_minutes", 10)
 
