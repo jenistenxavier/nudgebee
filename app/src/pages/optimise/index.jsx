@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import AnchorComponent from '@shared/navigation/AnchorComponent';
 import ErrorBoundary from '@shared/ErrorBoundary';
 import OptimizeNewPage from '@components/optimise-new/OptimizeNewPage';
@@ -7,15 +7,34 @@ import CostAnalyser from '@components/llm/cost-analyser/CostAnalyser';
 import { useRouter } from 'next/router';
 import { OptimizeSummaryIcon, RecommendationIcon, LLMConsumptionIcon } from '@assets';
 
-const filterOptions = [
-  { name: 'Summary', id: 'summary', fragment: 'summary', value: 0, icon: OptimizeSummaryIcon },
-  { name: 'Recommendations', id: 'recommendations', fragment: 'recommendations', value: 1, icon: RecommendationIcon, iconSize: 18 },
-  { name: 'LLM Analyser', id: 'llm-analyser', fragment: 'cost-analyser', value: 2, icon: LLMConsumptionIcon, iconSize: 18 },
-];
+export async function getServerSideProps() {
+  return {
+    props: {
+      enableLlmAnalyser: process.env.UI_ENABLE_LLM_ANALYSER === 'true',
+    },
+  };
+}
 
-const Optimise = () => {
+const Optimise = ({ enableLlmAnalyser }) => {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState(0);
+
+  const filterOptions = useMemo(
+    () =>
+      [
+        { name: 'Summary', id: 'summary', fragment: 'summary', value: 0, icon: OptimizeSummaryIcon },
+        { name: 'Recommendations', id: 'recommendations', fragment: 'recommendations', value: 1, icon: RecommendationIcon, iconSize: 18 },
+        enableLlmAnalyser && {
+          name: 'LLM Analyser',
+          id: 'llm-analyser',
+          fragment: 'cost-analyser',
+          value: 2,
+          icon: LLMConsumptionIcon,
+          iconSize: 18,
+        },
+      ].filter(Boolean),
+    [enableLlmAnalyser]
+  );
 
   useEffect(() => {
     const hash = router.asPath.split('#')[1];
