@@ -2,6 +2,7 @@ package cloud
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1845,6 +1846,25 @@ func formatDeployDelta(d time.Duration) string {
 	return fmt.Sprintf("%dd %dh", int(d.Hours())/24, int(d.Hours())%24)
 }
 
+// summarizeLogBody reduces a log body to a human-readable one-liner for the insight
+// highlight. Structured JSON payloads (common for Cloud Run / app logs) are collapsed
+// to their inner message field so the highlight reads "ERROR: <message>" instead of
+// dumping the whole JSON record. Non-JSON bodies are returned unchanged.
+func summarizeLogBody(body string) string {
+	trimmed := strings.TrimSpace(body)
+	if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
+		var parsed map[string]any
+		if json.Unmarshal([]byte(trimmed), &parsed) == nil {
+			for _, k := range []string{"message", "msg", "body", "error", "event", "log"} {
+				if v, ok := parsed[k].(string); ok && strings.TrimSpace(v) != "" {
+					return v
+				}
+			}
+		}
+	}
+	return body
+}
+
 func actionLogExtractErrorPatterns(logs []map[string]any, maxErrors int) []playbooks.PlaybookActionResponseInsight {
 	var insights []playbooks.PlaybookActionResponseInsight
 	seenMessages := make(map[string]bool) // Track distinct log messages
@@ -1882,7 +1902,7 @@ func actionLogExtractErrorPatterns(logs []map[string]any, maxErrors int) []playb
 				}
 
 				insights = append(insights, playbooks.PlaybookActionResponseInsight{
-					Message:  fmt.Sprintf("%s:%s", severityText, body),
+					Message:  fmt.Sprintf("%s: %s", severityText, summarizeLogBody(body)),
 					Severity: "High",
 				})
 				seenMessages[body] = true

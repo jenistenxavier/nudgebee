@@ -17,6 +17,7 @@ require (
 	cloud.google.com/go/recommender v1.18.0
 	cloud.google.com/go/run v1.21.0
 	cloud.google.com/go/storage v1.62.0
+	cloud.google.com/go/trace v1.11.7
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.21.1
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus v1.10.0

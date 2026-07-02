@@ -1227,6 +1227,10 @@ const Investigate = () => {
             const card = new CloudLog(d, i);
             if (await card.canRenderContent()) pushCard(card);
           }
+          if (actionType == 'cloud_traces') {
+            const card = new TracesCard(d, row, i);
+            if (await card.canRenderContent()) pushCard(card);
+          }
           if (actionType == 'cloud_deployment_diff') {
             // Cloud Run before/after deploy diff — reuses the K8s LastDeploymentCard
             // (renders on evidence.type === 'diff' with data:{old,new} + start_at).
