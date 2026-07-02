@@ -200,7 +200,13 @@ const getApplicationLink = (rule, workloadFqdn) => {
   const [workloadName, namespaceName] = workloadFqdn.split(':');
   if (!workloadName || !namespaceName) return rule.redirect_url;
   const url = new URL(rule.redirect_url, 'http://placeholder');
-  if (rule.subcategory === 'Events') {
+  if (rule.subcategory === 'Trace') {
+    // Traces tab (KubernetesTracesListing) filters by these query params; it does
+    // not read eventSubjectName/eventNamespace. Clicking an application chip on a
+    // TraceAggregation insight scopes the traces tab to that workload.
+    url.searchParams.set('workloadName', workloadName);
+    url.searchParams.set('namespaceName', namespaceName);
+  } else if (rule.subcategory === 'Events') {
     url.searchParams.set('eventSubjectName', workloadName);
     url.searchParams.set('eventNamespace', namespaceName);
   } else if (rule.subcategory === 'LogGroup') {
