@@ -183,7 +183,19 @@ func (s *bigQueryService) tableToResource(datasetId, tableId string, metadata *b
 		createdAt = metadata.CreationTime
 	}
 
-	// Convert metadata to map for Meta field
+	// Drop the heavyweight table Schema (column definitions) before serialization.
+	// A single wide or deeply-nested table can carry hundreds of KB of column
+	// metadata; structToMap JSON-round-trips it into a map[string]interface{}
+	// (several times larger), and accumulating that across every table of a large
+	// project OOM-killed the collector in production. Nothing downstream reads the
+	// column schema — the recommendation engine keys off size/partitioning/
+	// clustering/expiration, all of which are preserved. ExternalDataConfig can
+	// embed an equally large schema for external tables and is likewise unread, so
+	// drop it too. metadata is a fresh, locally-owned value, so mutating it is safe.
+	metadata.Schema = nil
+	metadata.ExternalDataConfig = nil
+
+	// Convert (trimmed) metadata to map for Meta field
 	meta := structToMap(metadata)
 
 	// Determine table type
