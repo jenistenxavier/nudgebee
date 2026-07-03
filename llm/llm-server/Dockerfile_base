@@ -30,8 +30,12 @@ LABEL version="noble-playwright-go-optimized"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install minimal system dependencies, letting playwright install --with-deps handle the rest
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install minimal system dependencies, letting playwright install --with-deps handle the rest.
+# apt-get upgrade patches the ubuntu:noble base packages to the latest security
+# releases — the tag lags upstream, so without it the image (and llm-server, which
+# builds FROM it) inherits ~90 fixable OS CVEs. DEBIAN_FRONTEND=noninteractive is
+# already set above, so upgrade won't prompt.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
     wget \
