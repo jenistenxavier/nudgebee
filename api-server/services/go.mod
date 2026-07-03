@@ -2,8 +2,6 @@ module nudgebee/services
 
 go 1.26.1
 
-toolchain go1.26.4
-
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.32.0
 	github.com/Cyprinus12138/otelgin v1.0.3
@@ -136,7 +134,7 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.59.0 // indirect
+	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/richardlehane/mscfb v1.0.4 // indirect
 	github.com/richardlehane/msoleps v1.0.4 // indirect
 	github.com/samber/slog-common v0.21.0 // indirect
