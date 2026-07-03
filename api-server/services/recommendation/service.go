@@ -80,6 +80,9 @@ func ListRecommendationResolutions(context *security.RequestContext, rescommenda
 		}
 		resolutions = append(resolutions, resolution)
 	}
+	if err := r.Err(); err != nil {
+		return []models.RecommendationResolution{}, fmt.Errorf("recommendation: iterate recommendation_resolution rows: %w", err)
+	}
 	return resolutions, nil
 }
 
