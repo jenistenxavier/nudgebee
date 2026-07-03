@@ -58,7 +58,7 @@
     "mermaid": "^11.15.0",
     "next": "^16.2.6",
     "next-auth": "^4.24.12",
-    "nodemailer": "^8.0.5",
+    "nodemailer": "^9.0.1",
     "nookies": "^2.5.2",
     "prismjs": "^1.30.0",
     "react": "^18.2.0",
@@ -143,7 +143,7 @@
   },
   "overrides": {
     "follow-redirects": "^1.16.0",
-    "protobufjs": "^7.5.8",
+    "protobufjs": "^7.6.1",
     "aws-sdk": {
       "uuid": "^11.1.1"
     },
@@ -151,7 +151,8 @@
       "uuid": "^11.1.1"
     },
     "ws": "^8.20.1",
-    "brace-expansion": "^5.0.6"
+    "brace-expansion": "^5.0.6",
+    "form-data": "^4.0.6"
   },
   "browserslist": {
     "production": [
