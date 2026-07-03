@@ -23,7 +23,9 @@ RUN go mod download -x
 # path's newest tags reverted to it). v0.6100.0 also fetches the driver from the npm
 # registry + nodejs.org instead of the retired playwright.azureedge.net CDN, which now
 # 404s and broke this build on the older v0.5700.1 driver zip.
-RUN PWGO_VER=$(grep -oE "playwright-go v\S+" /app/go.mod | sed 's/playwright-go //g') && \
+# Resolve the version with `go list -m` (robust against go.mod formatting) rather
+# than grep/sed; the toolchain is present and `go mod download` has already run.
+RUN PWGO_VER=$(go list -m -f '{{.Version}}' github.com/mxschmitt/playwright-go) && \
     go install github.com/mxschmitt/playwright-go/cmd/playwright@${PWGO_VER}
 
 # --- Stage 2: Install Playwright browsers and copy playwright-go CLI ---
