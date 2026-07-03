@@ -1,7 +1,12 @@
 # syntax=docker/dockerfile:1.7
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26.4-alpine AS builder
 
 WORKDIR /app
+
+# Force exactly go1.26.4 (matches the go.mod toolchain directive) and give the
+# build a distinct cache key so a stale registry-cached go-build layer can't be
+# reused (see the cloud-collector/llm-server toolchain-cache fix).
+ENV GOTOOLCHAIN=go1.26.4
 
 # Install git and other dependencies needed for build and runtime
 RUN apk add --no-cache git make ca-certificates openssh-client
@@ -33,7 +38,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
 
 # Final stage
-FROM alpine:3.19    
+FROM alpine:3.22
 
 WORKDIR /app
 
@@ -113,8 +118,8 @@ RUN mkdir -p /opt/azure-cli-extensions && \
 # Install build & development tools for code verification
 # These enable the agent to run build/lint/test commands on cloned repositories.
 # Go is copied from the builder stage instead of `apk add go` because Alpine
-# 3.19 ships Go 1.21, which fails on target repos whose go.mod requires a
-# newer toolchain (e.g. nudgebee/api-server/services requires >= 1.26.1).
+# ships an older Go than the builder, which fails on target repos whose go.mod
+# requires a newer toolchain (e.g. nudgebee/api-server/services requires >= 1.26.1).
 RUN apk add --no-cache \
     make \
     nodejs \
