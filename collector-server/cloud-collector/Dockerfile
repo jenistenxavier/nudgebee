@@ -6,7 +6,7 @@
 # OSS installs use the public GHCR mirror of our internal cloud-collector base
 # image (Alpine + pre-baked tooling). EE deploys override RUNTIME_BASE to their
 # internal registry via --build-arg.
-ARG RUNTIME_BASE=ghcr.io/nudgebee/nudgebee-cloud-collector-base:20260112-0715
+ARG RUNTIME_BASE=ghcr.io/nudgebee/nudgebee-cloud-collector-base:latest
 
 FROM golang:1.26.4-alpine AS build-stage
 
