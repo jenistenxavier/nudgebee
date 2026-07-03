@@ -16,9 +16,18 @@ ENV PATH="${CONDA_DIR}/bin:${CONDA_DIR}/envs/myenv/bin:$PATH"
 # DEBIAN_FRONTEND=noninteractive keeps apt from opening debconf prompts (which
 # `upgrade` can trigger for reconfigured packages) and hanging the non-TTY CI
 # build. Scoped to this RUN via `export` so it does not persist into the image.
+# Drop build-essential: ml-k8s-server (the only consumer) installs prebuilt
+# manylinux wheels (tensorflow, numpy, pandas, scikit-learn, psycopg2-binary,
+# pydantic, ...) — nothing compiles from source, so a C/C++ toolchain is dead
+# weight at build time and pure attack surface at runtime. It pulled in perl,
+# gcc, make and dev headers, which accounted for ~7 CRITICAL + ~50 HIGH + ~270
+# MEDIUM (mostly NOFIX Debian) on ml-k8s-server. Replace it with just the two
+# runtime shared libs the ML wheels dlopen: libgomp1 (OpenMP, used by
+# numpy/tensorflow) and libstdc++6. Verified: ml-k8s-server still builds and
+# `import tensorflow, numpy, pandas, sklearn` all succeed.
 RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
-    bash build-essential bzip2 ca-certificates curl && \
+    bash libgomp1 libstdc++6 bzip2 ca-certificates curl && \
     rm -rf /var/lib/apt/lists/* && \
     # Install Miniforge
     if [ "$TARGETARCH" = "arm64" ]; then \
