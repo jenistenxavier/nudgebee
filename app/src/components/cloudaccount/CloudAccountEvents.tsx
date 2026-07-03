@@ -26,7 +26,7 @@ import { syncFilterFromQuery, toSeverityLevel } from '@utils/common';
 import { FiArrowRight } from 'react-icons/fi';
 import NBStatusBadge from '@shared/widgets/NBStatusBadge';
 import { usePagination } from '@hooks/usePagination';
-import { hasWriteAccess } from '@lib/auth';
+import { hasReadAccess, hasWriteAccess } from '@lib/auth';
 import { TicketsIcon, dashboardIcon1 as ClassifyIcon, infoIcon } from '@assets';
 import ticketsApi from '@api1/tickets';
 import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
@@ -305,15 +305,22 @@ const CloudAccountEvents = (props: {
   };
 
   const getMenuItems = (item: any, disableTicket: boolean) => {
-    let MENU_ITEMS;
-    if (hasWriteAccess(item.account_id)) {
-      MENU_ITEMS = [
-        {
-          icon: TicketsIcon,
-          label: 'Create Ticket',
-          id: 0,
-          disabled: disableTicket,
-        },
+    const accountId = item.account_id || props.accountId;
+    const MENU_ITEMS: Array<{ icon: any; label: string; id: number; disabled?: boolean }> = [];
+    // Create Ticket is allowed for read-only roles too: the backend `tickets_create`
+    // action authorizes *_readonly roles, so gate this affordance on read access, not
+    // write (mirrors the k8s events table). Classify / Create Automation are genuine
+    // mutations and stay write-gated.
+    if (hasReadAccess(accountId)) {
+      MENU_ITEMS.push({
+        icon: TicketsIcon,
+        label: 'Create Ticket',
+        id: 0,
+        disabled: disableTicket,
+      });
+    }
+    if (hasWriteAccess(accountId)) {
+      MENU_ITEMS.push(
         {
           icon: ClassifyIcon,
           label: 'Classify',
@@ -323,8 +330,8 @@ const CloudAccountEvents = (props: {
           icon: WorkflowIcon,
           label: 'Create Automation',
           id: 2,
-        },
-      ];
+        }
+      );
     }
     return MENU_ITEMS;
   };

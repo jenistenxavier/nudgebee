@@ -2696,7 +2696,7 @@ const Investigate = () => {
                               );
                             })()}
                             {/* Linked Ticket */}
-                            {hasWriteAccess(router.query.accountId) && ticketData?.ticket_id ? (
+                            {hasReadAccess(router.query.accountId) && ticketData?.ticket_id ? (
                               <Box
                                 component='button'
                                 type='button'
@@ -2805,7 +2805,7 @@ const Investigate = () => {
                                     },
                                   ]
                                 : []),
-                              ...(hasWriteAccess(router.query.accountId) && !ticketData?.ticket_id
+                              ...(hasReadAccess(router.query.accountId) && !ticketData?.ticket_id
                                 ? [
                                     {
                                       label: 'Create Ticket',
