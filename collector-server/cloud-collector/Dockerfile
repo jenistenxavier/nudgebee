@@ -10,6 +10,16 @@ ARG RUNTIME_BASE=ghcr.io/nudgebee/nudgebee-cloud-collector-base:alpine3.22
 
 FROM golang:1.26.4-alpine AS build-stage
 
+# Use the builder image's bundled Go toolchain, never an auto-downloaded one.
+# GOTOOLCHAIN=local guarantees the compile uses whatever go the base image ships
+# (currently 1.26.4) and future-proofs a base bump: raising the builder to
+# golang:1.26.5-alpine automatically compiles with 1.26.5 — with a hardcoded
+# version this line would silently download and reuse the old toolchain. It also
+# gives the `go build` layer a distinct cache key so edge.yaml's registry cache
+# (mode=max) can't reuse a layer compiled by an older toolchain — the cause of
+# stdlib CVEs persisting in published images despite the pinned builder.
+ENV GOTOOLCHAIN=local
+
 WORKDIR /app
 
 # Install git (needed for go mod)
