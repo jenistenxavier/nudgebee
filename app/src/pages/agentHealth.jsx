@@ -1,20 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ListingLayout } from '@components1/ds/ListingLayout';
-import { Button as DsButton } from '@components1/ds/Button';
+import { ListingLayout } from '@ui/ListingLayout';
+import { Button as DsButton } from '@ui/Button';
 import { ds } from 'src/utils/colors';
 import k8sApi from '@api1/kubernetes';
-import Text from '@common-new/format/Text';
-import Datetime from '@common-new/format/Datetime';
+import Text from '@shared/format/Text';
+import Datetime from '@shared/format/Datetime';
 import { useRouter } from 'next/router';
 import { Box, Typography, Stack } from '@mui/material';
 import { AgentIconBlue } from '@assets';
-import SafeIcon from '@components1/common/SafeIcon';
+import SafeIcon from '@shared/icons/SafeIcon';
 import { hasWriteAccess } from '@lib/auth';
-import CustomTable from '@common-new/tables/CustomTable2';
+import CustomTable from '@shared/tables/CustomTable2';
 import { useData } from '@context/DataContext';
-import CustomTabs from '@common-new/CustomTabs';
+import CustomTabs from '@shared/CustomTabs';
 import SyncIcon from '@mui/icons-material/Sync';
-import { toast as snackbar } from '@components1/ds/Toast';
+import { toast as snackbar } from '@ui/Toast';
 
 const HEADERS_K8S = ['Status', 'Agent Version', 'Latest Version', 'Last Connected', 'K8s(Provider/Version)'];
 const HEADERS_CLOUD = ['Status', 'Last Connected', 'Cloud', 'Account'];
@@ -101,8 +101,9 @@ const AgentHealth = () => {
   }
 
   useEffect(() => {
-    const accountType = selectedCluster?.cloud_provider || selectedCluster?.type || agentType;
-
+    if (!router.query.accountId) return;
+    if (!selectedCluster?.cloud_provider && !selectedCluster?.type) return;
+    const accountType = selectedCluster?.cloud_provider || selectedCluster?.type;
     const query = {
       accountId: router.query.accountId,
       type: accountType,
@@ -114,15 +115,16 @@ const AgentHealth = () => {
         if (res?.error) {
           return;
         }
-        setData(res?.data ?? []);
-        let result = res.data;
+        const rawData = Array.isArray(res?.data) ? res.data : [];
+        setData(rawData);
+        let result = rawData;
         let tableData = [];
         let scheduledJobsTableData = [];
         let disconnectedService = [];
         let isAgentActive = false;
         let agentType = 'k8s';
 
-        for (let acc of result || []) {
+        for (let acc of result) {
           agentType = acc.type;
           isAgentActive = acc.status === 'CONNECTED';
           const latestVersionsData = latestVersionsRef.current;
@@ -258,7 +260,7 @@ const AgentHealth = () => {
         if (res?.error) {
           return;
         }
-        setProxyData(res?.data ?? []);
+        setProxyData(Array.isArray(res?.data) ? res.data : []);
       })
       .finally(() => {
         setProxyLoading(false);

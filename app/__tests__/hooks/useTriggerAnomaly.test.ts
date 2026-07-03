@@ -8,12 +8,12 @@ jest.mock('@api1/kubernetes1', () => ({
   },
 }));
 
-jest.mock('@components1/common/snackbarService', () => ({
+jest.mock('@shared/snackbarService', () => ({
   snackbar: { success: jest.fn(), error: jest.fn() },
 }));
 
 import apiKubernetes1 from '@api1/kubernetes1';
-import { snackbar } from '@components1/common/snackbarService';
+import { snackbar } from '@shared/snackbarService';
 
 const mockTrigger = apiKubernetes1.triggerAnomalyExecute as jest.Mock;
 
@@ -26,7 +26,7 @@ describe('useTriggerAnomaly', () => {
   });
 
   it('sets isLoading=true during execution then false after', async () => {
-    mockTrigger.mockResolvedValue({ data: { data: { trigger_anomaly_execute: { status: 'triggered' } } } });
+    mockTrigger.mockResolvedValue({ data: { data: { anomaly_execute: { status: 'triggered' } } } });
     const { result } = renderHook(() => useTriggerAnomaly('acc-1'));
 
     await act(async () => {
@@ -36,7 +36,7 @@ describe('useTriggerAnomaly', () => {
   });
 
   it('shows success snackbar when status is "triggered"', async () => {
-    mockTrigger.mockResolvedValue({ data: { data: { trigger_anomaly_execute: { status: 'triggered' } } } });
+    mockTrigger.mockResolvedValue({ data: { data: { anomaly_execute: { status: 'triggered' } } } });
     const { result } = renderHook(() => useTriggerAnomaly('acc-1'));
     await act(async () => {
       await result.current.triggerAnomaly();
@@ -55,7 +55,7 @@ describe('useTriggerAnomaly', () => {
 
   it('shows custom message from response when available', async () => {
     mockTrigger.mockResolvedValue({
-      data: { data: { trigger_anomaly_execute: { status: 'scheduled', message: 'Already running' } } },
+      data: { data: { anomaly_execute: { status: 'scheduled', message: 'Already running' } } },
     });
     const { result } = renderHook(() => useTriggerAnomaly('acc-1'));
     await act(async () => {
@@ -75,7 +75,7 @@ describe('useTriggerAnomaly', () => {
   });
 
   it('calls triggerAnomalyExecute with the accountId', async () => {
-    mockTrigger.mockResolvedValue({ data: { data: { trigger_anomaly_execute: { status: 'triggered' } } } });
+    mockTrigger.mockResolvedValue({ data: { data: { anomaly_execute: { status: 'triggered' } } } });
     const { result } = renderHook(() => useTriggerAnomaly('my-account'));
     await act(async () => {
       await result.current.triggerAnomaly();
