@@ -8,7 +8,7 @@
 # OSS installs use the public GHCR mirror of our internal llm-server base
 # image (Ubuntu noble + Playwright preinstalled). EE deploys override
 # RUNTIME_BASE to their internal registry via --build-arg.
-ARG RUNTIME_BASE=ghcr.io/nudgebee/nudgebee-llm-server-base:ubuntu-noble-20260430
+ARG RUNTIME_BASE=ghcr.io/nudgebee/nudgebee-llm-server-base:ubuntu-noble
 
 # --- Build Stage ---
 FROM golang:1.26.4 AS build-stage
