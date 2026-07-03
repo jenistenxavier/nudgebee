@@ -21,7 +21,7 @@ import Text from '@shared/format/Text';
 import { ds } from '@utils/colors';
 import Datetime from '@shared/format/Datetime';
 import { useCloudFilter } from '@hooks/useCloudFilters';
-import CustomTicketLink from '@shared/CustomTicketLink';
+import TicketLink from '@shared/links/TicketLink';
 import { toSeverityLevel } from '@utils/common';
 
 const TABLE_COLUMNS = ['Message', 'Subject Name', 'Event', 'Principal', 'Severity', { name: 'Occurred time', sortEnabled: true }, ''];
@@ -119,7 +119,7 @@ const CloudAccountTools = (props: { accountId: string | undefined; serviceName: 
               name: item.title,
               hideIcon: true,
               region: ticketReferenceMap.has(item.fingerprint) ? (
-                <CustomTicketLink
+                <TicketLink
                   ticketURL={ticketReferenceMap.get(item.fingerprint)?.url}
                   ticketID={ticketReferenceMap.get(item.fingerprint)?.ticket_id}
                 />
@@ -133,7 +133,7 @@ const CloudAccountTools = (props: { accountId: string | undefined; serviceName: 
 
           data.push({
             component: (
-              <Box sx={{ minWidth: '200px' }}>
+              <Box sx={{ minWidth: ds.space.mul(0, 100) }}>
                 <Text showAutoEllipsis value={item.subject_name} />
                 {item.subject_namespace && <Text value={`ns: ${item.subject_namespace}`} secondaryText />}
               </Box>
