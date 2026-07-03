@@ -8,8 +8,12 @@ ENV PYTHONUNBUFFERED=1
 ENV CONDA_DIR="/opt/conda"
 ENV PATH="${CONDA_DIR}/bin:${CONDA_DIR}/envs/myenv/bin:$PATH"
 
-# Install system dependencies, Miniforge, and setup environment
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install system dependencies, Miniforge, and setup environment.
+# `apt-get upgrade` patches the base Debian packages to the latest trixie
+# security releases — without it the image ships whatever debian:trixie-slim
+# had when the tag was cut (which had drifted far behind: openssl, libgnutls,
+# libpcre2, ... all with fixes available).
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     bash build-essential bzip2 ca-certificates curl && \
     rm -rf /var/lib/apt/lists/* && \
     # Install Miniforge
