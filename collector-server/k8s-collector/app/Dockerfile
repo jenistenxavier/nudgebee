@@ -2,7 +2,7 @@
 # Base image. OSS installs use the public GHCR mirror of our internal
 # Python base (Alpine + uv + native build deps preinstalled). EE deploys
 # override PYTHON_BASE to their internal registry via --build-arg.
-ARG PYTHON_BASE=ghcr.io/nudgebee/nudgebee-python:3.12-20250919-140344
+ARG PYTHON_BASE=ghcr.io/nudgebee/nudgebee-python:3.12
 FROM ${PYTHON_BASE} AS python-base
 
 # Stage 1: builder-base to install dependencies
