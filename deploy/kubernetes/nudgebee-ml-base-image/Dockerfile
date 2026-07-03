@@ -13,7 +13,11 @@ ENV PATH="${CONDA_DIR}/bin:${CONDA_DIR}/envs/myenv/bin:$PATH"
 # security releases — without it the image ships whatever debian:trixie-slim
 # had when the tag was cut (which had drifted far behind: openssl, libgnutls,
 # libpcre2, ... all with fixes available).
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+# DEBIAN_FRONTEND=noninteractive keeps apt from opening debconf prompts (which
+# `upgrade` can trigger for reconfigured packages) and hanging the non-TTY CI
+# build. Scoped to this RUN via `export` so it does not persist into the image.
+RUN export DEBIAN_FRONTEND=noninteractive && \
+    apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     bash build-essential bzip2 ca-certificates curl && \
     rm -rf /var/lib/apt/lists/* && \
     # Install Miniforge
