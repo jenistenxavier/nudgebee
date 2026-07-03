@@ -3,10 +3,13 @@ FROM golang:1.26.4-alpine AS builder
 
 WORKDIR /app
 
-# Force exactly go1.26.4 (matches the go.mod toolchain directive) and give the
-# build a distinct cache key so a stale registry-cached go-build layer can't be
-# reused (see the cloud-collector/llm-server toolchain-cache fix).
-ENV GOTOOLCHAIN=go1.26.4
+# Use the builder image's bundled Go toolchain, never an auto-downloaded one.
+# GOTOOLCHAIN=local future-proofs a base bump (a hardcoded version would silently
+# download+reuse the old toolchain) and gives the build a distinct cache key so a
+# stale registry-cached go-build layer can't be reused (see the cloud-collector/
+# llm-server toolchain-cache fix). The copied /usr/local/go in the final stage
+# therefore also matches the builder.
+ENV GOTOOLCHAIN=local
 
 # Install git and other dependencies needed for build and runtime
 RUN apk add --no-cache git make ca-certificates openssh-client
