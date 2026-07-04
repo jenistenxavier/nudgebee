@@ -108,6 +108,33 @@ func NewLeaderIntervalJob(jobName string, job func() error, interval time.Durati
 	return nil
 }
 
+// NewLeaderCronJob runs job on a cron schedule (e.g. "*/30 * * * *"),
+// only on the elected leader replica. Used by memory-maintenance jobs
+// (session-distill, preferences-consolidate, etc.) where the schedule is
+// time-of-day-based rather than interval-based and only one replica must
+// execute per tick.
+//
+// SingletonMode=Reschedule means if a previous run is still active when the
+// next tick fires, the new tick is dropped rather than queued — appropriate
+// for idempotent maintenance work.
+func NewLeaderCronJob(jobName string, job func() error, cronSpec string) error {
+	if !schedulerInitialized {
+		slog.Error("scheduler: scheduler not initialized")
+		return fmt.Errorf("scheduler: not initialized")
+	}
+	_, err := leaderScheduler.NewJob(
+		gocron.CronJob(cronSpec, false),
+		gocron.NewTask(job),
+		gocron.WithName(jobName),
+		gocron.WithSingletonMode(gocron.LimitModeReschedule),
+	)
+	if err != nil {
+		slog.Error("scheduler: failed to create leader cron job", "error", err, "job", jobName, "schedule", cronSpec)
+		return err
+	}
+	return nil
+}
+
 func workerSync() error {
 	dbms, err := GetDatabaseManager(Metastore)
 	if err != nil {

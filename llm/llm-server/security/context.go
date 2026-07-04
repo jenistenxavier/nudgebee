@@ -48,6 +48,21 @@ func (rc *RequestContext) GetContext() context.Context {
 	return rc.context
 }
 
+// SetContext replaces the inner context.Context on this RequestContext.
+// Callers use this to attach per-turn values (e.g. an egressfilter event
+// reporter) so downstream code that pulls ctx.GetContext() and forwards it
+// to langchaingo (or anywhere else) carries them automatically.
+//
+// Mutates in place rather than returning a new instance because callers
+// already hold and pass around a single *RequestContext per turn; cloning
+// would silently lose values added by earlier ancestors.
+func (rc *RequestContext) SetContext(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	rc.context = ctx
+}
+
 func (rc *RequestContext) GetTraceId() string {
 	span := trace.SpanFromContext(rc.context)
 	return span.SpanContext().TraceID().String()
