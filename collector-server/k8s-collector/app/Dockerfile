@@ -15,10 +15,13 @@ RUN apk add --no-cache libsodium-dev cython libexpat pgbadger
 WORKDIR /opt/pysetup
 COPY poetry.lock pyproject.toml ./
 
-# Install dependencies in a virtual environment
+# Install dependencies in a virtual environment.
+# Create the venv with --without-pip: uv (not pip) resolves and installs our
+# deps and does not need pip in the target venv, so seeding pip/setuptools/wheel
+# only adds vulnerable binaries that trivy flags (pip 25.0.1 CVEs) plus image
+# weight. Omitting them eliminates the pip CVEs at the root.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/root/.cache/pip \
-    python -m venv /opt/pysetup/.venv && \
+    python -m venv --without-pip /opt/pysetup/.venv && \
     uv pip install --requirements pyproject.toml
 
 # Stage 2: production
