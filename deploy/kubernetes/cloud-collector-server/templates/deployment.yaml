@@ -55,7 +55,24 @@ spec:
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
-            {{- end }}          
+            {{- end }}
+            {{- if and .Values.resources.limits .Values.resources.limits.memory (not (hasKey (default dict .Values.env) "GOMEMLIMIT")) }}
+            # Soft-cap the Go heap so the runtime GCs (and returns freed pages)
+            # aggressively as it approaches the cgroup cap, instead of being
+            # OOM-killed. Tracks limits.memory automatically via the downward API.
+            # divisor "1.11" targets ~90% of the limit (1/0.9 ≈ 1.11): GOMEMLIMIT
+            # bounds only the Go heap, so the remaining ~10% is headroom for
+            # non-heap memory (goroutine stacks, runtime/GC metadata, freed-but-
+            # unreturned pages) — without it, total RSS can exceed the limit and
+            # OOM before a GC fires. Prevents a large resource scan from OOMing the
+            # process, which also strands the in-process SQS EventBridge consumer.
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  containerName: {{ .Chart.Name }}
+                  resource: limits.memory
+                  divisor: "1.11"
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}
