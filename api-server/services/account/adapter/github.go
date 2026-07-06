@@ -335,14 +335,16 @@ func clusterSupportsInPlaceResize(ctx AccountAdapterContext, accountId string) b
 }
 
 // resizePolicyPromptSection returns an instruction block telling the code
-// agent (@agent_code_2) to also write a resizePolicy block for each modified
-// container, so the workload becomes in-place resizable (KEP-1287) after the
-// PR merges. Returns "" when injection is disabled via the
-// ci.<domain>/inPlaceResize annotation. The actual rightsizing PR is raised by
-// the code agent editing the manifest/values, so this is delivered as prompt
-// guidance rather than a deterministic file edit. Callers must first confirm
-// the target cluster is >= 1.35 (see clusterSupportsInPlaceResize). mode is the
-// resolved resize-policy mode (see resolveResizePolicyMode).
+// agent (@agent_code_2) to make each modified container in-place resizable
+// (KEP-1287) after the PR merges. It deliberately states the *goal* (the
+// rendered Pod spec must carry the resizePolicy) and lets the agent decide how
+// to achieve it for the repo at hand — a plain manifest, a Helm chart whose
+// template must also be wired, or a values-only repo — rather than assuming a
+// fixed values layout (a chart that never renders .Values.resizePolicy would
+// otherwise get dead config). Returns "" when injection is disabled via the
+// ci.<domain>/inPlaceResize annotation. Callers must first confirm the target
+// cluster is >= 1.35 (see clusterSupportsInPlaceResize). mode is the resolved
+// resize-policy mode (see resolveResizePolicyMode).
 func resizePolicyPromptSection(mode string) string {
 	entries, inject := resizePolicyEntries(mode)
 	if !inject {
@@ -350,13 +352,17 @@ func resizePolicyPromptSection(mode string) string {
 	}
 	return fmt.Sprintf(`
 
-**In-Place Resize (zero-downtime)**: For each container you modify, also add (or replace) a resizePolicy list as a sibling of resources, so the workload can be resized in place on Kubernetes >= 1.35 without a pod restart. Map it into the values file the same way you map resources, using exactly these entries:
+**In-Place Resize (zero-downtime)**: Also make each container you modify in-place resizable so Kubernetes >= 1.35 can change its resources without a pod restart. The goal is that the *rendered* Pod spec for that container carries this resizePolicy (a container-level field, sibling of resources under spec.template.spec.containers[]):
    resizePolicy:
      - resourceName: cpu
        restartPolicy: %s
      - resourceName: memory
        restartPolicy: %s
-   If a resizePolicy already exists for that container, replace it. Do not add resizePolicy to containers you are not modifying.`,
+   Do not assume where this belongs — inspect the repo and make it actually take effect:
+   - Plain manifest (Deployment/StatefulSet/etc.): add resizePolicy next to resources in the container spec.
+   - Helm chart with templates: set the value under the same key path the chart uses for that container's resources, AND confirm the deployment/statefulset template renders it. If the template emits resources but not resizePolicy, wire the template too — mirror exactly how resources is rendered (e.g. a {{- with .Values.<path>.resizePolicy }} block beside the resources block). A values key the template never reads has NO effect, so verify the mapping rather than guessing.
+   - Values-only repo (no templates present after searching): mirror the resources structure for that container in the values file, so the upstream chart can render it.
+   Only touch containers you are modifying; if a resizePolicy already exists there, replace it.`,
 		entries[0].RestartPolicy, entries[1].RestartPolicy)
 }
 
@@ -2036,10 +2042,12 @@ func formatRequestedValuesForPrompt(data map[string]any) map[string]any {
 			formattedFields := make(map[string]any, len(fields))
 			for field, fieldValue := range fields {
 				if resourceName == "memory" {
-					if n, ok := fieldValue.(float64); ok {
-						formattedFields[field] = applyMemoryUnit(n)
-						continue
-					}
+					// Memory may arrive as a raw byte count (UI "Create PR" path)
+					// or as an already unit-suffixed quantity string such as
+					// "338077Ki" (AutoOptimize path). applyMemoryUnit normalizes
+					// both to a compact quantity and leaves anything else as-is.
+					formattedFields[field] = applyMemoryUnit(fieldValue)
+					continue
 				}
 				formattedFields[field] = fieldValue
 			}

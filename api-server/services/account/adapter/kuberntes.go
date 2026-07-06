@@ -26,12 +26,74 @@ const (
 type kuberntesAdapter struct {
 }
 
+// memoryQuantitySuffixes maps Kubernetes memory quantity suffixes to their byte
+// multiplier. Binary (Ki/Mi/...) always end in "i", so they never collide with
+// the SI single-letter forms; the milli suffix "m" is intentionally absent so a
+// CPU quantity like "91m" is not mistaken for a memory value.
+var memoryQuantitySuffixes = []struct {
+	suffix string
+	mult   float64
+}{
+	{"Ei", float64(TiB) * 1024 * 1024}, {"Pi", float64(TiB) * 1024}, {"Ti", TiB}, {"Gi", GiB}, {"Mi", MiB}, {"Ki", KiB},
+	{"E", 1e18}, {"P", 1e15}, {"T", 1e12}, {"G", 1e9}, {"M", 1e6}, {"k", 1e3},
+}
+
+// parseMemoryQuantityToBytes parses a Kubernetes memory quantity string
+// (e.g. "338077Ki", "500Mi", "1.5Gi", "346190848") into a byte count. It
+// returns ok=false for CPU-style quantities (e.g. "91m") and any input that is
+// not a recognizable memory quantity, so callers can leave those untouched.
+func parseMemoryQuantityToBytes(s string) (float64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	for _, u := range memoryQuantitySuffixes {
+		if strings.HasSuffix(s, u.suffix) {
+			n, err := strconv.ParseFloat(strings.TrimSpace(s[:len(s)-len(u.suffix)]), 64)
+			if err != nil {
+				return 0, false
+			}
+			return n * u.mult, true
+		}
+	}
+	// No suffix: a plain byte count.
+	n, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// applyMemoryUnit renders a memory value as a compact Kubernetes quantity string
+// (e.g. "331Mi", "1.5Gi"). It accepts a raw byte count (float64/int, as carried
+// by the recommendation pipeline and the UI "Create PR" path) or an already
+// unit-suffixed quantity string (e.g. "338077Ki", as produced by the
+// AutoOptimize path). Unrecognized inputs are returned unchanged so non-memory
+// quantities (e.g. CPU "91m") pass through.
 func applyMemoryUnit(unit any) any {
 	if unit == nil {
 		return nil
 	}
 
-	unitInt := int(unit.(float64))
+	var bytes float64
+	switch v := unit.(type) {
+	case float64:
+		bytes = v
+	case int:
+		bytes = float64(v)
+	case int64:
+		bytes = float64(v)
+	case string:
+		b, ok := parseMemoryQuantityToBytes(v)
+		if !ok {
+			return unit
+		}
+		bytes = b
+	default:
+		return unit
+	}
+
+	unitInt := int(bytes)
 	switch {
 	case unitInt >= TiB:
 		// Round to 1 decimal place for values equal to or greater than Ti
