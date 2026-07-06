@@ -293,12 +293,15 @@ const apiIntegrations = {
   // ticket-server's read-level tickets_list_configs so readonly users can pick a
   // config. Shape matches what TicketFormSection consumes (id, name, tool,
   // projects); no credentials are returned.
-  listTicketConfigsForCreate: async function (query?: { tool?: string }) {
+  listTicketConfigsForCreate: async function (query?: { tool?: string; status?: string }) {
     try {
       const response = await queryGraphQL(LIST_TICKET_CONFIGS_FOR_CREATE, 'ListTicketConfigsForCreate');
       let rows = response?.data?.data?.tickets_list_configs?.rows || [];
       if (query?.tool) {
-        rows = rows.filter((c: any) => c.tool === query.tool);
+        rows = rows.filter((c: any) => c?.tool === query.tool);
+      }
+      if (query?.status) {
+        rows = rows.filter((c: any) => c?.status === query.status);
       }
       const configs = rows.map((c: any) => ({
         id: c.id,

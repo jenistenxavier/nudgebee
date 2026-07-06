@@ -8,7 +8,7 @@ import { ds } from 'src/utils/colors';
 import { toast as snackbar } from '@ui/Toast';
 import { ANNOTATIONS, CI_PREFIX } from '@lib/annotationKeys';
 import recommendationApi from '@api1/recommendation';
-import apiIntegrations from '@api1/integrations';
+import apiTickets from '@api1/tickets';
 import k8sApi from '@api1/kubernetes';
 import apiAccount from '@api1/account';
 import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
@@ -472,10 +472,14 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
 
   const listGitConfigurations = () => {
     setIsGitReposLoading(true);
-    Promise.all([
-      apiIntegrations.listTicketConfigurationsByTool({ status: 'enabled', tool: 'github' }),
-      apiIntegrations.listTicketConfigurationsByTool({ status: 'enabled', tool: 'gitlab' }),
-    ])
+    // Single fetch: listTicketConfigsForCreate returns all tenant configs and filters
+    // client-side, so fetch once and split by tool to avoid a redundant request.
+    apiTickets
+      .listTicketConfigsForCreate({ status: 'enabled' })
+      .then((res: any) => {
+        const configs = res?.data || [];
+        return [{ data: configs.filter((c: any) => c?.tool === 'github') }, { data: configs.filter((c: any) => c?.tool === 'gitlab') }];
+      })
       .then(([githubRes, gitlabRes]: any[]) => {
         const githubData =
           githubRes?.data?.length > 0
