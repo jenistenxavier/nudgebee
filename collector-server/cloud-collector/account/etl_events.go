@@ -170,7 +170,12 @@ func isPermanentProviderError(err error) bool {
 	if len(matches) < 2 {
 		return false
 	}
-	// HTTP 4xx status codes are permanent client errors
+	// 429 (Too Many Requests) and 408 (Request Timeout) are 4xx but transient —
+	// retrying after backoff can succeed, so don't classify them as permanent.
+	if matches[1] == "429" || matches[1] == "408" {
+		return false
+	}
+	// Remaining HTTP 4xx status codes are permanent client errors
 	return matches[1][0] == '4'
 }
 

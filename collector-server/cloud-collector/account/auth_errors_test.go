@@ -75,6 +75,8 @@ func TestIsPermanentProviderError(t *testing.T) {
 		{"gcp googleapi 403", &googleapi.Error{Code: 403}, true},
 		{"gcp grpc PermissionDenied", status.Error(codes.PermissionDenied, "denied"), true},
 		{"provider 4xx string (regex path)", errors.New("provider returned 404: not found"), true},
+		{"provider 429 is transient", errors.New("provider returned 429: too many requests"), false},
+		{"provider 408 is transient", errors.New("provider returned 408: request timeout"), false},
 		{"provider 5xx string is transient", errors.New("provider returned 503: unavailable"), false},
 		{"plain transient error", errors.New("connection reset by peer"), false},
 	}
