@@ -158,6 +158,14 @@ func isPermanentProviderError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Type-based detection first: cloud SDK auth failures (expired/revoked
+	// credentials, missing permissions) are wrapped errors whose textual form
+	// varies by provider — e.g. the Azure SDK renders 401 as "RESPONSE 401:",
+	// which the string regex below does not match. These never succeed on retry
+	// until an operator rotates the credential, so discard rather than loop.
+	if isAuthFailure(err) {
+		return true
+	}
 	matches := httpStatusCodePattern.FindStringSubmatch(err.Error())
 	if len(matches) < 2 {
 		return false
