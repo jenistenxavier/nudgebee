@@ -100,6 +100,40 @@ func TestCallWorkflowDefaultsToLiveWhenVersionAbsent(t *testing.T) {
 	assert.Equal(t, "live-task", wfDef.Tasks[0].ID, "absent version must default to Live")
 }
 
+// nilVersionStore returns (nil, nil) from GetWorkflowVersion — the not-found-but-no-error
+// shape a store can produce. It proves resolveTargetVersion surfaces a clear error
+// instead of letting the caller dereference a nil version (.Definition) and panic.
+type nilVersionStore struct {
+	*testutils.MockWorkflowStore
+}
+
+func (s *nilVersionStore) FindByName(ctx context.Context, tenantID, accountID, name string) (*model.Workflow, error) {
+	return &model.Workflow{ID: "child-id", Name: name, TenantID: tenantID, AccountID: accountID}, nil
+}
+
+func (s *nilVersionStore) GetWorkflowVersion(ctx context.Context, workflowID string, versionNumber int) (*model.WorkflowVersion, error) {
+	return nil, nil
+}
+
+// TestCallWorkflowPinnedVersionNotFound proves that when the store returns a nil
+// version with no error, the resolver fails cleanly rather than panicking on a
+// nil dereference downstream.
+func TestCallWorkflowPinnedVersionNotFound(t *testing.T) {
+	store := &nilVersionStore{MockWorkflowStore: &testutils.MockWorkflowStore{}}
+
+	ctx := newTestContext().(*testutils.MockTaskContext)
+	ctx.WfStore = store
+
+	task := &CallWorkflowTask{}
+	wfDef, err := task.GetChildWorkflowDefinition(ctx, map[string]any{
+		"workflow_name":    "child",
+		"workflow_version": float64(7),
+	})
+	assert.Error(t, err)
+	assert.Nil(t, wfDef)
+	assert.Contains(t, err.Error(), "not found")
+}
+
 // TestParseWorkflowVersionParam covers the JSON coercion + guard rails: only a
 // positive whole number pins; anything else falls back to Live.
 func TestParseWorkflowVersionParam(t *testing.T) {

@@ -206,8 +206,11 @@ const CallWorkflowFields: React.FC<CallWorkflowFieldsProps> = ({
   // (#282). Templated names have no single workflow to resolve, so skip the fetch.
   const selectedWorkflowId = selectedWorkflow?.id;
   useEffect(() => {
-    if (!accountId || !selectedWorkflowId) {
+    if (accountId === null || accountId === undefined || !selectedWorkflowId) {
       setVersions([]);
+      // Clear any in-flight loading state — otherwise deselecting the workflow
+      // mid-fetch leaves the dropdown spinner stuck on forever.
+      setVersionsLoading(false);
       return;
     }
     let cancelled = false;
@@ -373,8 +376,8 @@ const CallWorkflowFields: React.FC<CallWorkflowFieldsProps> = ({
               options={versionOptions}
               value={versionValue}
               onSelect={(_e: any, next: any) => {
-                const raw = next && typeof next === 'object' ? next.value ?? LIVE_VERSION_VALUE : next ?? LIVE_VERSION_VALUE;
-                setWorkflowVersion(typeof raw === 'string' ? raw : LIVE_VERSION_VALUE);
+                const raw = next !== null && next !== undefined && typeof next === 'object' ? next.value : next;
+                setWorkflowVersion(raw !== null && raw !== undefined ? String(raw) : LIVE_VERSION_VALUE);
               }}
               placeholder='Live (always latest published)'
               searchPlaceholder='Search versions...'

@@ -29,11 +29,19 @@ func resolveTargetVersion(ctx context.Context, store model.WorkflowStore, workfl
 		if err != nil {
 			return nil, fmt.Errorf("failed to load pinned version v%d of workflow '%s': %w", pinned, workflowName, err)
 		}
+		// A store may return (nil, nil) on a not-found row; guard so the caller
+		// never dereferences a nil version (.Definition) and panics.
+		if v == nil {
+			return nil, fmt.Errorf("pinned version v%d of workflow '%s' not found", pinned, workflowName)
+		}
 		return v, nil
 	}
 	v, err := store.GetLiveWorkflowVersion(ctx, workflowID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load live version of workflow '%s': %w", workflowName, err)
+	}
+	if v == nil {
+		return nil, fmt.Errorf("live version of workflow '%s' not found", workflowName)
 	}
 	return v, nil
 }
