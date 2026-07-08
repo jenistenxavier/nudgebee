@@ -37,6 +37,27 @@ query ListCloudResources ($limit:Int, $offset:Int)  {
 }
 `;
 
+export const CLOUD_EXECUTE_COMMAND = `
+mutation CloudExecuteCommand(
+  $account_id: String!
+  $commands: [String!]!
+  $recommendation_id: String
+) {
+  cloud_execute_command(
+    account_id: $account_id
+    commands: $commands
+    recommendation_id: $recommendation_id
+  ) {
+    results {
+      command
+      status
+      output
+      error
+    }
+  }
+}
+`;
+
 export const CLOUD_APPLY_COMMAND = `
 mutation CloudApplyCommand(
   $account_id: String!
@@ -54,6 +75,15 @@ mutation CloudApplyCommand(
     command: $command
     args: $args
   ) {
+    success
+    message
+  }
+}
+`;
+
+export const CLOUD_SYNC_SERVICE = `
+mutation CloudSyncService($account_id: String!, $service_name: String!, $regions: [String!]) {
+  cloud_sync_service(account_id: $account_id, service_name: $service_name, regions: $regions) {
     success
     message
   }
@@ -233,6 +263,23 @@ query cloudAccountCostTrend($dateUnit:String!){
       spend_amount  
       currency_type
     }
+  }
+}
+`;
+
+// Batched per-account spend rollup: spend_groupings_v2 groups by the dimension
+// columns requested in rows, so one query returns (account_id, currency) sums for
+// every account at once — replacing a 2-calls-per-account fan-out.
+export const CLOUD_ACCOUNTS_SPEND_SUMMARY = `
+query CloudAccountsSpendSummary {
+  mtd: spend_groupings_v2(where: __WHERE_CM__){
+    rows{ account_id spend_amount currency_type }
+  }
+  prev_month: spend_groupings_v2(where: __WHERE_LM__){
+    rows{ account_id spend_amount currency_type }
+  }
+  ytd: spend_groupings_v2(where: __WHERE_YR__){
+    rows{ account_id spend_amount currency_type }
   }
 }
 `;
@@ -625,6 +672,23 @@ export function extractGraphQLErrorMessage(response: any): string {
 }
 
 const apiCloudAccount = {
+  // Re-collect the resource inventory for a single cloud service for an account.
+  // Returns { success, message }; throws on transport errors.
+  syncCloudService: async function (accountId: string, serviceName: string, regions?: string[]): Promise<{ success: boolean; message?: string }> {
+    if (accountId === 'demo') {
+      return { success: true };
+    }
+    const response = await queryGraphQL(CLOUD_SYNC_SERVICE, 'CloudSyncService', {
+      account_id: accountId,
+      service_name: serviceName,
+      ...(regions && regions.length > 0 ? { regions } : {}),
+    });
+    const errors = response?.data?.errors;
+    if (errors && errors.length > 0) {
+      throw new Error(extractGraphQLErrorMessage(response));
+    }
+    return response?.data?.data?.cloud_sync_service ?? { success: false };
+  },
   getDistinctTagKeys: async function (
     accountId: string,
     serviceName?: string,
@@ -1384,6 +1448,46 @@ mutation CloudMetrics($request: CloudMetricsRequestInput!) {
       return error;
     }
   },
+  // One-shot MTD / previous-month / YTD spend per account (with currency), for all
+  // accounts in a single query. Used by the Optimise summary right rail instead of
+  // calling cloudAccountSummary + listCloudAccountTrend once per account.
+  listAccountsSpendSummary: async function (accountIds: string[]) {
+    if (!accountIds || accountIds.length === 0) {
+      return { mtd: [], prevMonth: [], ytd: [] };
+    }
+    const currentDate = new Date();
+    const lastMonthDate = new Date();
+    // Pin to the 1st before stepping back a month — on the 29th-31st,
+    // setMonth alone overflows (e.g. Jul 31 → "Jun 31" → Jul 1).
+    lastMonthDate.setDate(1);
+    lastMonthDate.setMonth(lastMonthDate.getMonth() - 1);
+
+    const iso = (d: Date | string) => (d instanceof Date ? d.toISOString() : d);
+    const buildWhere = (s: Date | string, e: Date | string) => ({
+      account_id: { _in: accountIds },
+      _and: [{ spend_date: { _gte: iso(s) } }, { spend_date: { _lte: iso(e) } }, { exclude_aggregate: { _eq: false } }],
+    });
+
+    const query = CLOUD_ACCOUNTS_SPEND_SUMMARY.replace(
+      '__WHERE_CM__',
+      gqlStringify(buildWhere(getStartOfMonth(currentDate), getEndOfMonth(currentDate)))
+    )
+      .replace('__WHERE_LM__', gqlStringify(buildWhere(getStartOfMonth(lastMonthDate), getEndOfMonth(lastMonthDate))))
+      .replace('__WHERE_YR__', gqlStringify(buildWhere(getStartOfYear(currentDate), getEndOfYear(currentDate))));
+
+    const response = await queryGraphQL(query, 'CloudAccountsSpendSummary', {});
+    const errors = response?.data?.errors;
+    if (Array.isArray(errors) && errors.length > 0) {
+      throw new Error(extractGraphQLErrorMessage(response));
+    }
+    const d = response?.data?.data;
+    return {
+      mtd: d?.mtd?.rows || [],
+      prevMonth: d?.prev_month?.rows || [],
+      ytd: d?.ytd?.rows || [],
+    };
+  },
+
   cloudAccountSummary: async function (accountId: string, data: any = null) {
     if (accountId === 'demo') return null;
     try {
@@ -1787,6 +1891,27 @@ mutation CloudMetrics($request: CloudMetricsRequestInput!) {
       return error;
     }
   },
+  executeCommand: async function (params: {
+    account_id: string;
+    commands: string[];
+    recommendation_id?: string;
+  }): Promise<{ data: { results: Array<{ command: string; status: string; output?: string; error?: string }> } | null; error: string | null }> {
+    if (params.account_id === 'demo') {
+      return { data: null, error: 'Demo account does not support command execution.' };
+    }
+    try {
+      const response = await queryGraphQL(CLOUD_EXECUTE_COMMAND, 'CloudExecuteCommand', params);
+      const data = response?.data?.data?.cloud_execute_command;
+      if (data) {
+        return { data, error: null };
+      }
+      return { data: null, error: extractGraphQLErrorMessage(response) };
+    } catch (error: any) {
+      console.error('failed to execute cloud command', error);
+      return { data: null, error: error?.message || 'Network error' };
+    }
+  },
+
   applyCommand: async function (params: {
     account_id: string;
     service_name: string;
@@ -1838,6 +1963,37 @@ mutation CloudMetrics($request: CloudMetricsRequestInput!) {
       };
     } catch (error) {
       console.error('failed to fetch resource action history-', error);
+      return { audits: [], count: 0 };
+    }
+  },
+
+  listCommandExecutionHistory: async function (
+    accountId: string,
+    recommendationId: string,
+    resolutionId?: string,
+    limit = 10,
+    offset = 0
+  ): Promise<{ audits: any[]; count: number }> {
+    try {
+      if (accountId === 'demo') {
+        return { audits: [], count: 0 };
+      }
+      const where: any = {
+        account_id: { _eq: accountId },
+        event_type: { _eq: 'CLI_EXECUTE' },
+        event_target: { _eq: recommendationId },
+      };
+      if (resolutionId) {
+        where.transaction_id = { _eq: resolutionId };
+      }
+      const queryStr = LIST_RESOURCE_ACTION_HISTORY.replaceAll('__WHERE__', gqlStringify(where));
+      const response = await queryGraphQL(queryStr, 'ListCommandExecutionHistory', { limit, offset });
+      return {
+        audits: response?.data?.data?.audits_v2?.rows || [],
+        count: response?.data?.data?.audit_groupings_v2?.rows?.[0]?.count || 0,
+      };
+    } catch (error) {
+      console.error('failed to fetch command execution history', error);
       return { audits: [], count: 0 };
     }
   },

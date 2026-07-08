@@ -53,6 +53,17 @@ func (a *gcloudProvider) QueryLogs(ctx providers.CloudProviderContext, account p
 	return queryGcloudLogs(ctx, account, query)
 }
 
+// QueryDeploymentDiff implements providers.DeploymentDiffProvider for GCP (Cloud Run
+// revisions). Only GCP versions desired-state snapshots, so it's an optional interface.
+func (a *gcloudProvider) QueryDeploymentDiff(ctx providers.CloudProviderContext, account providers.Account, query providers.QueryDeploymentDiffRequest) (providers.QueryDeploymentDiffResponse, error) {
+	return queryGcloudDeploymentDiff(ctx, account, query)
+}
+
+// QueryTraces implements providers.TraceProvider (Cloud Trace).
+func (a *gcloudProvider) QueryTraces(ctx providers.CloudProviderContext, account providers.Account, query providers.QueryTracesRequest) (providers.QueryTracesResponse, error) {
+	return queryGcloudTraces(ctx, account, query)
+}
+
 func (a *gcloudProvider) QueryMetrices(ctx providers.CloudProviderContext, account providers.Account, filter providers.QueryMetricsRequest) (providers.QueryMetricsResponse, error) {
 	service, ok := GetGcloudService(filter.ServiceName)
 	if !ok {

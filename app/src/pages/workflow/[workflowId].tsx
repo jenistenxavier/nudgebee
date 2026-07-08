@@ -4,7 +4,7 @@ import { useEffect } from 'react';
 import { Box, CircularProgress, Typography } from '@mui/material';
 import { hasWriteAccess } from '@lib/auth';
 
-const WorkflowBuilderNoteBook = dynamic(() => import('@components1/workflow/WorkflowBuilderNotebook'), {
+const WorkflowBuilderNoteBook = dynamic(() => import('@components/workflow/WorkflowBuilderNotebook'), {
   ssr: false,
   loading: () => (
     <Box
@@ -20,7 +20,7 @@ const WorkflowBuilderNoteBook = dynamic(() => import('@components1/workflow/Work
       }}
     >
       <CircularProgress size={32} />
-      <Typography sx={{ color: '#6b7280', fontSize: '14px' }}>Loading automation builder...</Typography>
+      <Typography sx={{ color: 'var(--ds-gray-600)', fontSize: 'var(--ds-text-body-lg)' }}>Loading automation builder...</Typography>
     </Box>
   ),
 });

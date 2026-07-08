@@ -43,13 +43,14 @@ type QueryMetricsResponse struct {
 }
 
 type MetricItem struct {
-	Name        string      `json:"name"`
-	Statistics  string      `json:"statistics"`
-	ResourceId  string      `json:"resource_id"`
-	Values      []float64   `json:"values"`
-	Timestamps  []time.Time `json:"timestamps"`
-	Region      string      `json:"region"`
-	ServiceName string      `json:"service_name"`
+	Name        string            `json:"name"`
+	Statistics  string            `json:"statistics"`
+	ResourceId  string            `json:"resource_id"`
+	Values      []float64         `json:"values"`
+	Timestamps  []time.Time       `json:"timestamps"`
+	Region      string            `json:"region"`
+	ServiceName string            `json:"service_name"`
+	Labels      map[string]string `json:"labels,omitempty"`
 }
 
 type ListMetricsRequest struct {
@@ -81,6 +82,17 @@ type QueryResourceRequest struct {
 
 type QueryResourceResponse struct {
 	Items []Resource `json:"items"`
+}
+
+type CloudServiceSyncRequest struct {
+	AccountId   string   `json:"account_id" validate:"required"`
+	ServiceName string   `json:"service_name" validate:"required"`
+	Regions     []string `json:"regions"`
+}
+
+type CloudServiceSyncResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
 }
 
 type ResourceStatus string
@@ -191,6 +203,12 @@ type LogQuery struct {
 	Limit         *int64     `json:"limit"`
 	LogMetricName string     `json:"log_metric_name"`
 	FilterPattern string     `json:"filter_pattern"`
+	// GCP generic-scope context (forwarded to the collector's scope resolver when the
+	// per-service / log-metric path scopes nothing — SLO alerts, unmapped resources).
+	ResourceType   string            `json:"resource_type"`
+	ResourceLabels map[string]string `json:"resource_labels"`
+	MetricType     string            `json:"metric_type"`
+	AlertType      string            `json:"alert_type"`
 }
 
 type QueryLogResponse struct {
@@ -201,9 +219,10 @@ type QueryLogResponse struct {
 }
 
 type LogMessage struct {
-	Message   string     `json:"message"`
-	Timestamp int64      `json:"timestamp"`
-	Labels    []LogLabel `json:"labels"`
+	Message    string         `json:"message"`
+	Timestamp  int64          `json:"timestamp"`
+	Labels     []LogLabel     `json:"labels"`
+	Attributes map[string]any `json:"attributes,omitempty"`
 }
 
 type LogLabel struct {
@@ -215,6 +234,29 @@ type LogQueryStatistics struct {
 	RecordsMatched float64 `json:"records_matched"`
 	RecordsScanned float64 `json:"records_scanned"`
 	BytesScanned   float64 `json:"bytes_scanned"`
+}
+
+type DeploymentDiffQuery struct {
+	Region      string `json:"region"`
+	ServiceName string `json:"service_name"`
+	Limit       *int32 `json:"limit"`
+}
+
+type QueryDeploymentDiffRequest struct {
+	AccountId string              `json:"account_id" validate:"required"`
+	Query     DeploymentDiffQuery `json:"query" validate:"required"`
+}
+
+type DeploymentRevisionItem struct {
+	Name       string `json:"name"`
+	CreateTime int64  `json:"create_time"` // unix millis
+	Creator    string `json:"creator"`
+	SpecYAML   string `json:"spec_yaml"`
+}
+
+type QueryDeploymentDiffResponse struct {
+	Revisions []DeploymentRevisionItem `json:"revisions"`
+	Status    string                   `json:"status"`
 }
 
 type QueryServiceMapResourceRequest struct {
@@ -315,4 +357,22 @@ type ApplyCommandRequest struct {
 type ApplyCommandResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+}
+
+type ExecuteCloudCommandRequest struct {
+	AccountId        string   `json:"account_id" validate:"required"`
+	Commands         []string `json:"commands" validate:"required,min=1"`
+	RecommendationId string   `json:"recommendation_id"`
+	ResolutionId     string   `json:"resolution_id"`
+}
+
+type CommandResult struct {
+	Command string `json:"command"`
+	Status  string `json:"status"` // SUCCESS | FAILED | NOT_EXECUTED
+	Output  string `json:"output,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+type ExecuteCloudCommandResponse struct {
+	Results []CommandResult `json:"results"`
 }

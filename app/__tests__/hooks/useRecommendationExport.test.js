@@ -8,7 +8,7 @@ jest.mock('@api1/recommendation', () => ({
   },
 }));
 
-jest.mock('@components1/common/snackbarService', () => ({
+jest.mock('@shared/snackbarService', () => ({
   snackbar: { success: jest.fn(), error: jest.fn() },
 }));
 
@@ -17,7 +17,7 @@ jest.mock('src/utils/fileDownload', () => ({
 }));
 
 import recommendationApi from '@api1/recommendation';
-import { snackbar } from '@components1/common/snackbarService';
+import { snackbar } from '@shared/snackbarService';
 import { downloadBase64File } from 'src/utils/fileDownload';
 
 const mockExport = recommendationApi.exportRecommendations;
@@ -80,11 +80,14 @@ describe('useRecommendationExport', () => {
 
   it('shows error snackbar on API exception', async () => {
     mockExport.mockRejectedValue(new Error('Connection refused'));
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     const { result } = renderHook(() => useRecommendationExport(defaultOptions));
     await act(async () => {
       await result.current.handleExportDownload('csv');
     });
+    expect(errorSpy).toHaveBeenCalledWith('Export error:', expect.any(Error));
     expect(snackbar.error).toHaveBeenCalledWith('Export failed: Connection refused');
+    errorSpy.mockRestore();
   });
 
   it('passes optional filters (namespace, workloadType, status) to API', async () => {
@@ -95,6 +98,6 @@ describe('useRecommendationExport', () => {
     await act(async () => {
       await result.current.handleExportDownload('csv');
     });
-    expect(mockExport).toHaveBeenCalledWith(expect.objectContaining({ namespace: 'default', workloadType: 'Deployment', status: 'open' }));
+    expect(mockExport).toHaveBeenCalledWith(expect.objectContaining({ namespace: 'default', workloadType: 'Deployment', status: ['open'] }));
   });
 });

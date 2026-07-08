@@ -1,14 +1,14 @@
 import { Box } from '@mui/material';
 import { useRouter } from 'next/router';
 import React, { useEffect, useState } from 'react';
-import KubernetesInsertApplicationGroupingModal from '@components1/k8s/landing/k8sGrouping/KubernetesInsertApplicationGroupingModal';
-import KubernetesApplicationGroupingSummary from '@components1/k8s/landing/k8sGrouping/KubernetesApplicationGroupingSummary';
+import KubernetesInsertApplicationGroupingModal from '@components/k8s/landing/k8sGrouping/KubernetesInsertApplicationGroupingModal';
+import KubernetesApplicationGroupingSummary from '@components/k8s/landing/k8sGrouping/KubernetesApplicationGroupingSummary';
 import apiAppGrouping from '@api1/application-groupings';
-import KubernetesWorkloadsTable from '@components1/k8s/details/KubernetesWorkloads';
-import KubernetesEvents from '@components1/events/KubernetesEvents';
-import CustomTabs from '@common-new/CustomTabsForDrilldown';
-import { snackbar } from '@components1/common/snackbarService';
-import Loader from '@components1/common/Loader';
+import KubernetesWorkloadsTable from '@components/k8s/details/KubernetesWorkloads';
+import KubernetesEvents from '@components/events/KubernetesEvents';
+import Tabs from '@shared/navigation/TabsForDrilldown';
+import { toast as snackbar } from '@ui/Toast';
+import Loader from '@shared/Loader';
 
 const tabOptions = [
   { text: 'Summary', value: 0, disabled: false },
@@ -81,8 +81,8 @@ const KubernetesAppGroupingDashboard = () => {
           snackbar[data.severity](data.message);
         }}
       />
-      <Box sx={{ mt: '24px' }}>
-        <CustomTabs
+      <Box sx={{ mt: 'var(--ds-space-5)' }}>
+        <Tabs
           options={tabOptions}
           value={tab}
           onChange={handleChangeTab}

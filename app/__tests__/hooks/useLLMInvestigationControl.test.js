@@ -26,7 +26,7 @@ jest.mock('@api1/workflow', () => ({
   },
 }));
 
-jest.mock('@components1/ds/Toast', () => ({
+jest.mock('@ui/Toast', () => ({
   toast: { success: jest.fn(), error: jest.fn() },
 }));
 
@@ -41,7 +41,7 @@ jest.mock('src/utils/common', () => ({
   }),
 }));
 
-jest.mock('@components1/workflow/utils', () => ({
+jest.mock('@components/workflow/utils', () => ({
   buildWorkflowConversationMessages: jest.fn(() => [{ type: 'response', text: 'Workflow result' }]),
 }));
 
@@ -52,7 +52,7 @@ jest.mock('@lib/auth', () => ({
 jest.mock('uuid', () => ({ v4: jest.fn(() => 'test-session-id') }));
 
 import apiAskNudgebee from '@api1/ask-nudgebee';
-import { toast as snackbar } from '@components1/ds/Toast';
+import { toast as snackbar } from '@ui/Toast';
 
 // The mock's createConversationFetcher closes over this delegate so tests can
 // drive the fetcher's responses by calling mockGetConversation.mockResolvedValue.
@@ -67,7 +67,10 @@ const mockGetModelConfig = apiAskNudgebee.getModelConfig;
 describe('useLLMInvestigationControl', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockListModels.mockResolvedValue({ data: { models: [], default: null } });
+    // Never-resolving by default so no background SET_MODELS dispatch fires
+    // outside act in tests that don't exercise model loading.
+    // Tests that need model data set their own mockResolvedValue before rendering.
+    mockListModels.mockReturnValue(new Promise(() => {}));
     mockGetModelConfig.mockResolvedValue({ data: null });
   });
 

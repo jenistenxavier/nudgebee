@@ -788,6 +788,35 @@ type TriggerCloudSyncResponse {
 }
 
 type Mutation {
+  cloud_sync_service(
+    account_id: String!
+    service_name: String!
+    regions: [String!]
+  ): CloudServiceSyncResponse
+  cloud_execute_command(
+    account_id: String!
+    commands: [String!]!
+    recommendation_id: String
+  ): ExecuteCloudCommandResponse
+}
+
+type CloudServiceSyncResponse {
+  success: Boolean!
+  message: String
+}
+
+type CommandResult {
+  command: String
+  status: String
+  output: String
+  error: String
+}
+
+type ExecuteCloudCommandResponse {
+  results: [CommandResult]
+}
+
+type Mutation {
   cloud_apply_command(
     account_id: String!
     service_name: String!
@@ -1473,6 +1502,10 @@ type Query {
   notifications_list_channels(
     platform: String!
   ): notification_channel_list_resp
+}
+
+type Query {
+  notifications_google_chat_permission_status: gchat_permission_status_resp
 }
 
 type Query {
@@ -5699,6 +5732,10 @@ type tenant_list_all_output {
   name: String!
 }
 
+type Query {
+  tenant_list_all: [tenant_list_all_output!]!
+}
+
 type aws_account_onboard_output {
   url: String!
 }
@@ -6303,6 +6340,11 @@ type NBVersionResponse {
 
 type notification_channel_list_resp {
   data: jsonb
+  error: jsonb
+}
+
+type gchat_permission_status_resp {
+  status: String
   error: jsonb
 }
 
@@ -7423,6 +7465,11 @@ type AiConversationMessage {
   parent_agent_id: String
   message_config: String
   ack_message: String
+  # Per-message jsonb attachment slot, raw JSON text. Namespace-keyed by
+  # subsystem (e.g. `egressfilter`, future `pii_tokenization`). Null when no
+  # subsystem wrote anything for the message. Frontend JSON.parses and
+  # dispatches on whichever top-level keys it understands.
+  metadata: String
   attachments: [AiMessageAttachment!]
 }
 
