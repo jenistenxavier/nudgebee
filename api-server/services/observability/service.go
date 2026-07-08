@@ -72,6 +72,16 @@ type MetricSource interface {
 	GetQuery(ctx *security.RequestContext, fetchMetricsRequest FetchMetricsRequest) (string, error)
 }
 
+// MetricSeriesSource is an OPTIONAL capability a MetricSource may implement to answer
+// "which metric families have series for workload W in namespace N" via a label-selector
+// series lookup. It is intentionally separate from MetricSource so providers that have
+// no series-match equivalent (datadog, cloudwatch, newrelic, …) are not forced to stub
+// it; the orchestrator type-asserts and returns a clear "not supported" error otherwise.
+// Implemented by Prometheus/VictoriaMetrics (and, in a follow-up, Elasticsearch).
+type MetricSeriesSource interface {
+	FetchMetricSeries(ctx *security.RequestContext, fetchMetricSeriesRequest FetchMetricSeriesRequest) (MetricSeriesResult, error)
+}
+
 func escapePromQLString(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
@@ -1189,6 +1199,28 @@ func FetchMetricsList(ctx *security.RequestContext, fetchMetricsListRequest Fetc
 	return output, nil
 }
 
+// FetchMetricSeries resolves which metric families have series for (namespace, workload)
+// on the account's metrics provider. It requires the provider to implement the optional
+// MetricSeriesSource capability; providers without a series-match equivalent return a
+// clear "not supported" error rather than a silent empty result.
+func FetchMetricSeries(ctx *security.RequestContext, fetchMetricSeriesRequest FetchMetricSeriesRequest) (MetricSeriesResult, error) {
+	if fetchMetricSeriesRequest.AccountId == "" {
+		return MetricSeriesResult{}, fmt.Errorf("observability: account_id is required for series-match")
+	}
+	if fetchMetricSeriesRequest.Workload == "" {
+		return MetricSeriesResult{}, fmt.Errorf("observability: workload is required for series-match")
+	}
+	source, err := getMetricsSourceForAccount(ctx, fetchMetricSeriesRequest.AccountId, fetchMetricSeriesRequest.MetricProvider, fetchMetricSeriesRequest.MetricProviderSource)
+	if err != nil {
+		return MetricSeriesResult{}, err
+	}
+	seriesSource, ok := source.(MetricSeriesSource)
+	if !ok {
+		return MetricSeriesResult{}, fmt.Errorf("observability: series-match is not supported for metrics provider %q", fetchMetricSeriesRequest.MetricProvider)
+	}
+	return seriesSource.FetchMetricSeries(ctx, fetchMetricSeriesRequest)
+}
+
 func FetchMetricLabelValues(ctx *security.RequestContext, fetchMetricsLabelValueRequest FetchMetricsLabelValueRequest) ([]OutputMetricsLabelValues, error) {
 	source, err := getMetricsSourceForAccount(ctx, fetchMetricsLabelValueRequest.AccountId, fetchMetricsLabelValueRequest.MetricProvider, fetchMetricsLabelValueRequest.MetricProviderSource)
 	if err != nil {
@@ -1649,6 +1681,14 @@ func buildDatadogWorkloadQueries(meta RequestMetadata, metrics []string) map[str
 func buildPrometheusNodeQueries(meta RequestMetadata, metrics []string) map[string]string {
 	queries := make(map[string]string)
 
+	// Escape the node identity fields before they are interpolated into PromQL,
+	// mirroring the safeMeta sanitisation in buildPrometheusWorkloadQueries. These
+	// originate from request input, so an unescaped quote could otherwise break out
+	// of the query string. meta is a value copy, so reassigning it is local.
+	meta.InternalIP = escapePromQLString(meta.InternalIP)
+	meta.NodeName = escapePromQLString(meta.NodeName)
+	meta.NodeIP = escapePromQLString(meta.NodeIP)
+
 	for _, metricKey := range metrics {
 		switch metricKey {
 		case "cpu_usage":
@@ -1668,7 +1708,10 @@ func buildPrometheusNodeQueries(meta RequestMetadata, metrics []string) map[stri
 		case "disk_used":
 			queries[metricKey] = fmt.Sprintf(`(sum(node_filesystem_size_bytes{mountpoint="/", instance=~"%s.*"}) - sum(node_filesystem_free_bytes{mountpoint="/", instance=~"%s.*"})) or (sum(kubelet_volume_stats_capacity_bytes{instance=~"%s.*"}) - sum(kubelet_volume_stats_available_bytes{instance=~"%s.*"})) or (sum(kubelet_volume_stats_capacity_bytes{instance=~"%s.*"}) - sum(kubelet_volume_stats_available_bytes{instance=~"%s.*"}))`, meta.InternalIP, meta.InternalIP, meta.NodeName, meta.NodeName, meta.NodeIP, meta.NodeIP)
 		case "cpu_usage_line":
-			queries[metricKey] = fmt.Sprintf(`sum by (instance) (rate(node_cpu_seconds_total{mode!="idle", instance=~"%s|%s"}[5m])) or (sum by (node) (rate(node_cpu_seconds_total{mode!="idle", node=~"%s"}[5m]))) or (sum by (node) (rate(node_resources_cpu_usage_seconds_total{mode!="idle", node=~"%s"}[5m])))`, meta.InternalIP, meta.NodeName, meta.NodeName, meta.NodeName)
+			// node-agent labels node_resources_cpu_usage_seconds_total with `instance` (= node name),
+			// not `node`; the last fallback must match on instance or it returns empty when
+			// node-exporter (node_cpu_seconds_total) is absent and CPU renders as 0%.
+			queries[metricKey] = fmt.Sprintf(`sum by (instance) (rate(node_cpu_seconds_total{mode!="idle", instance=~"%s|%s"}[5m])) or (sum by (node) (rate(node_cpu_seconds_total{mode!="idle", node=~"%s"}[5m]))) or (sum by (instance) (rate(node_resources_cpu_usage_seconds_total{mode!="idle", instance=~"%s"}[5m])))`, meta.InternalIP, meta.NodeName, meta.NodeName, meta.NodeName)
 		case "memory_usage_line":
 			queries[metricKey] = fmt.Sprintf(`(avg(node_memory_MemTotal_bytes{instance=~"%s|%s"} - node_memory_MemAvailable_bytes{instance=~"%s|%s"}) by (instance)) or (avg(node_resources_memory_total_bytes{instance=~"%s"} - node_resources_memory_available_bytes{instance=~"%s"}) by (instance)) or (avg(node_memory_MemTotal_bytes{node=~"%s"} - node_memory_MemAvailable_bytes{node=~"%s"}) by (node)) or (avg(node_resources_memory_total_bytes{node=~"%s"} - node_resources_memory_available_bytes{node=~"%s"}) by (node))`, meta.InternalIP, meta.NodeName, meta.InternalIP, meta.NodeName, meta.NodeName, meta.NodeName, meta.NodeName, meta.NodeName, meta.NodeName, meta.NodeName)
 		case "pvc_usage":

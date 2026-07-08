@@ -1,7 +1,7 @@
 import { useSession } from 'next-auth/react';
 import { useEffect, useRef, useState } from 'react';
 import { queryGraphQL } from '@lib/HttpService';
-import Loader from '@components1/common/Loader';
+import Loader from '@shared/Loader';
 
 // AUTHORIZATION MODEL — front-end vs back-end
 //
@@ -141,6 +141,20 @@ export function hasReadAccess(accountId?: string, namespace?: string): boolean {
   }
   if (userData?.readOnlyAccountIds?.includes(accountId)) {
     return true;
+  }
+  // Namespace-scoped admins (k8s_namespace_admin / *_readonly) hold read access to the
+  // account that contains their namespaces. When no specific namespace is requested
+  // (account-level read, e.g. starting an Ask-Nudgebee investigation), grant access if
+  // the account appears in either namespaced set — otherwise these users are falsely
+  // denied even though the backend authorizes them (#32887). The per-namespace block
+  // below still applies the finer namespace check when a namespace IS supplied.
+  if (accountId && !namespace) {
+    if (userData?.namespacedAccountIds?.includes(accountId)) {
+      return true;
+    }
+    if (userData?.namespacedReadOnlyAccountIds?.includes(accountId)) {
+      return true;
+    }
   }
   if (accountId && namespace) {
     const allowedNamespaces = getAllowedNamespaces(accountId) ?? [];

@@ -343,6 +343,9 @@ func (d *OptimizerDao) GetFiltersForAutoOptimize(ctx context.Context, autoOptimi
 		}
 		filters = append(filters, ri)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return filters, nil
 }
 
@@ -369,6 +372,9 @@ func (d *OptimizerDao) GetFiltersForAutoOptimizes(ctx context.Context, ids []uui
 			continue
 		}
 		res[id] = append(res[id], ri)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return res, nil
 }
@@ -412,6 +418,9 @@ func (d *OptimizerDao) GetResourceFilters(ctx context.Context, accountID, tenant
 		} else {
 			inFilters = append(inFilters, ri.String())
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
 	}
 	return likeFilters, inFilters, nil
 }
@@ -480,7 +489,9 @@ func (d *OptimizerDao) GetAutoOptimizeIdsByFilter(ctx context.Context, accountID
 		}
 		ids = append(ids, id)
 	}
-
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return ids, nil
 }
 
@@ -569,6 +580,9 @@ func (d *OptimizerDao) GetRecommendations(ctx context.Context, accountID, tenant
 			return nil, err
 		}
 		recIDs = append(recIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return recIDs, nil
 }
@@ -837,10 +851,89 @@ func (d *OptimizerDao) GetAutoOptimizeTask(ctx context.Context, id uuid.UUID) (*
 	return &task, nil
 }
 
+// GetAutoOptimizeTasksByIDs fetches the terminal state of a set of tasks (used to
+// build the completion-time change summary). Missing IDs are silently omitted.
+func (d *OptimizerDao) GetAutoOptimizeTasksByIDs(ctx context.Context, ids []uuid.UUID) ([]model.AutoOptimizeTask, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	query := `SELECT id, auto_pilot_id, tenant_id, account_id, recommendation_id, status,
+			created_at, updated_at, meta, attributes, resource_filter, scheduled_time, name,
+			reason, error, command, task_id, skipped_by
+		FROM auto_pilot_task WHERE id = ANY($1)`
+
+	var dbTasks []struct {
+		ID               uuid.UUID  `db:"id"`
+		AutoPilotID      uuid.UUID  `db:"auto_pilot_id"`
+		TenantID         uuid.UUID  `db:"tenant_id"`
+		AccountID        uuid.UUID  `db:"account_id"`
+		RecommendationID *uuid.UUID `db:"recommendation_id"`
+		Status           string     `db:"status"`
+		CreatedAt        time.Time  `db:"created_at"`
+		UpdatedAt        time.Time  `db:"updated_at"`
+		Meta             []byte     `db:"meta"`
+		Attributes       []byte     `db:"attributes"`
+		ResourceFilter   []byte     `db:"resource_filter"`
+		ScheduledTime    time.Time  `db:"scheduled_time"`
+		Name             string     `db:"name"`
+		Reason           *string    `db:"reason"`
+		Error            *string    `db:"error"`
+		Command          *string    `db:"command"`
+		TaskID           *uuid.UUID `db:"task_id"`
+		SkippedBy        *uuid.UUID `db:"skipped_by"`
+	}
+
+	if err := d.db.SelectContext(ctx, &dbTasks, query, pq.Array(ids)); err != nil {
+		return nil, err
+	}
+
+	tasks := make([]model.AutoOptimizeTask, 0, len(dbTasks))
+	for _, dbTask := range dbTasks {
+		task := model.AutoOptimizeTask{
+			ID:               dbTask.ID,
+			AutoPilotID:      dbTask.AutoPilotID,
+			TenantID:         dbTask.TenantID,
+			AccountID:        dbTask.AccountID,
+			RecommendationID: dbTask.RecommendationID,
+			Status:           dbTask.Status,
+			CreatedAt:        dbTask.CreatedAt,
+			UpdatedAt:        dbTask.UpdatedAt,
+			ScheduledTime:    dbTask.ScheduledTime,
+			Name:             dbTask.Name,
+			Reason:           dbTask.Reason,
+			Error:            dbTask.Error,
+			Command:          dbTask.Command,
+			TaskID:           dbTask.TaskID,
+			SkippedBy:        dbTask.SkippedBy,
+		}
+
+		if len(dbTask.Meta) > 0 {
+			if err := json.Unmarshal(dbTask.Meta, &task.Meta); err != nil {
+				slog.Error("Failed to unmarshal meta for task", "id", task.ID, "error", err)
+			}
+		}
+		if len(dbTask.Attributes) > 0 {
+			if err := json.Unmarshal(dbTask.Attributes, &task.Attributes); err != nil {
+				slog.Error("Failed to unmarshal attributes for task", "id", task.ID, "error", err)
+			}
+		}
+		if len(dbTask.ResourceFilter) > 0 {
+			if err := json.Unmarshal(dbTask.ResourceFilter, &task.ResourceFilter); err != nil {
+				slog.Error("Failed to unmarshal resource filter for task", "id", task.ID, "error", err)
+			}
+		}
+
+		tasks = append(tasks, task)
+	}
+
+	return tasks, nil
+}
+
 func (d *OptimizerDao) GetAgent(ctx context.Context, accountID uuid.UUID) (*model.Agent, error) {
 	query := `
-		SELECT 
-			id, created_at, updated_at, tenant, cloud_account_id, type, status, 
+		SELECT
+			id, created_at, updated_at, tenant, cloud_account_id, type, status,
 			last_connected_at, last_synced_at, version, k8s_version
 		FROM agent WHERE cloud_account_id = $1
 	`
@@ -876,6 +969,9 @@ func (d *OptimizerDao) GetWorkloadFiltersForNamespace(ctx context.Context, accou
 			continue
 		}
 		filters = append(filters, ri)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return filters, nil
 }
@@ -961,13 +1057,27 @@ func (d *OptimizerDao) GetActiveTasksForRecommendations(ctx context.Context, rec
 }
 
 func (d *OptimizerDao) GetActiveResolutionsForRecommendations(ctx context.Context, recommendationIDs []uuid.UUID) (map[uuid.UUID][]model.RecommendationResolution, error) {
-	if len(recommendationIDs) == 0 {
+	return d.getResolutionsByStatuses(ctx, recommendationIDs, string(model.RecommendationResolutionStatusInProgress))
+}
+
+// GetResolutionsForRecommendations returns resolutions that are either still
+// InProgress (a GitOps PR that has been created carries its URL in
+// type_reference_id while staying InProgress) or Failed (async PR creation
+// failed). Used by the PR-ready follow-up notification.
+func (d *OptimizerDao) GetResolutionsForRecommendations(ctx context.Context, recommendationIDs []uuid.UUID) (map[uuid.UUID][]model.RecommendationResolution, error) {
+	return d.getResolutionsByStatuses(ctx, recommendationIDs,
+		string(model.RecommendationResolutionStatusInProgress),
+		string(model.RecommendationResolutionStatusFailed))
+}
+
+func (d *OptimizerDao) getResolutionsByStatuses(ctx context.Context, recommendationIDs []uuid.UUID, statuses ...string) (map[uuid.UUID][]model.RecommendationResolution, error) {
+	if len(recommendationIDs) == 0 || len(statuses) == 0 {
 		return nil, nil
 	}
 	query := `SELECT id, recommendation_id, type, data, status, type_reference_id,
 			resolver_type, resolver_id, created_at, updated_at, status_message,
 			pr_iteration_count, pr_lifecycle_state, last_pr_check_at
-		FROM recommendation_resolution WHERE recommendation_id = ANY($1) AND status = $2`
+		FROM recommendation_resolution WHERE recommendation_id = ANY($1) AND status = ANY($2)`
 
 	var dbResolutions []struct {
 		ID               uuid.UUID  `db:"id"`
@@ -986,7 +1096,7 @@ func (d *OptimizerDao) GetActiveResolutionsForRecommendations(ctx context.Contex
 		LastPRCheckAt    *time.Time `db:"last_pr_check_at"`
 	}
 
-	if err := d.db.SelectContext(ctx, &dbResolutions, query, pq.Array(recommendationIDs), model.RecommendationResolutionStatusInProgress); err != nil {
+	if err := d.db.SelectContext(ctx, &dbResolutions, query, pq.Array(recommendationIDs), pq.Array(statuses)); err != nil {
 		return nil, err
 	}
 
@@ -1002,6 +1112,7 @@ func (d *OptimizerDao) GetActiveResolutionsForRecommendations(ctx context.Contex
 			ResolverID:       dr.ResolverID,
 			CreatedAt:        dr.CreatedAt,
 			StatusMessage:    dr.StatusMessage,
+			PRLifecycleState: dr.PRLifecycleState,
 		}
 		if dr.UpdatedAt != nil {
 			resolution.UpdatedAt = *dr.UpdatedAt

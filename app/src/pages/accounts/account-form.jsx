@@ -1,16 +1,16 @@
 import { Typography } from '@mui/material';
 import { useRouter } from 'next/router';
-import ServiceNowAccountModal from '@common/ServiceNowAccountModal';
-import ZenDutyAccountModal from '@common/ZenDutyAccountModal';
+import ServiceNowAccountModal from '@shared/ServiceNowAccountModal';
+import ZenDutyAccountModal from '@shared/ZenDutyAccountModal';
 import ListIntegrations from './ListIntegrations';
 import MessagingIntegrationTile from './MessagingIntegrationTile';
 import GoogleChatSpacesPanel from './GoogleChatSpacesPanel';
 import TicketingIntegrationTile from './TicketingIntegrationTile';
-import JiraAccountModal from '@components1/common/JiraAccountModal';
+import JiraAccountModal from '@shared/JiraAccountModal';
 import K8sIntegrationTile from './K8sIntegrationTile';
-import GithubAccountModal from '@components1/common/GithubAccountModal';
-import GitlabAccountModal from '@components1/common/GitlabAccountModal';
-import PagerDutyAccountModal from '@components1/common/PagerDutyAccountModal';
+import GithubAccountModal from '@shared/GithubAccountModal';
+import GitlabAccountModal from '@shared/GitlabAccountModal';
+import PagerDutyAccountModal from '@shared/PagerDutyAccountModal';
 import CloudAccountTile from './CloudAccountTile';
 import AddAwsAccountModal from './AddAwsAccountModal';
 import AddAwsOrgModal from './AddAwsOrgModal';
@@ -179,6 +179,8 @@ export default function AddAccountForm() {
             return <ListIntegrations integrationName={'otel_clickhouse'} />;
           case 'signoz':
             return <ListIntegrations integrationName={'signoz'} />;
+          case 'openobserve':
+            return <ListIntegrations integrationName={'openobserve'} />;
           case 'azure_monitor_webhook':
             return <ListIntegrations integrationName={'azure_monitor_webhook'} />;
           case 'ssh':

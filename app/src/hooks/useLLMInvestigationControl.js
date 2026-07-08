@@ -1,9 +1,9 @@
 import { useCallback, useRef, useEffect, useReducer } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import apiAskNudgebee, { createConversationFetcher } from '@api1/ask-nudgebee'; // Adjust path
-import { snackbar } from '@components1/common/snackbarService';
+import { snackbar } from '@shared/snackbarService';
 import { parseHttpResponseBodyMessage, safeJSONParse } from 'src/utils/common'; // Adjust path
-import { buildWorkflowConversationMessages } from '@components1/workflow/utils';
+import { buildWorkflowConversationMessages } from '@components/workflow/utils';
 import apiWorkflow from '@api1/workflow';
 import { getUserSession } from '@lib/auth';
 import { getBrandTitle } from '@hooks/useTenantBranding';
@@ -345,6 +345,12 @@ const parseConversationMessages = (conversationMessages, accountId) => {
           references: responseReferences,
           ack_message: conversationMessage.ack_message,
           status: conversationMessage.status,
+          // Carry the raw `metadata` jsonb through to the UI response object —
+          // MessageItem parses it and threads the per-message egressfilter
+          // (and future per-subsystem) events into ResponseMetaRail. Without
+          // this passthrough the chip never renders because this hook rebuilds
+          // the UI object from scratch and drops every field it doesn't list.
+          metadata: conversationMessage.metadata,
         };
       }
       const finalData = messageSequence.map((s) => toolRequestResponse[s]).filter(Boolean);

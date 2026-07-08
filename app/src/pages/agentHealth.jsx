@@ -1,20 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ListingLayout } from '@components1/ds/ListingLayout';
-import { Button as DsButton } from '@components1/ds/Button';
+import { ListingLayout } from '@ui/ListingLayout';
+import { Button as DsButton } from '@ui/Button';
 import { ds } from 'src/utils/colors';
 import k8sApi from '@api1/kubernetes';
-import Text from '@common-new/format/Text';
-import Datetime from '@common-new/format/Datetime';
+import Text from '@shared/format/Text';
+import Datetime from '@shared/format/Datetime';
 import { useRouter } from 'next/router';
 import { Box, Typography, Stack } from '@mui/material';
 import { AgentIconBlue } from '@assets';
-import SafeIcon from '@components1/common/SafeIcon';
+import SafeIcon from '@shared/icons/SafeIcon';
 import { hasWriteAccess } from '@lib/auth';
-import CustomTable from '@common-new/tables/CustomTable2';
+import CustomTable from '@shared/tables/CustomTable';
 import { useData } from '@context/DataContext';
-import CustomTabs from '@common-new/CustomTabs';
+import Tabs from '@shared/navigation/Tabs';
 import SyncIcon from '@mui/icons-material/Sync';
-import { toast as snackbar } from '@components1/ds/Toast';
+import { toast as snackbar } from '@ui/Toast';
 
 const HEADERS_K8S = ['Status', 'Agent Version', 'Latest Version', 'Last Connected', 'K8s(Provider/Version)'];
 const HEADERS_CLOUD = ['Status', 'Last Connected', 'Cloud', 'Account'];
@@ -40,6 +40,7 @@ const AgentHealth = () => {
     isTracesManagerConnected: false,
     tracesUrl: '',
     isOpenCostConnected: false,
+    isOpenCostServerSide: false,
     opencostUrl: '',
     isNodeAgentConnected: false,
     nodeAgentCount: 0,
@@ -100,8 +101,9 @@ const AgentHealth = () => {
   }
 
   useEffect(() => {
-    const accountType = selectedCluster?.cloud_provider || selectedCluster?.type || agentType;
-
+    if (!router.query.accountId) return;
+    if (!selectedCluster?.cloud_provider && !selectedCluster?.type) return;
+    const accountType = selectedCluster?.cloud_provider || selectedCluster?.type;
     const query = {
       accountId: router.query.accountId,
       type: accountType,
@@ -113,15 +115,16 @@ const AgentHealth = () => {
         if (res?.error) {
           return;
         }
-        setData(res?.data ?? []);
-        let result = res.data;
+        const rawData = Array.isArray(res?.data) ? res.data : [];
+        setData(rawData);
+        let result = rawData;
         let tableData = [];
         let scheduledJobsTableData = [];
         let disconnectedService = [];
         let isAgentActive = false;
         let agentType = 'k8s';
 
-        for (let acc of result || []) {
+        for (let acc of result) {
           agentType = acc.type;
           isAgentActive = acc.status === 'CONNECTED';
           const latestVersionsData = latestVersionsRef.current;
@@ -171,6 +174,10 @@ const AgentHealth = () => {
               logsProvider: acc.connection_status?.logsConnectionProvider ?? '',
               logsProviderUrl: acc.connection_status?.logProviderUrl ?? '',
               isOpenCostConnected: (isAgentActive && acc.connection_status?.opencostConnection) ?? false,
+              // opencostServerSide is stamped by the backend spend sync when OpenCost is collected
+              // server-side (post-migration default, agent OpenCost off) — surface that rather than
+              // "Disconnected".
+              isOpenCostServerSide: (isAgentActive && acc.connection_status?.opencostServerSide) ?? false,
               opencostUrl: acc.connection_status?.opencostUrl ?? '',
               isNodeAgentConnected: (isAgentActive && acc.connection_status?.nodeAgentConnection) ?? false,
               nodeAgentCount: acc.connection_status?.nodeAgentCount ?? 0,
@@ -253,7 +260,7 @@ const AgentHealth = () => {
         if (res?.error) {
           return;
         }
-        setProxyData(res?.data ?? []);
+        setProxyData(Array.isArray(res?.data) ? res.data : []);
       })
       .finally(() => {
         setProxyLoading(false);
@@ -280,19 +287,26 @@ const AgentHealth = () => {
       const dsTableData = proxyData.flatMap((acc) => {
         const connStatus = typeof acc.connection_status === 'string' ? JSON.parse(acc.connection_status) : acc.connection_status;
         const datasources = connStatus?.datasources || {};
-        return Object.values(datasources).map((ds) => [
-          { text: ds.name || '-' },
-          { text: ds.type || '-' },
-          { text: ds.proxy_type || '-' },
+        return Object.values(datasources).map((datasource) => [
+          { text: datasource.name || '-' },
+          { text: datasource.type || '-' },
+          { text: datasource.proxy_type || '-' },
           {
             component: (
-              <Typography variant='body2' sx={{ color: ds.status === 'healthy' ? 'green' : 'red', fontWeight: 500, textTransform: 'capitalize' }}>
-                {ds.status || '-'}
+              <Typography
+                variant='body2'
+                sx={{
+                  color: datasource.status === 'healthy' ? ds.green[500] : ds.red[500],
+                  fontWeight: 'var(--ds-font-weight-medium)',
+                  textTransform: 'capitalize',
+                }}
+              >
+                {datasource.status || '-'}
               </Typography>
             ),
           },
-          { component: <Datetime value={ds.last_check} /> },
-          { text: ds.error || '-' },
+          { component: <Datetime value={datasource.last_check} /> },
+          { text: datasource.error || '-' },
         ]);
       });
       setProxyDatasourcesData(dsTableData);
@@ -441,7 +455,7 @@ const AgentHealth = () => {
   return (
     <Box sx={{ position: 'relative' }}>
       <Box sx={{ mt: 3 }}>
-        <CustomTabs value={activeTab} onChange={setActiveTab} options={optionsToDisplay} />
+        <Tabs value={activeTab} onChange={setActiveTab} options={optionsToDisplay} />
       </Box>
 
       {activeTab === 0 && (
@@ -502,8 +516,15 @@ const AgentHealth = () => {
                   <li>
                     <b>OpenCost - </b>
                     <ul>
-                      <li>Status - {agentFeatures.isOpenCostConnected ? 'Connected' : 'Disconnected'}</li>
-                      <li>URL - {agentFeatures.opencostUrl}</li>
+                      <li>
+                        Status -{' '}
+                        {agentFeatures.isOpenCostConnected
+                          ? 'Connected'
+                          : agentFeatures.isOpenCostServerSide
+                          ? 'Managed server-side'
+                          : 'Disconnected'}
+                      </li>
+                      {agentFeatures.isOpenCostConnected && <li>URL - {agentFeatures.opencostUrl}</li>}
                     </ul>
                   </li>
                   <li>
@@ -598,10 +619,10 @@ const AgentHealth = () => {
                 flexDirection: 'column',
                 alignItems: 'center',
                 justifyContent: 'center',
-                padding: '50px 32px',
-                borderRadius: '12px',
-                border: '1px solid #E4E4E4',
-                background: '#FFF',
+                padding: 'var(--ds-space-7) var(--ds-space-6)',
+                borderRadius: 'var(--ds-radius-xl)',
+                border: '1px solid var(--ds-gray-300)',
+                background: 'var(--ds-background-100)',
                 mt: 2,
               }}
             >
@@ -609,8 +630,8 @@ const AgentHealth = () => {
                 sx={{
                   width: 64,
                   height: 64,
-                  borderRadius: '16px',
-                  background: 'linear-gradient(135deg, #EBF2FF 0%, #DBEAFE 100%)',
+                  borderRadius: 'var(--ds-radius-xl)',
+                  background: 'linear-gradient(135deg, var(--ds-blue-100) 0%, var(--ds-blue-200) 100%)',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -635,7 +656,16 @@ const AgentHealth = () => {
               >
                 Get started with Proxy Agent monitoring
               </Typography>
-              <Typography sx={{ fontSize: '14px', color: '#667085', mb: 4, textAlign: 'center', maxWidth: '460px', lineHeight: 1.6 }}>
+              <Typography
+                sx={{
+                  fontSize: 'var(--ds-text-body-lg)',
+                  color: 'var(--ds-gray-600)',
+                  mb: 4,
+                  textAlign: 'center',
+                  maxWidth: 'calc(var(--ds-space-0) * 230)',
+                  lineHeight: 1.6,
+                }}
+              >
                 Connect a VM agent to start monitoring your on-premise or virtual machine infrastructure with real-time visibility and actionable
                 insights.
               </Typography>
@@ -655,13 +685,13 @@ const AgentHealth = () => {
                     icon: 'M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z',
                   },
                 ].map((item) => (
-                  <Box key={item.label} sx={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Box key={item.label} sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)' }}>
                     <Box
                       sx={{
                         width: 32,
                         height: 32,
-                        borderRadius: '8px',
-                        background: '#F5F8FF',
+                        borderRadius: 'var(--ds-radius-lg)',
+                        background: 'var(--ds-blue-100)',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
@@ -681,7 +711,16 @@ const AgentHealth = () => {
                         <path d={item.icon} />
                       </svg>
                     </Box>
-                    <Typography sx={{ fontSize: '13px', fontWeight: 500, color: '#344054', whiteSpace: 'nowrap' }}>{item.label}</Typography>
+                    <Typography
+                      sx={{
+                        fontSize: 'var(--ds-text-body)',
+                        fontWeight: 'var(--ds-font-weight-medium)',
+                        color: 'var(--ds-brand-500)',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {item.label}
+                    </Typography>
                   </Box>
                 ))}
               </Stack>
@@ -691,7 +730,9 @@ const AgentHealth = () => {
                   Connect VM Agent
                 </DsButton>
               ) : (
-                <Typography sx={{ fontSize: '13px', color: '#667085', fontStyle: 'italic' }}>Need admin permission to connect a VM agent</Typography>
+                <Typography sx={{ fontSize: 'var(--ds-text-body)', color: 'var(--ds-gray-600)', fontStyle: 'italic' }}>
+                  Need admin permission to connect a VM agent
+                </Typography>
               )}
             </Box>
           ) : (

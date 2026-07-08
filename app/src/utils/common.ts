@@ -1,6 +1,44 @@
 import type { NextRouter } from 'next/router';
 import { v5 } from 'uuid';
 
+// Event aggregation_keys that are excluded from the Troubleshoot dashboard
+// (widgets + lists) only. These are low-signal records (e.g. K8s config-change
+// audit entries) that the backend still triages, but which we do not want
+// inflating the dashboard's triage KPIs or cluttering its lists. This is a
+// frontend display filter — it does NOT change backend triaging.
+export const EXCLUDED_TRIAGE_AGGREGATION_KEYS = ['ConfigurationChange/KubernetesResource/Change'];
+
+/**
+ * Returns the most recent `updated_at` (raw value) across a set of recommendation
+ * rows — i.e. the real "last refreshed" time of the data, regardless of which
+ * backend generated it. Returns null when no row carries a usable timestamp.
+ *
+ * A full scan batch-stamps every open row with the same `updated_at`, so the max
+ * over the currently-loaded page equals the last refresh time. This replaces the
+ * `schedule_jobs.last_exec_time_sec` source, which is only written for
+ * scan_orchestrator scanners and is stale/missing for the ml-k8s-server and
+ * recommendation-service scanners (krr_scan, volume_analyzer, spot_scan,
+ * abandoned_workload_scan).
+ *
+ * The bare-timestamp → UTC normalization mirrors Datetime's parser so the
+ * returned value renders identically to the per-row `updated_at` table cells.
+ */
+export const latestUpdatedAt = (rows: Array<{ updated_at?: string | null }> | null | undefined): string | null => {
+  let best: string | null = null;
+  let bestMs = -Infinity;
+  for (const row of rows ?? []) {
+    const raw = row?.updated_at;
+    if (!raw) continue;
+    const normalized = /([Zz]|[+-]\d{2}:?\d{2})$/.test(raw) ? raw : raw + 'Z';
+    const ms = new Date(normalized).getTime();
+    if (!Number.isNaN(ms) && ms > bestMs) {
+      bestMs = ms;
+      best = raw;
+    }
+  }
+  return best;
+};
+
 /**
  * Maps raw API priority / severity strings (HIGH, MEDIUM, FIRING, DEBUG, OK,
  * HIGHEST, …) to ds/SeverityIcon's fixed 5-level union. Unknown / lower-signal
@@ -169,6 +207,9 @@ export const getCloudProviderLabel = (cloudProvider: string) => {
       break;
     case 'SIGNOZ':
       label = 'Signoz';
+      break;
+    case 'OPENOBSERVE':
+      label = 'OpenObserve';
       break;
     case 'OBSERVE':
       label = 'Observe';
@@ -610,18 +651,28 @@ export const convertToReadableFormat = (input: string) => {
     .join(' ');
 };
 
+// formatAuditActor humanizes an audit EventActor enum (e.g. "K8S_AGENT" -> "K8s Agent")
+// for display in the User column when an audit has no human user_id — i.e. machine /
+// service-initiated events such as agent-run K8s tasks.
+export const formatAuditActor = (actor: string) => {
+  if (!actor) return '';
+  const acronyms: Record<string, string> = { k8s: 'K8s', api: 'API', ml: 'ML', ui: 'UI' };
+  return actor
+    .split('_')
+    .map((word) => acronyms[word.toLowerCase()] || word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
+};
+
 export const formatActionNameForAuditMessage = (actionName: string) => {
-  let formattedName = actionName;
-  if (actionName) {
-    formattedName = actionName
-      .replace(/_?enricher_?/gi, '')
-      .replace(/_/g, ' ')
-      .trim();
-    formattedName = formattedName
-      .split(' ')
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-      .join(' ');
-  }
+  if (!actionName) return '';
+  let formattedName = actionName
+    .replace(/_?enricher_?/gi, '')
+    .replace(/_/g, ' ')
+    .trim();
+  formattedName = formattedName
+    .split(' ')
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
   return formattedName;
 };
 

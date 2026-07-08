@@ -33,6 +33,8 @@ from notifications_server.models.models import (
     SentNotifications,
     NotificationRuleMappings,
     MessagingPlatform,
+    Integration,
+    IntegrationConfigValue,
 )
 from notifications_server.services.messaging_installations import (
     MESSAGING_PLATFORMS,
@@ -540,6 +542,9 @@ class GroupedMessageHandler:
                     self.message_service.get_channels_from_request_or_defaults(
                         installed_platforms, matched_rules, source, first_msg
                     )
+                    await self.message_service._apply_gchat_default_fallback(
+                        session, tenant_id, installed_platforms, first_msg
+                    )
                     params = {"events": [p["parameters"] for p in batch]}
 
                     platform_responses = await self.message_service.send_template_notification(
@@ -625,6 +630,7 @@ class MessageService:
                     return [failed_response("", reason="No messaging platform installation found for this tenant")]
 
                 self.get_channels_from_request_or_defaults(installed_platforms, matched_rules, source, payload)
+                await self._apply_gchat_default_fallback(session, tenant_id, installed_platforms, payload)
 
                 fingerprint = get_fingerprint(type_, payload)
                 platform_responses = await self.trigger_notification(
@@ -901,6 +907,48 @@ class MessageService:
 
         return response_data, None
 
+    @staticmethod
+    async def _resolve_default_gchat_space(session, tenant_id):
+        """Tenant's default Google Chat space (single binding = implicit default; else
+        the one flagged is_default='true'). Returns the space id or None."""
+        result = await session.execute(
+            select(Integration).where(
+                Integration.tenant_id == tenant_id,
+                Integration.type == "google_chat_space",
+                Integration.status != "disabled",
+            )
+        )
+        bindings = result.scalars().all()
+        if not bindings:
+            return None
+        if len(bindings) == 1:
+            return bindings[0].name
+        by_id = {binding.id: binding.name for binding in bindings}
+        cfg = await session.execute(
+            select(IntegrationConfigValue).where(
+                IntegrationConfigValue.integration_id.in_(list(by_id.keys())),
+                IntegrationConfigValue.name == "is_default",
+                IntegrationConfigValue.value == "true",
+            )
+        )
+        row = cfg.scalars().first()
+        return by_id.get(row.integration_id) if row else None
+
+    async def _apply_gchat_default_fallback(self, session, tenant_id, installed_platforms, payload):
+        """Route to the tenant's default Google Chat space when a notification names no
+        destination: no matched rule and no channel in the request payload. Skips when
+        the payload explicitly scopes channels (a targeted send that excludes gchat)."""
+        if (payload or {}).get("channels"):
+            return
+        pending = [ip for ip in installed_platforms if ip.platform == "google_chat" and not ip.to_channel]
+        if not pending:
+            return
+        default_space = await self._resolve_default_gchat_space(session, tenant_id)
+        if not default_space:
+            return
+        for ip in pending:
+            ip.to_channel = {"id": default_space}
+
     async def _send_finding_to_gchat(self, session, tenant_id, ip, finding, _):
         if not GoogleChatAppClient.is_enabled():
             return (
@@ -1022,6 +1070,8 @@ class MessageService:
                 return await self.send_google_chat_template_notification(
                     ip, template_func, param_value, session, tenant
                 )
+            case PlatformTypes.DISCORD.value:
+                return await self.send_discord_template_notification(ip, template_func, param_value, session, tenant)
             case _:
                 LOG.warning("Unable to identify platform %s with installation id %s", ip.platform, ip.id)
                 return None
@@ -1086,6 +1136,32 @@ class MessageService:
             "google_chat",
             reason=result.get("reason"),
             channel_id=result.get("channel_id"),
+        )
+
+    async def send_discord_template_notification(self, ip, template_func, param_value, session, tenant):
+        token = await self.discord_sender.acquire_discord_access_token(session, ip)
+        if not token:
+            return failed_response("discord", reason="Unable to authenticate discord installation")
+
+        from notifications_server.clients.discord_client import DiscordClient
+
+        # ip.to_channel may be a {name, id} dict; normalize to the bare channel id.
+        channel = normalize_channel(ip.to_channel)
+        channel_id = channel.get("id") if isinstance(channel, dict) else channel
+        if not channel_id:
+            return failed_response("discord", reason="No channel ID provided")
+
+        result = await asyncio.to_thread(
+            DiscordClient.chat_post, token=token, channel_id=channel_id, **template_func(param_value)
+        )
+
+        if result and result.get("ok"):
+            return success_response("discord", channel_id=channel_id, message_ts=result.get("ts"))
+
+        return failed_response(
+            "discord",
+            reason=result.get("error") if result else "Unknown error",
+            channel_id=channel_id,
         )
 
     # ----------------------------- Token + cache helpers -----------------------------

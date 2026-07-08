@@ -220,15 +220,17 @@ func main() {
 	// Agentic handler — always initialize gitClient and credHandler in server mode
 	// because /analyze receives repository URLs dynamically in each request
 	gitClient := git.NewGitClient(cfg.Analysis.WorkspaceDir, cfg.Git.CloneTimeout, cfg.Git.MaxRepoSize)
-	credHandler := credentials.NewCredentialHandler(cfg.Credentials.EncryptionKey)
+	credHandler := credentials.NewCredentialHandler()
 
 	agenticHandler, err := handlers.NewAgenticAnalyzeHandler(cfg, gitClient, credHandler)
 	if err != nil {
-		// Log initialization failure but don't fatal, allowing server to start
-		// The /analyze endpoint will need to handle the nil agenticHandler
+		// The agentic handler builds its LLM client per request from the
+		// llm_config llm-server forwards, so it no longer disables itself on a
+		// missing/invalid startup LLM config. A non-nil error here is a genuine
+		// construction failure, which is fatal.
 		initLogger := common.NewLogger("init", "agentic_handler", "system", nil)
-		initLogger.Error(common.EventAnalysisFailure, "Failed to initialize agentic handler - analysis endpoint will be disabled", err, nil)
-		// log.Printf("Warning: Failed to initialize agentic handler: %v", err)
+		initLogger.Error(common.EventAnalysisFailure, "Failed to initialize agentic handler", err, nil)
+		log.Fatalf("failed to initialize agentic handler: %v", err)
 	}
 
 	// Initialize execution handler
@@ -240,16 +242,8 @@ func main() {
 	// API routes
 	v1 := router.Group("/api/v1")
 	{
-		if agenticHandler != nil {
-			v1.POST("/analyze", agenticHandler.HandleAnalyze)
-			v1.GET("/status/*id", agenticHandler.HandleStatus)
-		} else {
-			v1.POST("/analyze", func(c *gin.Context) {
-				c.JSON(http.StatusServiceUnavailable, gin.H{
-					"error": "Analysis service unavailable - failed to initialize LLM client",
-				})
-			})
-		}
+		v1.POST("/analyze", agenticHandler.HandleAnalyze)
+		v1.GET("/status/*id", agenticHandler.HandleStatus)
 		v1.POST("/execute", executionHandler.HandleExecute)
 
 		// File operations
@@ -264,16 +258,8 @@ func main() {
 	}
 
 	// Root routes
-	if agenticHandler != nil {
-		router.POST("/analyze", agenticHandler.HandleAnalyze)
-		router.GET("/status/*id", agenticHandler.HandleStatus)
-	} else {
-		router.POST("/analyze", func(c *gin.Context) {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
-				"error": "Analysis service unavailable - failed to initialize LLM client",
-			})
-		})
-	}
+	router.POST("/analyze", agenticHandler.HandleAnalyze)
+	router.GET("/status/*id", agenticHandler.HandleStatus)
 	router.POST("/execute", executionHandler.HandleExecute)
 
 	// Health check
@@ -318,8 +304,8 @@ func main() {
 				"token",
 				"ssh_key",
 				"basic",
-				"encrypted",
 				"env_ref",
+				"none",
 			},
 			"endpoints": map[string]string{
 				"analyze": "POST /analyze - Perform agentic code analysis",
@@ -485,12 +471,21 @@ func runCLIAnalysis(cfg *config.Config, repoURL, logs, branch, token, prompt, ag
 	// Initialize GitClient and CredentialHandler only if a repository URL is provided
 	if repoURL != "" {
 		gitClient = git.NewGitClient(cfg.Analysis.WorkspaceDir, cfg.Git.CloneTimeout, cfg.Git.MaxRepoSize)
-		credHandler = credentials.NewCredentialHandler(cfg.Credentials.EncryptionKey)
+		credHandler = credentials.NewCredentialHandler()
 	}
 
 	agenticHandler, err := handlers.NewAgenticAnalyzeHandler(cfg, gitClient, credHandler)
 	if err != nil {
 		log.Fatalf("Failed to create agentic handler: %v", err)
+	}
+
+	// CLI/pod mode has no per-request llm_config forwarding: the (env) config is
+	// the only LLM source, so fail fast here if a client cannot be built from it
+	// rather than letting the analysis fail later at request time. The server's
+	// /analyze path does NOT do this — it relies on the per-request llm_config
+	// llm-server forwards (see NewAgenticAnalyzeHandler).
+	if _, lerr := llm.NewClient(cfg); lerr != nil {
+		log.Fatalf("failed to initialize LLM client: %v", lerr)
 	}
 
 	// Create analysis request
@@ -612,7 +607,7 @@ func runFollowup(cfg *config.Config, repoURL, prURL, branch, token, gitProvider 
 		// Clone the repo and checkout the PR branch
 		gitClient := git.NewGitClient(cfg.Analysis.WorkspaceDir, cfg.Git.CloneTimeout, cfg.Git.MaxRepoSize)
 		gitClient.SetLogger(logger)
-		credHandler := credentials.NewCredentialHandler(cfg.Credentials.EncryptionKey)
+		credHandler := credentials.NewCredentialHandler()
 
 		creds := credentials.GitCredentials{
 			Type:  "token",

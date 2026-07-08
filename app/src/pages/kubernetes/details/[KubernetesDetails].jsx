@@ -1,34 +1,35 @@
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/router';
-import AnchorComponent from '@common-new/AnchorComponent';
-import ErrorBoundary from '@components1/common/ErrorBoundary';
-import KuberneteUtilizationSummary from '@components1/k8s/KuberneteUtilizationSummary';
-import KubernetesRightSizing from '@components1/recommendations/KubernetesRightSizing';
-import KubernetesUnusedVolumes from '@components1/recommendations/KubernetesUnusedVolumes';
-import KubernetesBestPractices from '@components1/recommendations/KubernetesBestPractices';
-import KubernetesWorkloadsTable from '@components1/k8s/details/KubernetesWorkloads';
-import KubernetesNodesTable from '@components1/k8s/details/KubernetesNodes';
-import KubernetesPodsTable from '@components1/k8s/details/KubernetesPods';
-import KubernetesNamespaceTable from '@components1/k8s/details/KubernetesNamespace';
+import AnchorComponent from '@components/common/navigation/AnchorComponent';
+import ErrorBoundary from '@shared/ErrorBoundary';
+import KuberneteUtilizationSummary from '@components/k8s/KuberneteUtilizationSummary';
+import KubernetesRightSizing from '@components/recommendations/KubernetesRightSizing';
+import KubernetesUnusedVolumes from '@components/recommendations/KubernetesUnusedVolumes';
+import KubernetesBestPractices from '@components/recommendations/KubernetesBestPractices';
+import KubernetesWorkloadsTable from '@components/k8s/details/KubernetesWorkloads';
+import KubernetesNodesTable from '@components/k8s/details/KubernetesNodes';
+import KubernetesPodsTable from '@components/k8s/details/KubernetesPods';
+import KubernetesNamespaceTable from '@components/k8s/details/KubernetesNamespace';
 import k8sApi from '@api1/kubernetes';
-import KubernetesAbandonedWorkloads from '@components1/recommendations/KubernetesAbandonedWorkloads';
-import KubernetesPVCRightSizing from '@components1/recommendations/KubernetesPVCRightSizing';
-import KubernetesReplicaRightSizing from '@components1/recommendations/KubernetesReplicaRightSizing';
-import KubernetesSpotRecommendation from '@components1/recommendations/KubernetesSpotRecommendation';
-import KubernetesSecurity from '@components1/recommendations/KubernetesSecurity';
-import KubernetesLogsPattern from '@components1/k8s/details/KubernetesLogsPattern';
-import KubernetesEventsTable from '@components1/events/KubernetesEvents';
-import KubernetesApplicationApiFailure from '@components1/events/KubernetesApplicationApiFailure';
+import KubernetesAbandonedWorkloads from '@components/recommendations/KubernetesAbandonedWorkloads';
+import KubernetesPVCRightSizing from '@components/recommendations/KubernetesPVCRightSizing';
+import KubernetesReplicaRightSizing from '@components/recommendations/KubernetesReplicaRightSizing';
+import KubernetesSpotRecommendation from '@components/recommendations/KubernetesSpotRecommendation';
+import KubernetesSecurity from '@components/recommendations/KubernetesSecurity';
+import KubernetesLogsPattern from '@components/k8s/details/KubernetesLogsPattern';
+import KubernetesEventsTable from '@components/events/KubernetesEvents';
+import KubernetesApplicationApiFailure from '@components/events/KubernetesApplicationApiFailure';
 import { useData } from '@context/DataContext';
+import { hasWriteAccess } from '@lib/auth';
 import LogsIcon from '@assets/kubernetes/logs-icon.svg';
 import { Box, Typography } from '@mui/material';
-import { ToggleGroup } from '@components1/ds/ToggleGroup';
+import { ToggleGroup } from '@ui/ToggleGroup';
 import { ds } from '@utils/colors';
-import Loader from '@components1/common/Loader';
-import { ListingLayout } from '@components1/ds/ListingLayout';
-import { snackbar } from '@components1/common/snackbarService';
-import KubernetesApplicationLogFailure from '@components1/events/KubernetesApplicationLogFailure';
-import KubernetesGroupedEvents from '@components1/events/KubernetesGroupedEvents';
+import Loader from '@shared/Loader';
+import { ListingLayout } from '@ui/ListingLayout';
+import { toast as snackbar } from '@ui/Toast';
+import KubernetesApplicationLogFailure from '@components/events/KubernetesApplicationLogFailure';
+import KubernetesGroupedEvents from '@components/events/KubernetesGroupedEvents';
 import {
   BetaIcon,
   FullScreenIcon,
@@ -84,46 +85,45 @@ import {
   SLOInspectionIcon,
   GrafanaIconBlue,
 } from '@assets';
-import KubernetesLogs from '@components1/k8s/details/KubernetesLogs';
-import KubernetesSSLCertificateRecommendation from '@components1/recommendations/KubernetesSSLCertificateRecommendation';
-import KubernetesCisSecurityV2 from '@components1/recommendations/KubernetesCisSecurityV2';
-import KubernetesHelmUpgradeRecommendation from '@components1/recommendations/KubernetesHelmUpgradeRecommendation';
-import KubernetesClusterSummary from '@components1/k8s/KubernetesClusterSummary';
-import KuberneteComputeSummary from '@components1/k8s/KubernetesComputeSummary';
+import KubernetesLogs from '@components/k8s/details/KubernetesLogs';
+import KubernetesSSLCertificateRecommendation from '@components/recommendations/KubernetesSSLCertificateRecommendation';
+import KubernetesCisSecurityV2 from '@components/recommendations/KubernetesCisSecurityV2';
+import KubernetesHelmUpgradeRecommendation from '@components/recommendations/KubernetesHelmUpgradeRecommendation';
+import KubernetesClusterSummary from '@components/k8s/KubernetesClusterSummary';
+import KuberneteComputeSummary from '@components/k8s/KubernetesComputeSummary';
 import PropTypes from 'prop-types';
-import KubernetesPVCTable from '@components1/k8s/details/KubernetesPVC';
-import KubernetesPVTable from '@components1/k8s/details/KubernetesPV';
-import KubernetesServices from '@components1/k8s/details/KubernetesServices';
-import KubernetesOptimizeSummary from '@components1/recommendations/KubernetesOptimizeSummary';
-import KubernetesEventsSummary from '@components1/events/KubernetesEventsSummary';
-import KubernetesClusterSummaryUtilization from '@components1/k8s/KubernetesClusterSummaryUtilization';
-import { KubernetesNodesTrends } from '@components1/k8s/details/KubernetesNodesTrends';
-import KubernetesNodeClass from '@components1/k8s/details/KubernetesNodeClass';
+import KubernetesPVCTable from '@components/k8s/details/KubernetesPVC';
+import KubernetesPVTable from '@components/k8s/details/KubernetesPV';
+import KubernetesServices from '@components/k8s/details/KubernetesServices';
+import KubernetesOptimizeSummary from '@components/recommendations/KubernetesOptimizeSummary';
+import KubernetesEventsSummary from '@components/events/KubernetesEventsSummary';
+import KubernetesClusterSummaryUtilization from '@components/k8s/KubernetesClusterSummaryUtilization';
+import { KubernetesNodesTrends } from '@components/k8s/details/KubernetesNodesTrends';
+import KubernetesNodeClass from '@components/k8s/details/KubernetesNodeClass';
 import apiKubernetes1 from '@api1/kubernetes1';
-import CustomPill from '@components1/common/CustomPill';
-import KubernetesAutoScalerLogs from '@components1/k8s/details/KubernetesAutoScalerLogs';
+import { Chip } from '@ui/Chip';
+import KubernetesAutoScalerLogs from '@components/k8s/details/KubernetesAutoScalerLogs';
 import apiRecommendations from '@api1/recommendation';
-import ClusterUpgradeFeature from '@components1/k8s/ClusterUpgradeFeature';
-import KubernetesLogSensitiveInfo from '@components1/k8s/details/KubernetesLogSensitiveInfo';
-import ListingRecommendationResolution from '@components1/recommendations/ListingRecommendationResolution';
-import KubernetesAnomaly from '@components1/k8s/details/KubernetesAnomaly';
-import DefaultAutoScaler from '@components1/k8s/details/DefaultAutoScaler';
-import KubernetesAutoScalerNodePool from '@components1/k8s/details/KubernetesAutoScalerNodePool';
-import EmptyData from '@components1/common/EmptyData';
-import KubernetesDbmsTable from '@components1/k8s/details/KubernetesDbms';
-import KubernetesQueueTable from '@components1/k8s/details/KubernetesQueue';
-import KubernetesAlertManager from '@components1/k8s/details/KubernetesAlertManager';
-import TriageRulesManager from '@components1/triage/TriageRulesManager';
-import KubernetesTracesListing from '@components1/k8s/details/KubernetesTracesListing';
-import KubernetesServiceMapWrapper from '@components1/k8s/details/KubernetesServiceMap';
-import KubernetesTracesGroupListing from '@components1/k8s/details/KubernetesTracesGroupListing';
-import KubernetesTracesCrossZoneListing from '@components1/k8s/details/KubernetesTracesCrossZone';
-import KubernetesSLOConfigs from '@components1/k8s/KubernetesSLOConfigs';
-import KubernetesClusterUpgradePlanner from '@components1/k8s/clusterUpgradePlanner/KubernetesClusterUpgradePlanner';
-import QueryMetrics from '@components1/k8s/details/QueryMetrics';
-import KubernetesGroupedEventsTable from '@components1/k8s/details/groupedevents/KubernetesGroupedEventsTable';
-import SafeIcon from '@components1/common/SafeIcon';
-import { hasWriteAccess } from '@lib/auth';
+import ClusterUpgradeFeature from '@components/k8s/ClusterUpgradeFeature';
+import KubernetesLogSensitiveInfo from '@components/k8s/details/KubernetesLogSensitiveInfo';
+import ListingRecommendationResolution from '@components/recommendations/ListingRecommendationResolution';
+import KubernetesAnomaly from '@components/k8s/details/KubernetesAnomaly';
+import DefaultAutoScaler from '@components/k8s/details/DefaultAutoScaler';
+import KubernetesAutoScalerNodePool from '@components/k8s/details/KubernetesAutoScalerNodePool';
+import EmptyData from '@shared/EmptyData';
+import KubernetesDbmsTable from '@components/k8s/details/KubernetesDbms';
+import KubernetesQueueTable from '@components/k8s/details/KubernetesQueue';
+import KubernetesAlertManager from '@components/k8s/details/KubernetesAlertManager';
+import TriageRulesManager from '@components/triage/TriageRulesManager';
+import KubernetesTracesListing from '@components/k8s/details/KubernetesTracesListing';
+import KubernetesServiceMapWrapper from '@components/k8s/details/KubernetesServiceMap';
+import KubernetesTracesGroupListing from '@components/k8s/details/KubernetesTracesGroupListing';
+import KubernetesTracesCrossZoneListing from '@components/k8s/details/KubernetesTracesCrossZone';
+import KubernetesSLOConfigs from '@components/k8s/KubernetesSLOConfigs';
+import KubernetesClusterUpgradePlanner from '@components/k8s/clusterUpgradePlanner/KubernetesClusterUpgradePlanner';
+import QueryMetrics from '@components/k8s/details/QueryMetrics';
+import KubernetesGroupedEventsTable from '@components/k8s/details/groupedevents/KubernetesGroupedEventsTable';
+import SafeIcon from '@shared/icons/SafeIcon';
 
 const GrafanaIframe = ({ accountId }) => {
   const iframeRef = useRef(null);
@@ -154,8 +154,8 @@ const GrafanaIframe = ({ accountId }) => {
 
   return (
     <>
-      <Box display='flex' justifyContent='space-between' alignItems='center' marginBottom='5px'>
-        <Typography style={{ margin: 'auto', fontWeight: 600 }}>Grafana Dashboard</Typography>
+      <Box display='flex' justifyContent='space-between' alignItems='center' marginBottom={ds.space[1]}>
+        <Typography style={{ margin: 'auto', fontWeight: 'var(--ds-font-weight-semibold)' }}>Grafana Dashboard</Typography>
         <SafeIcon alt='full screen' src={FullScreenIcon} onClick={toggleFullscreen} style={{ cursor: 'pointer' }} width={20} height={20} />
       </Box>
       <iframe
@@ -304,7 +304,7 @@ const KubernetesDetails = () => {
           value: 3,
           icon: ClusterUpgradeIcon,
           tabName: 'tools',
-          betaIcon: <SafeIcon src={BetaIcon} alt='Beta Icon' width={25} height={20} style={{ marginLeft: '2px' }} />,
+          betaIcon: <SafeIcon src={BetaIcon} alt='Beta Icon' width={25} height={20} style={{ marginLeft: 'var(--ds-space-1)' }} />,
         },
         {
           id: 'Upgrade Planner',
@@ -313,7 +313,7 @@ const KubernetesDetails = () => {
           value: 4,
           icon: ClusterUpgradeIcon,
           tabName: 'tools',
-          betaIcon: <SafeIcon src={BetaIcon} alt='Beta Icon' width={25} height={20} style={{ marginLeft: '2px' }} />,
+          betaIcon: <SafeIcon src={BetaIcon} alt='Beta Icon' width={25} height={20} style={{ marginLeft: 'var(--ds-space-1)' }} />,
         },
         {
           id: 'ssl-certificate-issues',
@@ -341,7 +341,7 @@ const KubernetesDetails = () => {
       const isJaeger = selectedCluster?.cloud_provider === 'jaeger';
       // Grafana embeds a full query/explore surface, so restrict it to users
       // with write access on this cluster — read-only roles are blocked.
-      const canAccessGrafana = grafana && hasWriteAccess(kubeId);
+      const canAccessGrafana = grafana && kubeId && hasWriteAccess(kubeId);
       setTabOptions((prevOptions) =>
         prevOptions.map((option) => {
           if (option.name === 'Grafana') return { ...option, disabled: !canAccessGrafana };
@@ -510,7 +510,7 @@ const KubernetesDetails = () => {
       return (
         <>
           <a
-            style={{ display: 'block', marginBottom: '8px', marginLeft: '-7%' }}
+            style={{ display: 'block', marginBottom: 'var(--ds-space-2)', marginLeft: '-7%' }}
             target='_blank'
             href='https://karpenter.sh/docs/getting-started/migrating-from-cas/'
             rel='noreferrer'
@@ -518,7 +518,7 @@ const KubernetesDetails = () => {
             Karpenter: For a smooth setup, please follow the instructions in this documentation.
           </a>
 
-          <p style={{ textAlign: 'center', fontWeight: 'bold', margin: '8px 0' }}>Or</p>
+          <p style={{ textAlign: 'center', fontWeight: 'bold', margin: 'var(--ds-space-2) 0' }}>Or</p>
 
           <a
             style={{ display: 'block', marginLeft: '-7%' }}
@@ -703,9 +703,11 @@ const KubernetesDetails = () => {
                   <Box
                     sx={{
                       display: 'flex',
+                      alignItems: 'center',
                       bgcolor: ds.background[100],
-                      p: `${ds.space[1]} ${ds.space[3]} ${ds.space[3]} 0`,
-                      borderRadius: `0 0 ${ds.radius.md} ${ds.radius.md}`,
+                      p: ds.space[2],
+                      borderRadius: ds.radius.md,
+                      mb: ds.space[2],
                     }}
                   >
                     <ToggleGroup
@@ -716,7 +718,7 @@ const KubernetesDetails = () => {
                       options={getAutoscalerTabBasedOnAutoscalerType().map((item) => ({
                         value: String(item.value),
                         label: (
-                          <Box display='flex' gap={'6px'} alignItems={'center'}>
+                          <Box display='flex' gap={ds.space.mul(0, 3)} alignItems={'center'}>
                             {item?.icon && <SafeIcon src={item?.icon} height={item?.height || 20} width={item?.width || 20} alt={item.label} />}
                             {item.label}
                           </Box>
@@ -778,9 +780,11 @@ const KubernetesDetails = () => {
                   <Box
                     sx={{
                       display: 'flex',
+                      alignItems: 'center',
                       bgcolor: ds.background[100],
-                      p: `${ds.space[1]} ${ds.space[3]} ${ds.space[3]} 0`,
-                      borderRadius: `0 0 ${ds.radius.md} ${ds.radius.md}`,
+                      p: ds.space[2],
+                      borderRadius: ds.radius.md,
+                      mb: ds.space[2],
                     }}
                   >
                     <ToggleGroup
@@ -806,9 +810,9 @@ const KubernetesDetails = () => {
                       ].map((item) => ({
                         value: item.value,
                         label: (
-                          <Box display='flex' gap={'6px'} alignItems={'center'}>
+                          <Box display='flex' gap={ds.space.mul(0, 3)} alignItems={'center'}>
                             {item.label}
-                            {item.count && <CustomPill value={item.count} />}
+                            {item.count && <Chip count={item.count} tone='info' size='xs' />}
                           </Box>
                         ),
                       }))}
@@ -843,9 +847,11 @@ const KubernetesDetails = () => {
                   <Box
                     sx={{
                       display: 'flex',
+                      alignItems: 'center',
                       bgcolor: ds.background[100],
-                      p: `${ds.space[1]} ${ds.space[3]} ${ds.space[3]} 0`,
-                      borderRadius: `0 0 ${ds.radius.md} ${ds.radius.md}`,
+                      p: ds.space[2],
+                      borderRadius: ds.radius.md,
+                      mb: ds.space[2],
                     }}
                   >
                     <ToggleGroup
@@ -933,7 +939,7 @@ const KubernetesDetails = () => {
               {selectedSubTab == 6 && <KubernetesTracesGroupListing accountId={kubeId} />}
               {selectedSubTab == 7 && <KubernetesTracesCrossZoneListing accountId={kubeId} />}
               {selectedSubTab == 8 && <KubernetesSLOConfigs accountId={kubeId} />}
-              {selectedSubTab == 9 && hasWriteAccess(kubeId) && <GrafanaIframe accountId={kubeId} />}
+              {selectedSubTab == 9 && kubeId && hasWriteAccess(kubeId) && <GrafanaIframe accountId={kubeId} />}
             </>
           )}
           {[tabOptions[5].value].includes(selectedTab) && (

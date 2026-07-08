@@ -31,6 +31,7 @@ import {
   getUserSuperAdminRole,
   getTenantIdByName,
 } from '@lib/UserService';
+import { pickDefaultTenant } from '@lib/defaultTenant';
 import { findTenantByDomain } from '@lib/tenantLookup';
 import { getLicenseDetails, SERVICES_SERVER_UNREACHABLE_MSG, type LicenseTier } from '@lib/license';
 import { enrichAuthToken, enrichSession, onReturningOAuthSignIn, onUnknownOAuthSignIn, resolveLicensedTenantUser } from '@lib/authHooks';
@@ -135,14 +136,12 @@ export async function adapterUser(user: any): Promise<NudgebeeUser> {
   let namespacedAccountIds: string[] = [];
   let namespacedReadOnlyAccountIds: string[] = [];
   const k8sNamespaces: any = {};
-  // Select tenant based on user preferences or defaults
-  if (user.tenants?.length > 0) {
-    const defaultTenant = user.tenants.find((t: any) => t.is_default);
-    if (defaultTenant) {
-      tenant = defaultTenant;
-    } else {
-      tenant = user.tenants[0];
-    }
+  // Select the tenant the session opens in. Prefer the `is_default` tenant,
+  // but only when the user actually has a role there — otherwise land them in a
+  // tenant where they have access instead of logging in roleless (issue #32594).
+  const selectedTenant = pickDefaultTenant(user);
+  if (selectedTenant) {
+    tenant = selectedTenant;
   }
   //filter roles based on tenant
   user.user_roles = user.user_roles ?? [];
@@ -180,20 +179,27 @@ export async function adapterUser(user: any): Promise<NudgebeeUser> {
   namespacedReadOnlyAccountIds = uniq(namespacedReadOnlyAccountIds);
 
   if (accountIds.length > 0 || readonlyAccountIds.length > 0) {
-    // get accountIds from given tenant
+    // Narrow role-granted account ids to those that belong to the selected tenant.
     const resp = await getAccountByTenant(tenant.id);
-    if (resp.data) {
-      const tenantAccounts = resp.data?.cloud_accounts?.map((a: any) => a.id);
+    const tenantAccounts: string[] = resp.data?.cloud_accounts?.map((a: any) => a.id) ?? [];
+    if (tenantAccounts.length > 0) {
       accountIds = accountIds.filter((a) => tenantAccounts.includes(a));
       readonlyAccountIds = readonlyAccountIds.filter((a) => tenantAccounts.includes(a));
       namespacedAccountIds = namespacedAccountIds.filter((a) => tenantAccounts.includes(a));
       namespacedReadOnlyAccountIds = namespacedReadOnlyAccountIds.filter((a) => tenantAccounts.includes(a));
     } else {
-      console.log('unable to get accounts for tenant', tenant.id, resp);
-      accountIds = [];
-      readonlyAccountIds = [];
-      namespacedAccountIds = [];
-      namespacedReadOnlyAccountIds = [];
+      // No tenant accounts resolved. This session scope is ADVISORY — the backend
+      // re-authorizes every request — so we deliberately keep the user's explicit role
+      // grants rather than fail closed: silently stripping them locked account-scoped
+      // admins out of features the backend still authorizes (#32887), and throwing here
+      // would escalate a transient lookup blip into a full login outage for every
+      // account-scoped user. Log loudly, distinguishing a failed lookup from an empty one.
+      console.warn(
+        resp.errored
+          ? 'tenant-account lookup failed; preserving role-granted account access for tenant'
+          : 'no tenant accounts resolved; preserving role-granted account access for tenant',
+        tenant.id
+      );
     }
   }
 

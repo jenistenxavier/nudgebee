@@ -14,6 +14,11 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// maxSeriesPerMetric bounds the time series returned per metric query. A single metric
+// like request_count can fan out across response-code classes and revisions; this keeps
+// one query from producing an oversized metrics evidence.
+const maxSeriesPerMetric = 40
+
 // gcloudServiceMetricsMap defines default metrics for each GCP service
 // This is used for auto-detection when MetricNames are not explicitly provided
 // Resource type keys match the database format: strings.ToLower(strings.ReplaceAll(ServiceName, " ", "-"))
@@ -74,10 +79,14 @@ var gcloudServiceMetricsMap = map[string]map[string][]string{
 	},
 	"cloud run": {
 		"cloud-run": { // Database stores as "cloud-run"
-			"request_count",
-			"request_latencies",
+			"request_count",     // split by response_code_class -> the 5xx availability signal
+			"request_latencies", // p50/p95 latency
 			"container/cpu/utilizations",
 			"container/memory/utilizations",
+			"container/instance_count",            // scaling / cold-start context
+			"container/startup_latencies",         // slow starts during a deploy
+			"container/max_request_concurrencies", // saturation
+			"container/billable_instance_time",
 		},
 	},
 	"cloud functions": {
@@ -129,10 +138,14 @@ var gcloudMetricsStatsMap = map[string]string{
 	"storage/total_bytes": "Average",
 
 	// Cloud Run metrics
-	"request_count":                 "Sum",
-	"request_latencies":             "Average",
-	"container/cpu/utilizations":    "Average",
-	"container/memory/utilizations": "Average",
+	"request_count":                       "Sum",
+	"request_latencies":                   "Average",
+	"container/cpu/utilizations":          "Average",
+	"container/memory/utilizations":       "Average",
+	"container/instance_count":            "Average",
+	"container/startup_latencies":         "Average",
+	"container/max_request_concurrencies": "Average",
+	"container/billable_instance_time":    "Sum",
 
 	// Cloud Functions metrics
 	"execution_count":   "Sum",
@@ -516,6 +529,17 @@ func queryMetric(ctx providers.CloudProviderContext, client *monitoring.MetricCl
 			timestamps = append(timestamps, timestamp)
 		}
 
+		// Preserve the metric's own label dimensions (e.g. response_code_class) so the
+		// 5xx series stays distinguishable from 2xx/4xx — without this, otherwise-identical
+		// request_count series are indistinguishable downstream.
+		var metricLabels map[string]string
+		if resp.Metric != nil && len(resp.Metric.Labels) > 0 {
+			metricLabels = make(map[string]string, len(resp.Metric.Labels))
+			for k, v := range resp.Metric.Labels {
+				metricLabels[k] = v
+			}
+		}
+
 		// Create metric item with the correct structure
 		metricItem := providers.MetricItem{
 			Name:        extractMetricName(resp.Metric.Type),
@@ -525,9 +549,17 @@ func queryMetric(ctx providers.CloudProviderContext, client *monitoring.MetricCl
 			Timestamps:  timestamps,
 			Region:      region,
 			ServiceName: filter.ServiceName,
+			Labels:      metricLabels,
 		}
 
 		metricItems = append(metricItems, metricItem)
+		// Bound the number of series per metric (split by code class × revision can be
+		// wide); keeps a single metric query from producing an oversized evidence.
+		if len(metricItems) >= maxSeriesPerMetric {
+			ctx.GetLogger().Warn("gcp:queryMetric series cap reached, truncating",
+				"metricType", metricType, "cap", maxSeriesPerMetric)
+			break
+		}
 	}
 
 	ctx.GetLogger().Info("gcp:queryMetric completed",
@@ -542,15 +574,15 @@ func getMetricTypePrefix(serviceName, resourceType string) string {
 	serviceName = normalizeServiceName(serviceName)
 
 	switch serviceName {
-	case "compute engine":
+	case "compute engine", "compute", "compute-engine":
 		return "compute.googleapis.com/instance"
-	case "cloud sql":
+	case "cloud sql", "sql", "cloud-sql":
 		return "cloudsql.googleapis.com/database"
-	case "cloud storage":
+	case "cloud storage", "storage", "cloud-storage":
 		return "storage.googleapis.com"
 	case "bigquery":
 		return "bigquery.googleapis.com"
-	case "kubernetes engine":
+	case "kubernetes engine", "gke":
 		return "container.googleapis.com"
 	case "cloud functions":
 		return "cloudfunctions.googleapis.com"
@@ -558,7 +590,7 @@ func getMetricTypePrefix(serviceName, resourceType string) string {
 		return "run.googleapis.com"
 	case "cloud pub/sub":
 		return "pubsub.googleapis.com"
-	case "cloud monitoring":
+	case "cloud monitoring", "monitoring":
 		return "monitoring.googleapis.com"
 	case "networking":
 		return "networkmanagement.googleapis.com"
@@ -585,15 +617,15 @@ func getResourceLabelKey(serviceName, resourceType string) string {
 	}
 
 	switch serviceName {
-	case "compute engine":
+	case "compute engine", "compute", "compute-engine":
 		return "instance_id"
-	case "cloud sql":
+	case "cloud sql", "sql", "cloud-sql":
 		return "database_id"
-	case "cloud storage":
+	case "cloud storage", "storage", "cloud-storage":
 		return "bucket_name"
 	case "bigquery":
 		return "dataset_id"
-	case "kubernetes engine":
+	case "kubernetes engine", "gke":
 		return "cluster_name"
 	case "cloud functions":
 		return "function_name"
@@ -601,7 +633,7 @@ func getResourceLabelKey(serviceName, resourceType string) string {
 		return "service_name"
 	case "cloud pub/sub":
 		return "topic_id"
-	case "cloud monitoring":
+	case "cloud monitoring", "monitoring":
 		return "metric_id"
 	case "networking":
 		return "network_id"

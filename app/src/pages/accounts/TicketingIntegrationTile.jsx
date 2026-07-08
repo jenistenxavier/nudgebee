@@ -1,16 +1,16 @@
 import apiIntegrations from '@api1/integrations';
 import apiUser from '@api1/user';
-import { ListingLayout } from '@components1/ds/ListingLayout';
-import FilterDropdown from '@components1/ds/FilterDropdown';
-import CustomSearch from '@common-new/CustomSearch';
-import { Button as DsButton } from '@components1/ds/Button';
-import ThreeDotsMenu from '@common-new/ThreeDotsMenu';
-import CloudProviderIcon from '@components1/common/CloudIcon';
-import Datetime from '@common-new/format/Datetime';
-import NDialog from '@common-new/modal/NDialog';
-import { toast as snackbar } from '@components1/ds/Toast';
-import CustomTable from '@common-new/tables/CustomTable2';
-import { Label } from '@components1/ds/Label';
+import { ListingLayout } from '@ui/ListingLayout';
+import FilterDropdown from '@ui/FilterDropdown';
+import SearchInput from '@ui/SearchInput';
+import { Button as DsButton } from '@ui/Button';
+import ThreeDotsMenu from '@ui/ThreeDotsMenu';
+import CloudProviderIcon from '@shared/icons/CloudIcon';
+import Datetime from '@shared/format/Datetime';
+import { Modal } from '@ui/Modal';
+import { toast as snackbar } from '@ui/Toast';
+import CustomTable from '@shared/tables/CustomTable';
+import { Label } from '@ui/Label';
 import { hasWriteAccess } from '@lib/auth';
 import { Stack, Typography } from '@mui/material';
 import { useEffect, useMemo, useState } from 'react';
@@ -161,18 +161,25 @@ const TicketingIntegrationTile = ({ tool, displayName, cloudProvider, AccountMod
 
   return (
     <>
-      <NDialog
-        buttonText='Confirm'
-        submitTone={disableConfig.active ? 'primary' : 'danger'}
-        handleClose={() => setDisableConfig({})}
-        dialogContent={`Are you sure you want to ${disableConfig.active ? 'enable' : 'disable'} this "${
-          disableConfig.name
-        }" ${displayName} integration?`}
-        handleSubmit={handleDisableConfig}
-        loading={isChangingConfig}
+      <Modal
+        handleClose={isChangingConfig ? () => {} : () => setDisableConfig({})}
         open={disableConfig && Object.keys(disableConfig).length > 0}
-        dialogTitle={`${disableConfig.active ? 'Enable' : 'Disable'} ${displayName} Integration`}
-      />
+        title={`${disableConfig.active ? 'Enable' : 'Disable'} ${displayName} Integration`}
+        width='md'
+        loader={isChangingConfig}
+        actionButtons={
+          <>
+            <DsButton id='ticketing-integration-cancel-btn' tone='secondary' onClick={() => setDisableConfig({})} disabled={isChangingConfig}>
+              Cancel
+            </DsButton>
+            <DsButton tone={disableConfig.active ? 'primary' : 'danger'} loading={isChangingConfig} onClick={handleDisableConfig}>
+              Confirm
+            </DsButton>
+          </>
+        }
+      >
+        {`Are you sure you want to ${disableConfig.active ? 'enable' : 'disable'} this "${disableConfig.name}" ${displayName} integration?`}
+      </Modal>
       <AccountModalComponent openModal={openModal} handleClose={closeModal} tool={tool} editConfig={editConfig} />
       <ListingLayout id={`${tool}-integrations`}>
         <ListingLayout.Toolbar
@@ -205,7 +212,7 @@ const TicketingIntegrationTile = ({ tool, displayName, cloudProvider, AccountMod
             value={statusOptions.find((o) => o.value === selectedStatusFilter) ?? null}
             onSelect={(_e, item) => handleStatusFilterChange({ target: { value: item?.value || '' } })}
           />
-          <CustomSearch
+          <SearchInput
             id={`${tool}-name-search`}
             value={nameInput}
             onChange={(next) => {

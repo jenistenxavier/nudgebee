@@ -13,7 +13,6 @@ import (
 	"nudgebee/runbook/internal/model" // Updated import
 	"nudgebee/runbook/internal/tasks"
 	aiTasks "nudgebee/runbook/internal/tasks/ai"
-	"nudgebee/runbook/internal/tasks/testutils"
 	"nudgebee/runbook/internal/tasks/types"
 	"nudgebee/runbook/services/audit"
 	"nudgebee/runbook/services/cloud"
@@ -389,30 +388,40 @@ func enforceWebhookSecrets(wf, existingWf *model.Workflow, workflowID string) er
 	return nil
 }
 
-// webhookTriggerMatchesIntegration reports whether a webhook trigger
-// subscribes to the integration identified by integrationName. Matches on
-// either trigger.params.integration_name (picker flow / new workflows where
-// params and internal are the same string) or trigger.internal.name (legacy
-// workflows where internal carries the `wf-<workflowID>-<name>` prefix while
-// params is the bare name).
+// webhookTriggerMatchesIntegration reports whether a webhook trigger on the
+// workflow identified by workflowID subscribes to the integration identified by
+// integrationName. Matches on:
+//   - trigger.params.integration_name (picker flow / new workflows where params
+//     and internal are the same string), or
+//   - trigger.internal.name (legacy workflows where internal carries the
+//     `wf-<workflowID>-<name>` prefix while params is the bare name), or
+//   - the prefix reconstructed from workflowID + the bare params name
+//     ("wf-<workflowID>-<params.integration_name>"). This last branch matches a
+//     legacy prefixed URL even when internal.name has been clobbered back to the
+//     bare form by a builder save (extractTriggersFromNodes drops internal, so
+//     the backend re-derives the bare name on the next normalize).
 //
 // Must stay aligned with the JSONB predicate in
 // WorkflowDao.ListByIntegrationName — the DAO selects candidate workflows
 // from Postgres; this function picks the matching trigger inside each
-// candidate. If only one side knows about internal.name, fan-out either
-// drops subscribers (DAO too narrow) or wastes ExecuteWorkflow calls on
-// non-matching workflows (loop too narrow).
-func webhookTriggerMatchesIntegration(trigger model.Trigger, integrationName string) bool {
+// candidate. If only one side knows about a branch, fan-out either drops
+// subscribers (DAO too narrow) or wastes ExecuteWorkflow calls on non-matching
+// workflows (loop too narrow).
+func webhookTriggerMatchesIntegration(trigger model.Trigger, workflowID, integrationName string) bool {
 	if trigger.Type != model.WorkflowTriggerWebhook {
 		return false
 	}
 	if integrationName == "" {
 		return false
 	}
-	if paramsName, _ := trigger.Params["integration_name"].(string); paramsName == integrationName {
+	paramsName, _ := trigger.Params["integration_name"].(string)
+	if paramsName == integrationName {
 		return true
 	}
 	if trigger.Internal != nil && trigger.Internal.Name == integrationName {
+		return true
+	}
+	if paramsName != "" && workflowID != "" && "wf-"+workflowID+"-"+paramsName == integrationName {
 		return true
 	}
 	return false
@@ -556,7 +565,7 @@ func (s *Service) handleWorkflowTrigger(ctx *security.RequestContext, id, tenant
 	// Live execution snapshot for scheduled runs, resolved lazily on the first
 	// schedule trigger so webhook-only workflows skip the lookup. Scheduled runs
 	// must bake and execute the live version, not the draft (H1).
-	var liveExecDef *model.WorkflowDefinition
+	var liveExecDef model.WorkflowDefinition
 	var liveVersionMemo map[string]any
 
 	// Process all triggers
@@ -591,15 +600,15 @@ func (s *Service) handleWorkflowTrigger(ctx *security.RequestContext, id, tenant
 					// Create or update this specific schedule. Resolve the live
 					// version once (the schedule executes it, not the draft) and
 					// reuse it across every schedule trigger on this workflow.
-					if liveExecDef == nil {
+					if liveVersionMemo == nil {
 						d, m, rerr := s.resolveLiveExecution(ctx.GetContext(), id)
 						if rerr != nil {
 							return nil, "", rerr
 						}
-						liveExecDef, liveVersionMemo = &d, m
+						liveExecDef, liveVersionMemo = d, m
 					}
 					paused := wf.Status == model.WorkflowStatusPaused
-					err := s.createOrUpdateSchedule(ctx.GetContext(), id, tenantId, accountId, wf, scheduleCount, cron, overlapPolicy, catchupWindow, inputs, paused, *liveExecDef, liveVersionMemo)
+					err := s.createOrUpdateSchedule(ctx.GetContext(), id, tenantId, accountId, wf, scheduleCount, cron, overlapPolicy, catchupWindow, inputs, paused, liveExecDef, liveVersionMemo)
 					if err != nil {
 						return nil, "", fmt.Errorf("failed to create or update schedule index %d: %w", scheduleCount, err)
 					}
@@ -1054,6 +1063,7 @@ func (s *Service) runWorkflow(ctx *security.RequestContext, accountId, id string
 
 	ensureUpdatedByUser(wf)
 	setTriggeredByUser(wf, ctx.GetSecurityContext().GetUserId())
+	wf.RestrictToAccountConfigs = !ctx.GetSecurityContext().HasTenantAccess(security.SecurityAccessTypeRead)
 
 	we, err := s.temporalClient.ExecuteWorkflow(context.Background(), options, s.workflowExecutor.ExecuteWorkflowInternal, wf, inputs)
 	if err != nil {
@@ -1139,7 +1149,7 @@ func (s *Service) FanOutWebhookEvent(ctx *security.RequestContext, integrationNa
 			if trigger.Type != model.WorkflowTriggerWebhook {
 				continue
 			}
-			if !webhookTriggerMatchesIntegration(trigger, integrationName) {
+			if !webhookTriggerMatchesIntegration(trigger, wf.ID, integrationName) {
 				continue
 			}
 			matched = true
@@ -1223,19 +1233,33 @@ func (s *Service) RetriggerWorkflowExecution(ctx *security.RequestContext, accou
 		return "", fmt.Errorf("workflow %s is not active or paused", workflowId)
 	}
 
-	// 3b. Resolve the EXACT version that the original execution ran, and re-run
-	// that snapshot — not the current live/draft definition. Fail loudly rather
-	// than silently running a different version (which would defeat the point of
-	// a retry once the workflow has been edited).
-	if details.VersionID == nil || *details.VersionID == "" {
-		return "", common.ErrorBadRequest(fmt.Sprintf("execution %s predates version tracking; cannot retry exactly", executionId))
+	// 3b. Prefer the EXACT version the original execution ran, and re-run that
+	// snapshot — not the current live/draft definition. If the pinned version is
+	// unavailable (legacy run with no version Memo predating tracking, or a row
+	// pruned by the 50-version retention cap), fall back to the LIVE version
+	// rather than refusing the retry: exact replay is impossible there anyway, and
+	// live is the closest proxy. Mirrors the detail-display fallback above.
+	var memo map[string]any
+	if details.VersionID != nil && *details.VersionID != "" {
+		if pinnedVersion, verr := s.store.GetWorkflowVersionByID(ctx.GetContext(), *details.VersionID); verr == nil && pinnedVersion != nil {
+			// Run the pinned snapshot's definition everywhere downstream and stamp
+			// its identity so the new run is linked to the version that was retried.
+			wf.Definition = pinnedVersion.Definition
+			memo = model.WorkflowVersionMemo(pinnedVersion)
+		}
 	}
-	pinnedVersion, err := s.store.GetWorkflowVersionByID(ctx.GetContext(), *details.VersionID)
-	if err != nil || pinnedVersion == nil {
-		return "", common.ErrorBadRequest(fmt.Sprintf("workflow version %s is no longer available (pruned by retention); cannot retry execution %s exactly", *details.VersionID, executionId))
+	if memo == nil {
+		// Pinned version unavailable — run the live version and stamp its identity
+		// so the new run is still version-labeled (not unversioned).
+		ctx.GetLogger().Warn("retry: pinned version unavailable, falling back to live version",
+			"workflow_id", workflowId, "execution_id", executionId)
+		execDef, liveMemo, lerr := s.resolveLiveExecution(ctx.GetContext(), workflowId)
+		if lerr != nil {
+			return "", lerr
+		}
+		wf.Definition = execDef
+		memo = liveMemo
 	}
-	// Run the pinned snapshot's definition everywhere downstream.
-	wf.Definition = pinnedVersion.Definition
 
 	// 4. Merge inputs
 	mergedInputs := make(map[string]any)
@@ -1284,11 +1308,8 @@ func (s *Service) RetriggerWorkflowExecution(ctx *security.RequestContext, accou
 		}
 	}
 
-	// Stamp the pinned version's identity into Memo so the new run is linked to
-	// the same version that was retried (mirrors ExecuteWorkflow), keeping the
-	// execution-detail UI accurate.
-	memo := model.WorkflowVersionMemo(pinnedVersion)
-
+	// `memo` was resolved in step 3b (pinned version, or live-version fallback) and
+	// stamps the run's version identity so the execution-detail UI stays accurate.
 	options := client.StartWorkflowOptions{
 		ID:                       runWorkflowID,
 		TaskQueue:                config.Config.RunbookServerTemporalQueue,
@@ -1322,6 +1343,7 @@ func (s *Service) RetriggerWorkflowExecution(ctx *security.RequestContext, accou
 
 	ensureUpdatedByUser(&wfCopy)
 	setTriggeredByUser(&wfCopy, ctx.GetSecurityContext().GetUserId())
+	wfCopy.RestrictToAccountConfigs = !ctx.GetSecurityContext().HasTenantAccess(security.SecurityAccessTypeRead)
 
 	we, err := s.temporalClient.ExecuteWorkflow(ctx.GetContext(), options, s.workflowExecutor.ExecuteWorkflowInternal, &wfCopy, mergedInputs)
 	if err != nil {
@@ -1379,14 +1401,15 @@ func (s *Service) DryRunWorkflow(ctx *security.RequestContext, accountId string,
 	}
 
 	wf := model.Workflow{
-		ID:         runWorkflowID,
-		TenantID:   ctx.GetSecurityContext().GetTenantId(),
-		AccountID:  accountId,
-		Definition: request.Definition,
-		DryRun:     true,
-		Name:       dryRunWorkflowName(request.Name),
-		CreatedBy:  ctx.GetSecurityContext().GetUserId(),
-		UpdatedBy:  ctx.GetSecurityContext().GetUserId(),
+		ID:                       runWorkflowID,
+		TenantID:                 ctx.GetSecurityContext().GetTenantId(),
+		AccountID:                accountId,
+		Definition:               request.Definition,
+		DryRun:                   true,
+		Name:                     dryRunWorkflowName(request.Name),
+		CreatedBy:                ctx.GetSecurityContext().GetUserId(),
+		UpdatedBy:                ctx.GetSecurityContext().GetUserId(),
+		RestrictToAccountConfigs: !ctx.GetSecurityContext().HasTenantAccess(security.SecurityAccessTypeRead),
 	}
 
 	run, err := s.temporalClient.ExecuteWorkflow(context.Background(), options, s.workflowExecutor.ExecuteWorkflowInternal, &wf, request.Inputs)
@@ -1499,14 +1522,15 @@ func (s *Service) DryRunWorkflowAsync(ctx *security.RequestContext, accountId st
 	}
 
 	wf := model.Workflow{
-		ID:         runWorkflowID,
-		TenantID:   ctx.GetSecurityContext().GetTenantId(),
-		AccountID:  accountId,
-		Definition: request.Definition,
-		DryRun:     true,
-		Name:       dryRunWorkflowName(request.Name),
-		CreatedBy:  ctx.GetSecurityContext().GetUserId(),
-		UpdatedBy:  ctx.GetSecurityContext().GetUserId(),
+		ID:                       runWorkflowID,
+		TenantID:                 ctx.GetSecurityContext().GetTenantId(),
+		AccountID:                accountId,
+		Definition:               request.Definition,
+		DryRun:                   true,
+		Name:                     dryRunWorkflowName(request.Name),
+		CreatedBy:                ctx.GetSecurityContext().GetUserId(),
+		UpdatedBy:                ctx.GetSecurityContext().GetUserId(),
+		RestrictToAccountConfigs: !ctx.GetSecurityContext().HasTenantAccess(security.SecurityAccessTypeRead),
 	}
 
 	run, err := s.temporalClient.ExecuteWorkflow(context.Background(), options, s.workflowExecutor.ExecuteWorkflowInternal, &wf, request.Inputs)
@@ -3184,6 +3208,36 @@ func (s *Service) ListAllTasks(ctx *security.RequestContext) model.ListTaskDefin
 	}
 }
 
+// newIsolatedTaskContext builds a TaskContext for one-off task execution that
+// is NOT part of a real Temporal workflow run — the "Run Task" tester and MCP
+// tool listing. It carries the real store / temporal client / data converter,
+// but deliberately leaves workflow id, name and run id empty: there is no
+// automation run to attribute, so downstream consumers (e.g. the notification
+// tracing footer in notifications.im) must not fabricate a workflow link.
+//
+// This previously used testutils.NewTestTaskContext, a unit-test helper that
+// stamped a random uuid as the workflow id and the literal name "trigger-task"
+// onto every isolated run — which surfaced as a Slack/Teams footer linking to a
+// bogus /workflow/<random-uuid> URL.
+func (s *Service) newIsolatedTaskContext(ctx *security.RequestContext, accountId string) types.TaskContext {
+	return types.NewTemporalTaskContext(
+		ctx.GetContext(),
+		ctx.GetSecurityContext().GetTenantId(),
+		accountId,
+		"", // workflowID — isolated run, not tied to a workflow execution
+		ctx.GetSecurityContext().GetUserId(),
+		"", // workflowName — empty so the tracing footer/link is omitted
+		"", // userDisplayName
+		s.temporalClient,
+		s.dataConverter,
+		s.store,
+		"", // workflowRunID
+		"", // taskID
+		ctx.GetLogger(),
+		false, // dryRun
+	)
+}
+
 func (s *Service) ExecuteTask(ctx *security.RequestContext, accountId, taskType string, params map[string]any) (any, error) {
 	if !ctx.GetSecurityContext().HasAccountAccess(accountId, security.SecurityAccessTypeCreate) {
 		return nil, common.ErrorUnauthorized("account not accessible")
@@ -3241,8 +3295,8 @@ func (s *Service) ExecuteTask(ctx *security.RequestContext, accountId, taskType 
 		renderedParams = params
 	}
 
-	// Create a test TaskContext for execution
-	taskCtx := testutils.NewTestTaskContext(tenantId, accountId, ctx.GetSecurityContext().GetUserId(), ctx.GetLogger())
+	// Isolated execution: real store/client, no fabricated workflow identity.
+	taskCtx := s.newIsolatedTaskContext(ctx, accountId)
 	return task.Execute(taskCtx, renderedParams)
 }
 
@@ -3251,8 +3305,7 @@ func (s *Service) ListMCPTools(ctx *security.RequestContext, accountId string, p
 		return nil, common.ErrorUnauthorized("account not accessible")
 	}
 
-	tenantId := ctx.GetSecurityContext().GetTenantId()
-	taskCtx := testutils.NewTestTaskContext(tenantId, accountId, ctx.GetSecurityContext().GetUserId(), ctx.GetLogger())
+	taskCtx := s.newIsolatedTaskContext(ctx, accountId)
 
 	mcpTask := &aiTasks.MCPTask{}
 	tools, err := mcpTask.ListTools(taskCtx, params)

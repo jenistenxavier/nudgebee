@@ -12,6 +12,9 @@ import (
 )
 
 func TestListMetrics(t *testing.T) {
+	if os.Getenv("TEST_ACCOUNT") == "" {
+		t.Skip("Skipping integration test that requires a Metastore database and TEST_ACCOUNT")
+	}
 	ctx := security.NewRequestContextForTenantAdmin(os.Getenv("TEST_TENANT"))
 	response, err := QueryMetrics(ctx, os.Getenv("TEST_ACCOUNT"), providers.QueryMetricsRequest{
 		ServiceName:  "AmazonECS",
@@ -23,6 +26,9 @@ func TestListMetrics(t *testing.T) {
 }
 
 func TestListMetricsForResourceId(t *testing.T) {
+	if os.Getenv("TEST_ACCOUNT") == "" {
+		t.Skip("Skipping integration test that requires a Metastore database and TEST_ACCOUNT")
+	}
 	ctx := security.NewRequestContextForTenantAdmin(os.Getenv("TEST_TENANT"))
 	response, err := QueryMetrics(ctx, os.Getenv("TEST_ACCOUNT"), providers.QueryMetricsRequest{
 		ServiceName:  "AmazonECS",
@@ -35,6 +41,9 @@ func TestListMetricsForResourceId(t *testing.T) {
 }
 
 func TestListMetricsUsingDimensions(t *testing.T) {
+	if os.Getenv("TEST_ACCOUNT") == "" {
+		t.Skip("Skipping integration test that requires a Metastore database and TEST_ACCOUNT")
+	}
 	ctx := security.NewRequestContextForTenantAdmin(os.Getenv("TEST_TENANT"))
 	response, err := QueryMetrics(ctx, os.Getenv("TEST_ACCOUNT"), providers.QueryMetricsRequest{
 		ServiceName:  "AmazonECS",
@@ -53,6 +62,9 @@ func TestListMetricsUsingDimensions(t *testing.T) {
 }
 
 func TestListMetricsGCloud(t *testing.T) {
+	if os.Getenv("TEST_ACCOUNT") == "" {
+		t.Skip("Skipping integration test that requires a Metastore database and TEST_ACCOUNT")
+	}
 	ctx := security.NewRequestContextForTenantAdmin(os.Getenv("TEST_TENANT"))
 	response, err := QueryMetrics(ctx, os.Getenv("TEST_ACCOUNT"), providers.QueryMetricsRequest{
 		ServiceName:  "GCEInstance",
@@ -66,6 +78,11 @@ func TestListMetricsGCloud(t *testing.T) {
 }
 
 func TestListMetricsAzure(t *testing.T) {
+	azureVMResourceID := os.Getenv("TEST_AZURE_VM_RESOURCE_ID")
+	if azureVMResourceID == "" {
+		t.Skip("Skipping test - TEST_AZURE_VM_RESOURCE_ID must be set (full /subscriptions/.../virtualmachines/<name> ARM resource ID)")
+	}
+
 	ctx := security.NewRequestContextForTenantAdmin(os.Getenv("TEST_TENANT"))
 	endTime := time.Now()
 	startTime := endTime.Add(-24 * time.Hour)
@@ -74,13 +91,11 @@ func TestListMetricsAzure(t *testing.T) {
 		ServiceName:  "microsoft.compute/virtualmachines",
 		Region:       "eastus2",
 		ResourceType: "virtualmachine",
-		ResourceIds: []string{
-			"/subscriptions/19e207a9-769d-4afd-b261-10bbed2d43e8/resourcegroups/nudgebee-dev_group/providers/microsoft.compute/virtualmachines/nudgebee-dev",
-		},
-		MetricNames: []string{"Percentage CPU"},
-		StartDate:   &startTime,
-		EndDate:     &endTime,
-		Step:        time.Minute, // explicitly set a positive duration
+		ResourceIds:  []string{azureVMResourceID},
+		MetricNames:  []string{"Percentage CPU"},
+		StartDate:    &startTime,
+		EndDate:      &endTime,
+		Step:         time.Minute, // explicitly set a positive duration
 	}
 
 	response, err := QueryMetrics(ctx, os.Getenv("TEST_ACCOUNT"), request)
