@@ -385,8 +385,7 @@ const CallWorkflowFields: React.FC<CallWorkflowFieldsProps> = ({
             />
             {pinnedMissing ? (
               <Alert severity='warning' sx={{ mt: 1, py: 0 }}>
-                Pinned version v{pinnedVersion} no longer exists in this workflow&apos;s history. The run will fail unless you pick another version or
-                switch back to Live.
+                {`Pinned version v${pinnedVersion} no longer exists in this workflow's history. The run will fail unless you pick another version or switch back to Live.`}
               </Alert>
             ) : (
               <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: colors.text.secondary, mt: 0.5 }}>
