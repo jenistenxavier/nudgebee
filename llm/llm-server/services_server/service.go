@@ -358,7 +358,7 @@ func QueryLogs(ctx security.RequestContext, request LogQueryRequest) (core.Obser
 		"Accept":         contentTypeJson,
 		"X-ACTION-TOKEN": config.Config.ServiceApiServerToken,
 		"x-tenant-id":    tenant,
-		"x-user-id":      ctx.GetSecurityContext().GetUserId(),
+		"x-user-id":      ctx.GetSecurityContext().EffectiveUserIdForRPC(),
 	}), common.HttpWithJsonBody(queryPayload))
 
 	if err != nil {
@@ -456,7 +456,7 @@ func QueryTraces(ctx security.RequestContext, request core.ObservabilityTracesV3
 		"Accept":         contentTypeJson,
 		"X-ACTION-TOKEN": config.Config.ServiceApiServerToken,
 		"x-tenant-id":    tenant,
-		"x-user-id":      ctx.GetSecurityContext().GetUserId(),
+		"x-user-id":      ctx.GetSecurityContext().EffectiveUserIdForRPC(),
 	}), jsonBodyTemp)
 
 	if err != nil {
@@ -578,7 +578,7 @@ func QueryLogLabels(ctx security.RequestContext, accountId string, provider Obse
 		"Accept":         contentTypeJson,
 		"X-ACTION-TOKEN": config.Config.ServiceApiServerToken,
 		"x-tenant-id":    tenant,
-		"x-user-id":      ctx.GetSecurityContext().GetUserId(),
+		"x-user-id":      ctx.GetSecurityContext().EffectiveUserIdForRPC(),
 	}), common.HttpWithJsonBody(queryPayload))
 
 	if err != nil {
@@ -789,7 +789,7 @@ func ListMetricsSeries(ctx security.RequestContext, accountId, provider, filter 
 		"Accept":         contentTypeJson,
 		"X-ACTION-TOKEN": config.Config.ServiceApiServerToken,
 		"x-tenant-id":    tenant,
-		"x-user-id":      ctx.GetSecurityContext().GetUserId(),
+		"x-user-id":      ctx.GetSecurityContext().EffectiveUserIdForRPC(),
 	}), common.HttpWithJsonBody(queryPayload))
 
 	if err != nil {
@@ -862,7 +862,7 @@ func ListMetricsSeriesLabels(ctx security.RequestContext, accountId, provider, s
 		"Accept":         contentTypeJson,
 		"X-ACTION-TOKEN": config.Config.ServiceApiServerToken,
 		"x-tenant-id":    tenant,
-		"x-user-id":      ctx.GetSecurityContext().GetUserId(),
+		"x-user-id":      ctx.GetSecurityContext().EffectiveUserIdForRPC(),
 	}), common.HttpWithJsonBody(queryPayload))
 
 	if err != nil {
@@ -951,7 +951,7 @@ func ListMetricsSeriesMatch(ctx security.RequestContext, accountId, provider, na
 		"Accept":         contentTypeJson,
 		"X-ACTION-TOKEN": config.Config.ServiceApiServerToken,
 		"x-tenant-id":    tenant,
-		"x-user-id":      ctx.GetSecurityContext().GetUserId(),
+		"x-user-id":      ctx.GetSecurityContext().EffectiveUserIdForRPC(),
 	}), common.HttpWithJsonBody(queryPayload))
 
 	if err != nil {
@@ -1028,7 +1028,7 @@ func ListMetricsSeriesLabelValues(ctx security.RequestContext, accountId, provid
 		"Accept":         contentTypeJson,
 		"X-ACTION-TOKEN": config.Config.ServiceApiServerToken,
 		"x-tenant-id":    tenant,
-		"x-user-id":      ctx.GetSecurityContext().GetUserId(),
+		"x-user-id":      ctx.GetSecurityContext().EffectiveUserIdForRPC(),
 	}), common.HttpWithJsonBody(queryPayload))
 
 	if err != nil {
@@ -1105,7 +1105,7 @@ func QueryMetrics(ctx security.RequestContext, req core.ObservabilityMetricsQuer
 		"Accept":         contentTypeJson,
 		"X-ACTION-TOKEN": config.Config.ServiceApiServerToken,
 		"x-tenant-id":    tenant,
-		"x-user-id":      ctx.GetSecurityContext().GetUserId(),
+		"x-user-id":      ctx.GetSecurityContext().EffectiveUserIdForRPC(),
 	}), common.HttpWithJsonBody(queryPayload))
 
 	if err != nil {
