@@ -246,14 +246,14 @@ const CallWorkflowFields: React.FC<CallWorkflowFieldsProps> = ({
   const setWorkflowVersion = useCallback(
     (value: string) => {
       const base = taskDataRef.current || {};
-      if (value === LIVE_VERSION_VALUE) {
-        // Follow Live: omit the field entirely so the backend defaults to it.
+      const n = Number(value);
+      if (value === LIVE_VERSION_VALUE || !Number.isFinite(n) || n <= 0) {
+        // Follow Live or invalid version: omit the field entirely so the backend defaults to Live.
         const { workflow_version: _drop, ...rest } = base;
         onTaskDataChange({ ...rest });
-        return;
+      } else {
+        onTaskDataChange({ ...base, workflow_version: n });
       }
-      const n = Number(value);
-      onTaskDataChange({ ...base, workflow_version: Number.isFinite(n) && n > 0 ? n : undefined });
     },
     [onTaskDataChange]
   );

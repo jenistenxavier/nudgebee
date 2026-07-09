@@ -134,6 +134,34 @@ func TestCallWorkflowPinnedVersionNotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 }
 
+// missingWorkflowStore returns (nil, nil) from FindByName — the not-found-but-no-error
+// shape a store can produce. It proves both executor paths surface a clear error
+// instead of dereferencing a nil workflow (.ID) and panicking.
+type missingWorkflowStore struct {
+	*testutils.MockWorkflowStore
+}
+
+func (s *missingWorkflowStore) FindByName(ctx context.Context, tenantID, accountID, name string) (*model.Workflow, error) {
+	return nil, nil
+}
+
+// TestCallWorkflowNotFound proves that when FindByName returns a nil workflow with
+// no error, GetChildWorkflowDefinition fails cleanly rather than panicking on wf.ID.
+func TestCallWorkflowNotFound(t *testing.T) {
+	store := &missingWorkflowStore{MockWorkflowStore: &testutils.MockWorkflowStore{}}
+
+	ctx := newTestContext().(*testutils.MockTaskContext)
+	ctx.WfStore = store
+
+	task := &CallWorkflowTask{}
+	wfDef, err := task.GetChildWorkflowDefinition(ctx, map[string]any{
+		"workflow_name": "child",
+	})
+	assert.Error(t, err)
+	assert.Nil(t, wfDef)
+	assert.Contains(t, err.Error(), "not found")
+}
+
 // TestParseWorkflowVersionParam covers the JSON coercion + guard rails: only a
 // positive whole number pins; anything else falls back to Live.
 func TestParseWorkflowVersionParam(t *testing.T) {

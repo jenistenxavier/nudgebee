@@ -182,6 +182,9 @@ func (t *CallWorkflowTask) Execute(taskCtx types.TaskContext, params map[string]
 	if err != nil {
 		return nil, fmt.Errorf("failed to find workflow '%s': %w", workflowName, err)
 	}
+	if targetWf == nil {
+		return nil, fmt.Errorf("workflow '%s' not found", workflowName)
+	}
 	targetVersion, err := resolveTargetVersion(taskCtx.GetContext(), taskCtx.GetStore(), targetWf.ID, workflowName, params)
 	if err != nil {
 		return nil, err
@@ -339,6 +342,9 @@ func (t *CallWorkflowTask) GetChildWorkflowDefinition(taskCtx types.TaskContext,
 	wf, err := taskCtx.GetStore().FindByName(taskCtx.GetContext(), tenantID, accountID, workflowName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find workflow '%s' referenced by core.call-workflow task: %w", workflowName, err)
+	}
+	if wf == nil {
+		return nil, fmt.Errorf("workflow '%s' referenced by core.call-workflow task not found", workflowName)
 	}
 	targetVersion, err := resolveTargetVersion(taskCtx.GetContext(), taskCtx.GetStore(), wf.ID, workflowName, params)
 	if err != nil {
