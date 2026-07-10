@@ -35,7 +35,7 @@ func TestPrintTask_Execute(t *testing.T) {
 			expectError: true,
 		},
 		{
-			name: "Non-string Message Coerced",
+			name: "Non-string Message Type",
 			params: map[string]any{
 				"message": 123,
 			},
