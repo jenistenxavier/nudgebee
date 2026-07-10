@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Upstream github.com/opencost/opencost is public, so no GOPRIVATE/token is needed.
-FROM golang:1.26.4-alpine AS build-stage
+FROM golang:1.26.5-alpine AS build-stage
 
 WORKDIR /app
 
