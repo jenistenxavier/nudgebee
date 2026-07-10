@@ -77,20 +77,18 @@ func ApplyAlertThresholdPR(ctx *security.RequestContext, req AlertThresholdPRReq
 		return "", common.ErrorInternal("failed to record PR resolution")
 	}
 
-	prURL, err := adapter.RaiseAlertThresholdPR(ctx, adapter.AlertThresholdPRParams{
-		Provider:         req.Provider,
-		IntegrationName:  req.IntegrationName,
-		Org:              req.Org,
-		Repo:             req.Repo,
-		Branch:           req.Branch,
-		FilePath:         req.FilePath,
-		OldContent:       req.OldContent,
-		NewContent:       req.NewContent,
-		AlertName:        req.AlertName,
-		RecommendationID: resolutionID,
-		ReferenceLink:    req.ReferenceLink,
-		ResolverType:     "AlertThreshold",
-	})
+	err = adapter.ApplyAlertThresholdUsingCodeAgent(ctx, adapter.AlertThresholdPRParams{
+		Provider:      req.Provider,
+		AccountID:     req.AccountID,
+		Org:           req.Org,
+		Repo:          req.Repo,
+		Branch:        req.Branch,
+		FilePath:      req.FilePath,
+		OldContent:    req.OldContent,
+		NewContent:    req.NewContent,
+		AlertName:     req.AlertName,
+		ReferenceLink: req.ReferenceLink,
+	}, resolutionID)
 	if err != nil {
 		_, uerr := dbms.Db.Exec(`UPDATE event_resolution SET status = $2, status_message = $3, updated_at = $4 WHERE id = $1`,
 			resolutionID, models.RecommendationResolutionStatusFailed, err.Error(), time.Now().UTC().Format(time.RFC3339))
@@ -100,11 +98,8 @@ func ApplyAlertThresholdPR(ctx *security.RequestContext, req AlertThresholdPRReq
 		return "", err
 	}
 
-	_, err = dbms.Db.Exec(`UPDATE event_resolution SET type_reference_id = $2, status_message = $3, updated_at = $4 WHERE id = $1`,
-		resolutionID, prURL, "PR raised successfully", time.Now().UTC().Format(time.RFC3339))
-	if err != nil {
-		ctx.GetLogger().Error("alert threshold PR: failed to update resolution with PR url", "error", err)
-	}
-
+	// The code agent runs asynchronously and updates the resolution row's terminal
+	// status (PR url on success, or the failure reason) as it progresses. The row is
+	// already InProgress ("Raising PR"), so return its id for the caller to poll.
 	return resolutionID, nil
 }

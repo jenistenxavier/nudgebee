@@ -14,9 +14,7 @@ import (
 	"nudgebee/services/internal/annotations"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/internal/database/models"
-	"nudgebee/services/llm"
 	"nudgebee/services/relay"
-	"nudgebee/services/security"
 	"os"
 	"os/exec"
 	"regexp"
@@ -2059,55 +2057,17 @@ func formatRequestedValuesForPrompt(data map[string]any) map[string]any {
 }
 
 func ApplyRightsizingRecommendationUsingCodeAgent(ctx AccountAdapterContext, request ApplyRecommendationRequest, gitDetail gitDetailFromDeployment, recommendResolutionId string) error {
-	// Run asynchronously to avoid blocking the request
-	go func() {
-		// Recover from any panics to prevent crashing the application
-		defer func() {
-			if r := recover(); r != nil {
-				ctx.GetLogger().Error("recommendation_resolution: panic recovered in code agent goroutine", "panic", r, "recommendation_id", recommendResolutionId)
-
-				// Try to update database status to Failed
-				dbms, err := database.GetDatabaseManager(database.Metastore)
-				if err == nil {
-					tableName := resolutionTableIdent(request.IsEventResolution)
-					_, _ = dbms.Db.ExecContext(
-						context.Background(),
-						fmt.Sprintf(`UPDATE %s SET status = $1, updated_at = $2, status_message = $3 WHERE id = $4`, tableName),
-						models.RecommendationResolutionStatusFailed,
-						time.Now(),
-						fmt.Sprintf("Panic during code agent execution: %v", r),
-						recommendResolutionId,
-					)
-				}
-			}
-		}()
-
-		// Get database connection for status tracking
-		dbms, err := database.GetDatabaseManager(database.Metastore)
-		if err != nil {
-			ctx.GetLogger().Error("failed recommendation resolution db connection", "error", err)
-			return
-		}
-
-		tableName := resolutionTableIdent(request.IsEventResolution)
-
-		// Helper function to update database status
-		updateStatus := func(status models.RecommendationResolutionStatus, statusMessage string, prUrl string) {
-			query := fmt.Sprintf(`UPDATE %s SET status = $1, updated_at = $2, status_message = $3 WHERE id = $4`, tableName)
-			params := []any{status, time.Now(), statusMessage, recommendResolutionId}
-
-			// If PR URL is provided, also update type_reference_id and PR lifecycle columns
-			if prUrl != "" {
-				query = fmt.Sprintf(`UPDATE %s SET status = $1, updated_at = $2, status_message = $3, type_reference_id = $5, pr_lifecycle_state = $6, pr_iteration_count = $7, last_pr_check_at = $8 WHERE id = $4`, tableName)
-				params = append(params, prUrl, "created", 0, time.Now())
-			}
-
-			_, err := dbms.Db.ExecContext(context.Background(), query, params...)
-			if err != nil {
-				ctx.GetLogger().Error("error updating recommendation resolution status", "error", err, "status", status)
-			}
-		}
-
+	dispatchCodeAgentPR(ctx, codeAgentPRParams{
+		AccountID:         request.Recommendation.CloudAccountId,
+		RecommendationID:  request.Recommendation.Id,
+		ResolutionID:      recommendResolutionId,
+		IsEventResolution: request.IsEventResolution,
+		Org:               gitDetail.Org,
+		Repo:              gitDetail.Repo,
+		Branch:            gitDetail.BaseBranch,
+		Label:             "code agent",
+		SuccessMessage:    "PR raised successfully by code agent",
+	}, func() (string, error) {
 		// Build structured prompt with clear instructions
 		// Using @agent_code_2 to invoke the code agent
 		recommendationJSON, _ := common.MarshalJson(request.Recommendation)
@@ -2164,172 +2124,8 @@ Make minimal, precise changes only.`,
 			resizePolicySection,
 		)
 
-		// Wrap the prompt in a JSON envelope so agent_code_2 receives explicit
-		// intent flags (mode + raise_pr). agent_code_2 must not infer intent
-		// from the prompt; the entrypoint declares it.
-		repoURL := fmt.Sprintf("https://github.com/%s/%s", gitDetail.Org, gitDetail.Repo)
-		codeAgentPayload := map[string]any{
-			"query":             queryText,
-			"git_repo":          repoURL,
-			"mode":              "fix",
-			"raise_pr":          true,
-			"recommendation_id": request.Recommendation.Id,
-			"account_id":        request.Recommendation.CloudAccountId,
-		}
-		codeAgentPayloadJSON, _ := common.MarshalJson(codeAgentPayload)
-		prompt := "@agent_code_2 " + string(codeAgentPayloadJSON)
-
-		// Construct the request payload - simple pattern like datadog_webhook
-		// Pass recommendation metadata via Config for PR description link generation
-		chatRequest := llm.ConversationApiRequest{
-			Query:     prompt,
-			AccountId: request.Recommendation.CloudAccountId,
-			UserId:    ctx.GetSecurityContext().GetUserId(),
-			Async:     false,
-			Source:    "recommendation",
-			Config: map[string]any{
-				"recommendation_id": request.Recommendation.Id,
-				"account_id":        request.Recommendation.CloudAccountId,
-				"git_repo":          fmt.Sprintf("https://github.com/%s/%s", gitDetail.Org, gitDetail.Repo),
-			},
-		}
-
-		// Create a new context with trace propagation for LLM server call
-		// We use context.Background() as the base since the HTTP request context is already cancelled
-		// But we copy the trace span from the original context to maintain trace continuity
-		span := trace.SpanFromContext(ctx.GetContext())
-		llmCtx := trace.ContextWithSpan(context.Background(), span)
-
-		// Call code agent with trace-propagated context
-		// The trace will be automatically propagated via OpenTelemetry's otelhttp client
-		response, err := llm.ChatCompletion(security.NewRequestContext(llmCtx, ctx.GetSecurityContext(), ctx.GetLogger(), nil, nil), chatRequest)
-		if err != nil {
-			ctx.GetLogger().Error("recommendation_resolution: failed to get chat completion request", "error", err)
-			updateStatus(models.RecommendationResolutionStatusFailed, fmt.Sprintf("Failed to execute code agent: %s", err.Error()), "")
-			return
-		}
-
-		if response == nil || len(response.Response) == 0 {
-			ctx.GetLogger().Warn("recommendation_resolution: chat completion returned empty response")
-			updateStatus(models.RecommendationResolutionStatusFailed, "Code agent returned empty response", "")
-			return
-		}
-
-		// Parse the response to extract PR information
-		var agentResponse map[string]any
-		err = common.UnmarshalJson([]byte(response.Response[0]), &agentResponse)
-		if err != nil {
-			ctx.GetLogger().Error("recommendation_resolution: failed to parse agent response", "error", err, "response", response.Response[0])
-			updateStatus(models.RecommendationResolutionStatusFailed, "Failed to parse code agent response", "")
-			return
-		}
-
-		// Extract PR information from response
-		// Try multiple possible response formats
-		var prUrl string
-		var prNumber any
-
-		// Check for automated_fix_pr_info structure
-		if prInfo, ok := agentResponse["automated_fix_pr_info"].(map[string]any); ok && prInfo != nil {
-			if url, ok := prInfo["url"].(string); ok {
-				prUrl = url
-			}
-			if num, ok := prInfo["number"]; ok {
-				prNumber = num
-			}
-		}
-
-		// Fallback to fix_pr structure
-		if prUrl == "" {
-			if prInfo, ok := agentResponse["fix_pr"].(map[string]any); ok && prInfo != nil {
-				if url, ok := prInfo["url"].(string); ok {
-					prUrl = url
-				}
-				if num, ok := prInfo["number"]; ok {
-					prNumber = num
-				}
-			}
-		}
-
-		// Fallback to direct pr_url field
-		if prUrl == "" {
-			if url, ok := agentResponse["pr_url"].(string); ok {
-				prUrl = url
-			}
-		}
-
-		// Check execution status
-		executionStatus, _ := agentResponse["execution_status"].(string)
-
-		// Determine success or failure
-		// Priority: PR URL presence indicates success, regardless of execution_status field
-		if prUrl != "" {
-			// Success: PR was created — also store PR metadata in data JSONB for lifecycle tracking
-			ctx.GetLogger().Info("recommendation_resolution: PR created successfully", "pr_url", prUrl, "pr_number", prNumber)
-			updateStatus(models.RecommendationResolutionStatusInProgress, "PR raised successfully by code agent", prUrl)
-
-			// Store PR metadata for cron-based lifecycle tracking
-			repoURL := fmt.Sprintf("https://github.com/%s/%s", gitDetail.Org, gitDetail.Repo)
-			prMeta := map[string]any{
-				"pr_url":    prUrl,
-				"pr_number": prNumber,
-				"repo_url":  repoURL,
-				"branch":    gitDetail.BaseBranch,
-				"provider":  "github",
-				"org":       gitDetail.Org,
-				"repo":      gitDetail.Repo,
-				// tenant_id lets the pr_lifecycle followup cron scope the run.
-				// recommendation_resolution has no tenant column, so the cron's
-				// fallback reads it from here (with a recommendation join as backstop).
-				"tenant_id": ctx.GetSecurityContext().GetTenantId(),
-			}
-			if branchName, ok := agentResponse["branch"].(string); ok {
-				prMeta["pr_branch"] = branchName
-			}
-			prMetaJSON, marshalErr := common.MarshalJson(prMeta)
-			if marshalErr == nil {
-				_, _ = dbms.Db.ExecContext(context.Background(),
-					// Merge (jsonb ||) rather than overwrite: the original apply payload
-					// carries provider_config, which GetRecommendationResolutionStatus
-					// requires. A blind `data = $1` drops it and flips the
-					// (successfully raised) PR's resolution to Failed on the next
-					// status sync. prMeta keys win on conflict; provider_config and
-					// any other prior keys survive.
-					fmt.Sprintf(`UPDATE %s SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb WHERE id = $2`, tableName),
-					string(prMetaJSON), recommendResolutionId)
-			}
-		} else if executionStatus == "success" {
-			if reason := prCreationFailureReason(agentResponse); reason != "" {
-				// The code fix itself succeeded (execution_status=success) but the PR
-				// could not be opened — e.g. a rejected git push. The orchestrator
-				// reports the real cause via pr_creation_status/pr_creation_reason;
-				// surface it as a failure instead of a misleading "applied changes
-				// but no PR" Success that hides the actual error.
-				ctx.GetLogger().Error("recommendation_resolution: code agent applied changes but PR creation failed", "reason", reason)
-				updateStatus(models.RecommendationResolutionStatusFailed, "Code agent applied changes but PR creation failed: "+reason, "")
-			} else {
-				// Agent succeeded but no PR was created (might have applied changes directly)
-				ctx.GetLogger().Warn("recommendation_resolution: code agent succeeded but no PR URL found")
-				updateStatus(models.RecommendationResolutionStatusSuccess, "Code agent applied changes but no PR was created", "")
-			}
-		} else {
-			// Failure: No PR and no success status
-			errorMsg := "Code agent execution failed"
-			if summary, ok := agentResponse["execution_summary"].(string); ok && summary != "" {
-				errorMsg = summary
-			} else if msg, ok := agentResponse["error"].(string); ok && msg != "" {
-				errorMsg = msg
-			} else if executionStatus != "" {
-				errorMsg = fmt.Sprintf("Code agent execution status: %s", executionStatus)
-			}
-
-			// Append detailed analysis fields from the agent response
-			errorMsg = appendAgentResponseDetails(errorMsg, agentResponse)
-
-			ctx.GetLogger().Error("recommendation_resolution: code agent failed", "error", errorMsg, "response", agentResponse)
-			updateStatus(models.RecommendationResolutionStatusFailed, errorMsg, "")
-		}
-	}()
+		return queryText, nil
+	})
 
 	return nil
 }
@@ -2337,61 +2133,21 @@ Make minimal, precise changes only.`,
 // ApplySecurityRecommendationUsingCodeAgent invokes the code-analysis agent's SecurityAuditorAgent
 // to fix container image security vulnerabilities (CVEs) and create a PR.
 func ApplySecurityRecommendationUsingCodeAgent(ctx AccountAdapterContext, request ApplyRecommendationRequest, gitDetail gitDetailFromDeployment, recommendResolutionId string) error {
-	// Run asynchronously to avoid blocking the request
-	go func() {
-		// Recover from any panics to prevent crashing the application
-		defer func() {
-			if r := recover(); r != nil {
-				ctx.GetLogger().Error("recommendation_resolution: panic recovered in security code agent goroutine", "panic", r, "recommendation_id", recommendResolutionId)
-
-				// Try to update database status to Failed
-				dbms, err := database.GetDatabaseManager(database.Metastore)
-				if err == nil {
-					tableName := resolutionTableIdent(request.IsEventResolution)
-					_, _ = dbms.Db.ExecContext(
-						context.Background(),
-						fmt.Sprintf(`UPDATE %s SET status = $1, updated_at = $2, status_message = $3 WHERE id = $4`, tableName),
-						models.RecommendationResolutionStatusFailed,
-						time.Now(),
-						fmt.Sprintf("Panic during security code agent execution: %v", r),
-						recommendResolutionId,
-					)
-				}
-			}
-		}()
-
-		// Get database connection for status tracking
-		dbms, err := database.GetDatabaseManager(database.Metastore)
-		if err != nil {
-			ctx.GetLogger().Error("failed recommendation resolution db connection", "error", err)
-			return
-		}
-
-		tableName := resolutionTableIdent(request.IsEventResolution)
-
-		// Helper function to update database status
-		updateStatus := func(status models.RecommendationResolutionStatus, statusMessage string, prUrl string) {
-			query := fmt.Sprintf(`UPDATE %s SET status = $1, updated_at = $2, status_message = $3 WHERE id = $4`, tableName)
-			params := []any{status, time.Now(), statusMessage, recommendResolutionId}
-
-			// If PR URL is provided, also update type_reference_id and PR lifecycle columns
-			if prUrl != "" {
-				query = fmt.Sprintf(`UPDATE %s SET status = $1, updated_at = $2, status_message = $3, type_reference_id = $5, pr_lifecycle_state = $6, pr_iteration_count = $7, last_pr_check_at = $8 WHERE id = $4`, tableName)
-				params = append(params, prUrl, "created", 0, time.Now())
-			}
-
-			_, err := dbms.Db.ExecContext(context.Background(), query, params...)
-			if err != nil {
-				ctx.GetLogger().Error("error updating recommendation resolution status", "error", err, "status", status)
-			}
-		}
-
+	dispatchCodeAgentPR(ctx, codeAgentPRParams{
+		AccountID:         request.Recommendation.CloudAccountId,
+		RecommendationID:  request.Recommendation.Id,
+		ResolutionID:      recommendResolutionId,
+		IsEventResolution: request.IsEventResolution,
+		Org:               gitDetail.Org,
+		Repo:              gitDetail.Repo,
+		Branch:            gitDetail.BaseBranch,
+		Label:             "security code agent",
+		SuccessMessage:    "Security fix PR raised successfully by code agent",
+	}, func() (string, error) {
 		// Extract CVE data from recommendation JSONB
 		recData, ok := request.Recommendation.Recommendation.Object().(map[string]any)
 		if !ok || recData == nil {
-			ctx.GetLogger().Error("recommendation_resolution: failed to parse recommendation data as map")
-			updateStatus(models.RecommendationResolutionStatusFailed, "Failed to parse recommendation data", "")
-			return
+			return "", fmt.Errorf("failed to parse recommendation data")
 		}
 
 		// Format CVE logs for the agent (matches E2E test format)
@@ -2454,168 +2210,8 @@ When creating the PR, ensure the description includes:
 			string(recommendationJSON),
 		)
 
-		// Construct JSON payload for code agent with explicit git_repo field
-		// NOTE: Do NOT pass "agent" field - let the Orchestrator handle the full flow:
-		// 1. Orchestrator clones repo with credentials via repo_clone tool
-		// 2. Router selects SecurityAuditorAgent based on security-related prompt content
-		// If we pass "agent", it bypasses Orchestrator and the specialist agent won't have repo access
-		repoURL := fmt.Sprintf("https://github.com/%s/%s", gitDetail.Org, gitDetail.Repo)
-		codeAgentPayload := map[string]any{
-			"query":             queryText,
-			"git_repo":          repoURL,
-			"mode":              "fix",
-			"raise_pr":          true,
-			"recommendation_id": request.Recommendation.Id,
-			"account_id":        request.Recommendation.CloudAccountId,
-		}
-		codeAgentPayloadJSON, _ := common.MarshalJson(codeAgentPayload)
-
-		// Prepend @agent_code_2 directive to invoke the code agent
-		prompt := "@agent_code_2 " + string(codeAgentPayloadJSON)
-
-		// Construct the request payload
-		chatRequest := llm.ConversationApiRequest{
-			Query:     prompt,
-			AccountId: request.Recommendation.CloudAccountId,
-			UserId:    ctx.GetSecurityContext().GetUserId(),
-			Async:     false,
-			Source:    "recommendation",
-			Config: map[string]any{
-				"recommendation_id": request.Recommendation.Id,
-				"account_id":        request.Recommendation.CloudAccountId,
-			},
-		}
-
-		// Create a new context with trace propagation for LLM server call
-		span := trace.SpanFromContext(ctx.GetContext())
-		llmCtx := trace.ContextWithSpan(context.Background(), span)
-
-		// Call code agent with trace-propagated context
-		response, err := llm.ChatCompletion(security.NewRequestContext(llmCtx, ctx.GetSecurityContext(), ctx.GetLogger(), nil, nil), chatRequest)
-		if err != nil {
-			ctx.GetLogger().Error("recommendation_resolution: failed to get chat completion request for security fix", "error", err)
-			updateStatus(models.RecommendationResolutionStatusFailed, fmt.Sprintf("Failed to execute security code agent: %s", err.Error()), "")
-			return
-		}
-
-		if response == nil || len(response.Response) == 0 {
-			ctx.GetLogger().Warn("recommendation_resolution: security chat completion returned empty response")
-			updateStatus(models.RecommendationResolutionStatusFailed, "Security code agent returned empty response", "")
-			return
-		}
-
-		// Parse the response to extract PR information
-		var agentResponse map[string]any
-		err = common.UnmarshalJson([]byte(response.Response[0]), &agentResponse)
-		if err != nil {
-			ctx.GetLogger().Error("recommendation_resolution: failed to parse security agent response", "error", err, "response", response.Response[0])
-			updateStatus(models.RecommendationResolutionStatusFailed, "Failed to parse security code agent response", "")
-			return
-		}
-
-		// Extract PR information from response
-		// Try multiple possible response formats (same as rightsizing)
-		var prUrl string
-		var prNumber any
-
-		// Check for automated_fix_pr_info structure
-		if prInfo, ok := agentResponse["automated_fix_pr_info"].(map[string]any); ok && prInfo != nil {
-			if url, ok := prInfo["url"].(string); ok {
-				prUrl = url
-			}
-			if num, ok := prInfo["number"]; ok {
-				prNumber = num
-			}
-		}
-
-		// Fallback to fix_pr structure
-		if prUrl == "" {
-			if prInfo, ok := agentResponse["fix_pr"].(map[string]any); ok && prInfo != nil {
-				if url, ok := prInfo["url"].(string); ok {
-					prUrl = url
-				}
-				if num, ok := prInfo["number"]; ok {
-					prNumber = num
-				}
-			}
-		}
-
-		// Fallback to direct pr_url field
-		if prUrl == "" {
-			if url, ok := agentResponse["pr_url"].(string); ok {
-				prUrl = url
-			}
-		}
-
-		// Check execution status
-		executionStatus, _ := agentResponse["execution_status"].(string)
-
-		// Determine success or failure
-		// Priority: PR URL presence indicates success, regardless of execution_status field
-		if prUrl != "" {
-			// Success: PR was created — also store PR metadata in data JSONB for lifecycle tracking
-			ctx.GetLogger().Info("recommendation_resolution: security PR created successfully", "pr_url", prUrl, "pr_number", prNumber)
-			updateStatus(models.RecommendationResolutionStatusInProgress, "Security fix PR raised successfully by code agent", prUrl)
-
-			// Store PR metadata for cron-based lifecycle tracking
-			repoURL := fmt.Sprintf("https://github.com/%s/%s", gitDetail.Org, gitDetail.Repo)
-			prMeta := map[string]any{
-				"pr_url":    prUrl,
-				"pr_number": prNumber,
-				"repo_url":  repoURL,
-				"branch":    gitDetail.BaseBranch,
-				"provider":  "github",
-				"org":       gitDetail.Org,
-				"repo":      gitDetail.Repo,
-				// tenant_id lets the pr_lifecycle followup cron scope the run.
-				// recommendation_resolution has no tenant column, so the cron's
-				// fallback reads it from here (with a recommendation join as backstop).
-				"tenant_id": ctx.GetSecurityContext().GetTenantId(),
-			}
-			if branchName, ok := agentResponse["branch"].(string); ok {
-				prMeta["pr_branch"] = branchName
-			}
-			prMetaJSON, marshalErr := common.MarshalJson(prMeta)
-			if marshalErr == nil {
-				_, _ = dbms.Db.ExecContext(context.Background(),
-					// Merge (jsonb ||) rather than overwrite: the original apply payload
-					// carries provider_config, which GetRecommendationResolutionStatus
-					// requires. A blind `data = $1` drops it and flips the
-					// (successfully raised) PR's resolution to Failed on the next
-					// status sync. prMeta keys win on conflict; provider_config and
-					// any other prior keys survive.
-					fmt.Sprintf(`UPDATE %s SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb WHERE id = $2`, tableName),
-					string(prMetaJSON), recommendResolutionId)
-			}
-		} else if executionStatus == "success" {
-			if reason := prCreationFailureReason(agentResponse); reason != "" {
-				// Fix succeeded but the PR could not be opened (e.g. rejected git
-				// push). Surface the real cause instead of a misleading Success.
-				ctx.GetLogger().Error("recommendation_resolution: security code agent applied changes but PR creation failed", "reason", reason)
-				updateStatus(models.RecommendationResolutionStatusFailed, "Security code agent applied changes but PR creation failed: "+reason, "")
-			} else {
-				// Agent succeeded but no PR was created (might have applied changes directly)
-				ctx.GetLogger().Warn("recommendation_resolution: security code agent succeeded but no PR URL found")
-				updateStatus(models.RecommendationResolutionStatusSuccess, "Security code agent applied changes but no PR was created", "")
-			}
-		} else {
-			// Failure: No PR and no success status
-			errorMsg := "Security code agent execution failed"
-			if summary, ok := agentResponse["execution_summary"].(string); ok && summary != "" {
-				errorMsg = summary
-			} else if msg, ok := agentResponse["error"].(string); ok && msg != "" {
-				errorMsg = msg
-			} else if executionStatus != "" {
-				errorMsg = fmt.Sprintf("Security code agent execution status: %s", executionStatus)
-			}
-
-			// Append detailed analysis fields from the agent response
-			errorMsg = appendAgentResponseDetails(errorMsg, agentResponse)
-
-			ctx.GetLogger().Error("recommendation_resolution: security code agent failed", "error", errorMsg, "response", agentResponse)
-			updateStatus(models.RecommendationResolutionStatusFailed, errorMsg, "")
-		}
-	}()
+		return queryText, nil
+	})
 
 	return nil
 }
