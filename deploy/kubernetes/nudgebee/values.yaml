@@ -317,7 +317,7 @@ nudgebee-qdrant-server:
   fullnameOverride: nudgebee-qdrant-server
   image:
     repository: qdrant/qdrant
-    tag: 'v1.16.0'
+    tag: 'v1.18.2'
 temporal:
   enabled: true
   fullnameOverride: temporal

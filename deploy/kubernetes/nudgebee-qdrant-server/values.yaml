@@ -6,7 +6,7 @@ replicaCount: 1
 image:
   repository: qdrant/qdrant
   pullPolicy: IfNotPresent
-  tag: "v1.16.0"
+  tag: "v1.18.2"
 
 imagePullSecrets: [ ]
 nameOverride: ""
