@@ -964,6 +964,26 @@ const Investigate = () => {
     if (hasInProgressWorkflowResolution(eventResolutions)) startResolutionsPoll();
   }, [eventResolutions, startResolutionsPoll]);
 
+  // The Raise-PR panel dispatches this after a successful apply. The PR
+  // event_resolution row is inserted server-side asynchronously, so open the
+  // grace window and poll so the "PR raised" banner surfaces without a reload.
+  useEffect(() => {
+    const onChanged = () => handleAutomationTriggered();
+    window.addEventListener('nb:event-resolution-changed', onChanged);
+    return () => window.removeEventListener('nb:event-resolution-changed', onChanged);
+  }, [handleAutomationTriggered]);
+
+  // The code-fix pull request to surface as a banner at the top of the analysis.
+  // Prefer a PR that was actually raised (has a link) so a later failed retry
+  // (e.g. "PR already exists") never hides a working PR; only fall back to the
+  // most recent attempt (a failure) when nothing was ever raised. Rows are
+  // ordered updated_at desc, so the first match is the newest.
+  const raisedPrResolution = useMemo(() => {
+    const prs = eventResolutions.filter((r) => r?.type === 'PullRequest');
+    const raised = prs.find((r) => typeof r?.type_reference_id === 'string' && /^https?:\/\//.test(r.type_reference_id));
+    return raised || prs[0] || null;
+  }, [eventResolutions]);
+
   // Pause polling when the tab is hidden; resume on return if a run is still live.
   useEffect(() => {
     const onVisibility = () => {
@@ -1660,11 +1680,10 @@ const Investigate = () => {
   const toggleShow = () => setShowAll((prev) => !prev);
 
   const shouldShowResolveButton = (option) => {
-    return (
-      ((option?.id === 'AskAiCard' && !!option?.aiData?.source_updates?.gitDiff) ||
-        (option?.id !== 'AskAiCard' && (option.resolveButton || option.ResolveComponent))) &&
-      hasWriteAccess(router.query.accountId)
-    );
+    // AskAiCard's event code-fix "Raise PR" is rendered inline under the diff
+    // (EventRaisePrPanel), so it is intentionally excluded from the bottom
+    // "Take action to fix it" bar here.
+    return option?.id !== 'AskAiCard' && (option.resolveButton || option.ResolveComponent) && hasWriteAccess(router.query.accountId);
   };
 
   const aiAnalysisFeedback = () => {
@@ -2875,6 +2894,52 @@ const Investigate = () => {
                         }}
                       >
                         <TabPanel value={tabValue} index={0} className='ai-custom-panel'>
+                          {raisedPrResolution &&
+                            (() => {
+                              const url = raisedPrResolution.type_reference_id;
+                              const hasLink = url && /^https?:\/\//.test(url);
+                              const failed = String(raisedPrResolution.status).toLowerCase() === 'failed';
+                              return (
+                                <Box
+                                  sx={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    flexWrap: 'wrap',
+                                    gap: 'var(--ds-space-2)',
+                                    p: 'var(--ds-space-3) var(--ds-space-4)',
+                                    mb: 'var(--ds-space-4)',
+                                    borderRadius: 'var(--ds-radius-md)',
+                                    backgroundColor: failed ? ds.red[100] : ds.green[100],
+                                    border: `0.5px solid ${failed ? ds.red[300] : ds.green[300]}`,
+                                  }}
+                                >
+                                  <Typography
+                                    sx={{
+                                      fontSize: 'var(--ds-text-body-lg)',
+                                      color: failed ? ds.red[700] : ds.green[700],
+                                      fontWeight: 'var(--ds-font-weight-medium)',
+                                    }}
+                                  >
+                                    {failed
+                                      ? `Raising a pull request for the proposed fix failed${
+                                          raisedPrResolution.status_message ? `: ${raisedPrResolution.status_message}` : '.'
+                                        }`
+                                      : hasLink
+                                      ? 'A pull request has been raised for the proposed code fix.'
+                                      : 'Raising a pull request for the proposed code fix — it will appear here shortly.'}
+                                  </Typography>
+                                  {!failed && hasLink && (
+                                    <Link
+                                      href={url}
+                                      openInNew
+                                      style={{ fontSize: 'var(--ds-text-body-lg)', fontWeight: 'var(--ds-font-weight-semibold)' }}
+                                    >
+                                      View PR
+                                    </Link>
+                                  )}
+                                </Box>
+                              );
+                            })()}
                           {loading ? (
                             <ConversationLoader />
                           ) : (
@@ -2950,7 +3015,7 @@ const Investigate = () => {
                                       setOpenResolveComponentId(resolvableOption.id);
                                     }}
                                   >
-                                    {`Fix ${resolvableOption.text}`}
+                                    {resolvableOption.id === 'AskAiCard' ? 'Raise PR' : `Fix ${resolvableOption.text}`}
                                   </Button>
                                 ))}
                               </Box>

@@ -33,8 +33,13 @@ type codeAgentPRParams struct {
 	Org               string
 	Repo              string
 	Branch            string
-	Label             string // used in log lines + failure messages (e.g. "code agent")
-	SuccessMessage    string // user-facing status_message when the PR is raised
+	// RepoURL, when set, is used verbatim as the git repository passed to the
+	// agent (needed for GitLab / self-hosted hosts). Empty → the GitHub URL is
+	// built from Org/Repo for backward compatibility.
+	RepoURL        string
+	Provider       string // "github" (default) or "gitlab"; recorded in PR lifecycle metadata
+	Label          string // used in log lines + failure messages (e.g. "code agent")
+	SuccessMessage string // user-facing status_message when the PR is raised
 }
 
 // dispatchCodeAgentPR launches the @agent_code_2 conversation in a background
@@ -99,7 +104,14 @@ func dispatchCodeAgentPR(ctx AccountAdapterContext, p codeAgentPRParams, buildPr
 		// Wrap the prompt in a JSON envelope so agent_code_2 receives explicit
 		// intent flags (mode + raise_pr). agent_code_2 must not infer intent
 		// from the prompt; the entrypoint declares it.
-		repoURL := fmt.Sprintf("https://github.com/%s/%s", p.Org, p.Repo)
+		repoURL := p.RepoURL
+		if repoURL == "" {
+			repoURL = fmt.Sprintf("https://github.com/%s/%s", p.Org, p.Repo)
+		}
+		provider := p.Provider
+		if provider == "" {
+			provider = "github"
+		}
 		codeAgentPayload := map[string]any{
 			"query":             queryText,
 			"git_repo":          repoURL,
@@ -165,7 +177,7 @@ func dispatchCodeAgentPR(ctx AccountAdapterContext, p codeAgentPRParams, buildPr
 				"pr_number": prNumber,
 				"repo_url":  repoURL,
 				"branch":    p.Branch,
-				"provider":  "github",
+				"provider":  provider,
 				"org":       p.Org,
 				"repo":      p.Repo,
 				// tenant_id lets the pr_lifecycle followup cron scope the run.

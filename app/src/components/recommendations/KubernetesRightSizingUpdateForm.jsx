@@ -129,9 +129,14 @@ const KubernetesRightSizingPopupForm = ({
   };
 
   useEffect(() => {
-    if (open && recommendationSource != 'event') {
+    if (open) {
+      // Event code-fix PRs need the git integration list too (the backend
+      // resolves the repo, but the provider must be chosen). Workload rightsizing
+      // annotations only apply to the rightsizing flow.
       listGitConfigurations();
-      getWorkloadDeploymentForSelectedRightSize();
+      if (recommendationSource != 'event') {
+        getWorkloadDeploymentForSelectedRightSize();
+      }
     } else {
       // Clean up state when modal closes
       setAllGitIntegrations([]);
@@ -610,10 +615,14 @@ const KubernetesRightSizingPopupForm = ({
                 }}
                 showNormalField={true}
                 isLoading={isGitIntegrationsLoading}
-                isDisabled={Object.keys(selectedWorkloadAnnotations).length == 0}
+                isDisabled={recommendationSource !== 'event' && Object.keys(selectedWorkloadAnnotations).length == 0}
               />
             </Grid>
-            {selectedWorkloadAnnotations && Object.keys(selectedWorkloadAnnotations).length > 0 ? (
+            {recommendationSource === 'event' ? (
+              <Typography sx={{ mt: 'var(--ds-space-4)', mb: 'var(--ds-space-5)', fontSize: 'var(--ds-text-body-lg)', color: ds.gray[700] }}>
+                A pull request will be raised against the mapped source repository with the generated fix.
+              </Typography>
+            ) : selectedWorkloadAnnotations && Object.keys(selectedWorkloadAnnotations).length > 0 ? (
               <ul>
                 {Object.entries(selectedWorkloadAnnotations).map(([key, value]) => (
                   <li key={key}>
@@ -678,7 +687,9 @@ const KubernetesRightSizingPopupForm = ({
                 <Grid item>
                   <CustomButton
                     size='Medium'
-                    disabled={!selectedGitIntegration || !Object.keys(selectedWorkloadAnnotations).length || loading}
+                    disabled={
+                      !selectedGitIntegration || (recommendationSource !== 'event' && !Object.keys(selectedWorkloadAnnotations).length) || loading
+                    }
                     text='Save'
                     onClick={handleCreatePR}
                   />

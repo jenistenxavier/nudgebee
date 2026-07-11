@@ -1,7 +1,6 @@
 package adapter
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -602,124 +601,71 @@ func commitCode(ctx AccountAdapterContext, dir string, request ApplyRecommendati
 	return branchName, nil
 }
 
-func commitCodeForEvent(ctx AccountAdapterContext, dir string, request ApplyRecommendationRequest, gitDetails gitDetailFromDeployment, updateExistingPR bool) (string, error) {
-	branchName := "nb/" + request.Recommendation.Id
-	if updateExistingPR {
-		cmd := exec.Command("git", "remote", "set-branches", "--add", "origin", branchName)
-		cmd.Dir = dir
-		output, err := cmd.Output()
-		if err != nil {
-			ctx.GetLogger().Error("Error getting remote branch", "error", err, "output", string(output), "branch", branchName)
-			return "", err
-		}
-		cmd1 := exec.Command("git", "fetch")
-		cmd1.Dir = dir
-		output1, err1 := cmd1.Output()
-		if err1 != nil {
-			ctx.GetLogger().Error("Error fetching remote branch", "error", err1, "output", redactGitCredentials(string(output1)), "branch", branchName)
-			return "", err1
-		}
-		cmd2 := exec.Command("git", "checkout", "-b", branchName, "origin/"+branchName)
-		cmd2.Dir = dir
-		output2, err2 := cmd2.Output()
-		if err2 != nil {
-			ctx.GetLogger().Error("Error checking out remote branch", "error", err2, "output", string(output2), "branch", branchName)
-			return "", err2
-		}
-	} else {
-		cmd := exec.Command("git", "checkout", "-b", branchName)
-		cmd.Dir = dir
-		output, err := cmd.Output()
-		if err != nil {
-			ctx.GetLogger().Error("Error checking out branch", "error", err, "output", string(output), "branch", branchName)
-			return "", err
-		}
-	}
+// recMapString safely reads a string field from a recommendation payload map.
+func recMapString(m map[string]any, key string) string {
+	s, _ := m[key].(string)
+	return s
+}
 
-	recommendationMap, _ := request.Recommendation.Recommendation.Object().(map[string]any)
-	fileName, _ := recommendationMap["fileName"].(string)
-	// JSON numbers decode as float64, so the bare `.(int)` assertion panicked
-	// whenever lineNumber was present. Accept both, mirroring the comma-ok the
-	// sibling fields already use.
-	lineNumber := 0
-	switch n := recommendationMap["lineNumber"].(type) {
-	case float64:
-		lineNumber = int(n)
-	case int:
-		lineNumber = n
+// parseGitHubOrgRepo extracts the org and repo from a GitHub repo URL such as
+// https://github.com/nudgebee/opentelemetry-demo(.git).
+func parseGitHubOrgRepo(repoURL string) (string, string) {
+	u := strings.TrimSpace(repoURL)
+	u = strings.TrimSuffix(strings.TrimSuffix(u, "/"), ".git")
+	u = strings.TrimPrefix(u, "https://")
+	u = strings.TrimPrefix(u, "http://")
+	u = strings.TrimPrefix(u, "github.com/")
+	parts := strings.Split(u, "/")
+	if len(parts) < 2 {
+		return "", ""
 	}
-	newLine, _ := recommendationMap["newLine"].(string)
-	oldLine, _ := recommendationMap["oldLine"].(string)
+	// Last two segments (tolerates enterprise hosts carrying a path prefix).
+	return parts[len(parts)-2], parts[len(parts)-1]
+}
 
-	safeFile, err := safeFilePath(dir, fileName)
-	if err != nil {
-		return "", err
-	}
-	err = readUpdateCodeFile(safeFile, lineNumber, newLine, oldLine)
-	if err != nil {
-		ctx.GetLogger().Error("Error updating code", "error", err)
-		return "", err
-	}
+// buildEventFixPrompt assembles the @agent_code_2 instructions for an event's
+// code fix. The stored diff is passed as a hint the agent applies or adapts to
+// the current code — the intent is to fix the identified root cause, not to
+// blindly re-apply a possibly-stale patch.
+func buildEventFixPrompt(recMap map[string]any, referenceLink string) string {
+	fileName := recMapString(recMap, "fileName")
+	fixContext := recMapString(recMap, "fix_context")
+	gitDiff := recMapString(recMap, "gitDiff")
+	guidance := recMapString(recMap, "guidance")
 
-	cmd := exec.Command("git", "status", "-s")
-	cmd.Dir = dir
-	output, err := cmd.Output()
-	if err != nil {
-		ctx.GetLogger().Error("Error getting status of git for files", "error", err, "output", string(output))
-		return "", err
+	var b strings.Builder
+	b.WriteString("Fix the code-level root cause of the following production incident and raise a pull request.\n\n")
+	if fileName != "" {
+		fmt.Fprintf(&b, "**Affected file (hint)**: %s\n\n", fileName)
 	}
-
-	if len(string(output)) == 0 {
-		return "", fmt.Errorf("no changes found")
+	if fixContext != "" {
+		fmt.Fprintf(&b, "**Root cause / what to fix**:\n%s\n\n", fixContext)
 	}
-
-	// commit file
-	cmd = exec.Command("git", "add", ".")
-	cmd.Dir = dir
-	output, err = cmd.Output()
-	if err != nil {
-		ctx.GetLogger().Error("Error adding files to commit", "error", err, "output", string(output))
-		return "", err
+	if strings.TrimSpace(gitDiff) != "" {
+		b.WriteString("**Proposed change** — a fix was drafted from an earlier snapshot of the code. Apply it, but if the surrounding code has changed since, adapt it to achieve the same intent:\n```diff\n")
+		b.WriteString(gitDiff)
+		b.WriteString("\n```\n\n")
 	}
-
-	// Configure user email
-	cmd = exec.Command("git", "config", "user.email", config.Config.GitCommitNudgebeeEmail)
-	cmd.Dir = dir
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		ctx.GetLogger().Error("Error configuring user email", "error", err, "output", string(output))
-		return "", err
+	if strings.TrimSpace(guidance) != "" {
+		fmt.Fprintf(&b, "**Additional guidance from the reviewer** — follow this when implementing the fix, and note it in the PR description:\n%s\n\n", guidance)
 	}
-
-	// Configure user name
-	cmd = exec.Command("git", "config", "user.name", config.Config.GitCommitNudgebeeUser)
-	cmd.Dir = dir
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		ctx.GetLogger().Error("Error configuring user name", "error", err, "output", string(output))
-		return "", err
-	}
-
-	// Commit files
-	cmd = exec.Command("git", "commit", "-m", fmt.Sprintf("ci: Updated %s %s", request.ResolverType, request.Recommendation.Id))
-	cmd.Dir = dir
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		ctx.GetLogger().Error("Error committing files", "error", err, "output", string(output))
-		return "", err
-	}
-
-	return branchName, nil
+	b.WriteString("**Instructions**:\n")
+	b.WriteString("1. Use the root cause and the affected-file hint to locate the responsible code.\n")
+	b.WriteString("2. Implement a minimal, targeted fix that addresses the root cause, honoring any reviewer guidance above. If no source change is actually required, do not invent one.\n")
+	b.WriteString("3. Raise a pull request with a clear, descriptive title and a description of the problem and the fix.\n\n")
+	fmt.Fprintf(&b, "For more details: %s", referenceLink)
+	return b.String()
 }
 
 func raisePrForCodeRepo(ctx AccountAdapterContext, dir string, branchName string, gitDetail gitDetailFromDeployment, updateExistingPR bool, existingPRNumber int, githubBody string, resolverType string, githubTitle string) (string, error) {
-	// push branch
+	// push branch. CombinedOutput so git's stderr (auth/permission errors) is
+	// captured, not just the exit code — a plain .Output() drops it.
 	cmd := exec.Command("git", "push", "origin", branchName, "-f")
 	cmd.Dir = dir
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		ctx.GetLogger().Error("Error pushing branch", "error", err, "output", redactGitCredentials(string(output)))
-		return "", err
+		return "", fmt.Errorf("git push failed: %s", strings.TrimSpace(redactGitCredentials(string(output))))
 	}
 
 	// raise PR
@@ -1535,10 +1481,6 @@ type githubAdapter struct {
 }
 
 func (k *githubAdapter) ApplyRecommendation(ctx AccountAdapterContext, request ApplyRecommendationRequest, existingRecommendations []models.RecommendationResolution, recommendResolutionId string) (ApplyRecommendationResponse, error) {
-	updateExistingPR := false
-	var existingPRNumber int
-	githubBody := ""
-	githubTitle := ""
 	switch {
 	case request.Recommendation.Category == "RightSizing" && request.Recommendation.RuleName == "pod_right_sizing":
 		if request.Resource.Id == "" {
@@ -1612,93 +1554,33 @@ func (k *githubAdapter) ApplyRecommendation(ctx AccountAdapterContext, request A
 		}, nil
 
 	case request.Recommendation.Category == "EventResolutionRaisePr":
-		gitDetail, err := getGitDetailsFromRecommendation(ctx, request)
-		if err != nil {
-			return ApplyRecommendationResponse{}, err
+		// The event log-analysis already mapped the source repo; resolve it from
+		// the payload and hand the fix intent to the code agent, which clones,
+		// re-derives the fix against the current code, and raises the PR (resolving
+		// git credentials itself). No git operations happen in the adapter.
+		recMap, _ := request.Recommendation.Recommendation.Object().(map[string]any)
+		org, repo := parseGitHubOrgRepo(recMapString(recMap, "git_repo"))
+		if org == "" || repo == "" {
+			return ApplyRecommendationResponse{}, common.ErrorBadRequest("no source code repository is mapped for this event; cannot raise a code fix PR")
 		}
 
-		ReferenceLink := ""
-		ReferenceLink = fmt.Sprintf("%s/investigate?id=%s&accountId=%s", os.Getenv("BASE_URL"), request.Recommendation.Id, request.Recommendation.CloudAccountId)
+		referenceLink := fmt.Sprintf("%s/investigate?id=%s&accountId=%s", os.Getenv("BASE_URL"), request.Recommendation.Id, request.Recommendation.CloudAccountId)
 		if request.ReferenceLink != nil {
-			ReferenceLink = *request.ReferenceLink
+			referenceLink = *request.ReferenceLink
 		}
 
-		githubBody = githubBody + fmt.Sprintf("\nFor more details. Please visit [Nudgebee](%s)", ReferenceLink)
-		go func() {
-			dbms, err := database.GetDatabaseManager(database.Metastore)
-			if err != nil {
-				ctx.GetLogger().Error("failed recommendation resolution db connection", "error", err)
-				return
-			}
-			// checkout code repo
-			dir, err := checkoutCodeRepo(ctx, request, gitDetail)
-			if err != nil {
-				ctx.GetLogger().Error("Error doing checkout", "error", err)
-				_, err = dbms.Db.Exec(`UPDATE event_resolution SET status = $1, updated_at = $2, status_message = $4 WHERE id = $3`,
-					models.RecommendationResolutionStatusFailed, time.Now(), recommendResolutionId, "Failed at checkout the Code")
-				if err != nil {
-					ctx.GetLogger().Error("error updating recommendation resolution at checkout", "error", err)
-				}
-				return
-			}
-			defer func() {
-				err := os.RemoveAll(dir)
-				if err != nil {
-					ctx.GetLogger().Error("Error removing temp dir", "error", err)
-					_, err = dbms.Db.Exec(`UPDATE event_resolution SET status = $1, updated_at = $2, status_message = $4 WHERE id = $3`,
-						models.RecommendationResolutionStatusFailed, time.Now(), recommendResolutionId, "Failed at Remove temp dir")
-					if err != nil {
-						ctx.GetLogger().Error("error updating recommendation resolution at remove dir", "error", err)
-					}
-				}
-			}()
-
-			// update code
-			branchName, err := commitCodeForEvent(ctx, dir, request, gitDetail, updateExistingPR)
-			if err != nil {
-				message := "Failed at committing the Code"
-				status := models.RecommendationResolutionStatusFailed
-				if err.Error() == "No Changes Found" {
-					message = "No Changes Found"
-					status = models.RecommendationResolutionStatusSuccess
-				}
-				ctx.GetLogger().Error("Error committing the code", "error", err)
-				_, err = dbms.Db.Exec(`UPDATE event_resolution SET status = $1, updated_at = $2, status_message = $4 WHERE id = $3`,
-					status, time.Now(), recommendResolutionId, message)
-				if err != nil {
-					ctx.GetLogger().Error("error updating recommendation resolution at commit code", "error", err)
-				}
-				return
-			}
-
-			// raise PR
-			resp, err := raisePrForCodeRepo(ctx, dir, branchName, gitDetail, updateExistingPR, existingPRNumber, githubBody, request.ResolverType, githubTitle)
-			if err != nil {
-				ctx.GetLogger().Error("Error raising Pull Request", "error", err)
-				_, err = dbms.Db.Exec(`UPDATE event_resolution SET status = $1, updated_at = $2, status_message = $4 WHERE id = $3`,
-					models.RecommendationResolutionStatusFailed, time.Now(), recommendResolutionId, "Failed at raising PR")
-				if err != nil {
-					ctx.GetLogger().Error("error updating recommendation resolution at raise pr", "error", err)
-				}
-				return
-			}
-			prResponse := map[string]any{}
-			err = common.UnmarshalJson([]byte(resp), &prResponse)
-			if err != nil {
-				ctx.GetLogger().Error("Error unmarshalling PR response", "error", err)
-				_, err = dbms.Db.Exec(`UPDATE event_resolution SET status = $1, updated_at = $2, status_message = $4 WHERE id = $3`,
-					models.RecommendationResolutionStatusFailed, time.Now(), recommendResolutionId, "Failed at unmarshalling PR Response")
-				if err != nil {
-					ctx.GetLogger().Error("error updating recommendation resolution", "error", err)
-				}
-				return
-			}
-			_, err = dbms.Db.Exec(`UPDATE event_resolution SET status = $1, updated_at = $2, type_reference_id = $5, status_message = $4 WHERE id = $3`,
-				models.RecommendationStatusInProgress, time.Now(), recommendResolutionId, "PR raised successfully", prResponse["html_url"].(string))
-			if err != nil {
-				ctx.GetLogger().Error("error updating recommendation resolution", "error", err)
-			}
-		}()
+		dispatchCodeAgentPR(ctx, codeAgentPRParams{
+			AccountID:         request.Recommendation.CloudAccountId,
+			RecommendationID:  request.Recommendation.Id,
+			ResolutionID:      recommendResolutionId,
+			IsEventResolution: true,
+			Org:               org,
+			Repo:              repo,
+			Label:             "event code fix",
+			SuccessMessage:    "PR raised successfully",
+		}, func() (string, error) {
+			return buildEventFixPrompt(recMap, referenceLink), nil
+		})
 
 		return ApplyRecommendationResponse{
 			Data:                     map[string]any{},
@@ -1797,72 +1679,6 @@ func commitCodeGithub(ctx AccountAdapterContext, request ApplyRecommendationRequ
 
 }
 
-func readFile(fileName string) ([]string, error) {
-	file, err := os.Open(fileName)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		err := file.Close()
-		if err != nil {
-			slog.Error("Error closing file", "error", err)
-		}
-	}()
-
-	var lines []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	return lines, scanner.Err()
-}
-
-func writeFile(fileName string, lines []string) error {
-	file, err := os.Create(fileName)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		err := file.Close()
-		if err != nil {
-			slog.Error("Error closing file", "error", err)
-		}
-	}()
-
-	writer := bufio.NewWriter(file)
-	for _, line := range lines {
-		_, _ = fmt.Fprintln(writer, line)
-	}
-	return writer.Flush()
-}
-
-func readUpdateCodeFile(fileName string, lineNumber int, newLine string, oldLine string) error {
-	lines, err := readFile(fileName)
-	if err != nil {
-		fmt.Printf("Error reading file: %v\n", err)
-		return nil
-	}
-
-	// Update the specific line
-	if lineNumber > 0 && lineNumber <= len(lines) {
-		if strings.TrimSpace(lines[lineNumber-1]) == strings.TrimSpace(oldLine) {
-			lines[lineNumber-1] = newLine
-		} else {
-			fmt.Println("Warning: The line to be replaced doesn't match the diff")
-		}
-	} else {
-		fmt.Println("Error: Line number out of range")
-		return nil
-	}
-
-	// Write the updated content back to the file
-	err = writeFile(fileName, lines)
-	if err != nil {
-		fmt.Printf("Error writing file: %v\n", err)
-		return nil
-	}
-	return nil
-}
 func (k *githubAdapter) GetRecommendationResolutionStatus(ctx AccountAdapterContext, recommendation models.Recommendation, resolutionReferenceId string, applyRequestPayload models.Json, resolutionStatusMessage string) (GetRecommendationResolutionStatusResponse, error) {
 	// get PR status from Github Api and update the status
 	applyRequestPayloadMap, ok := applyRequestPayload.Object().(map[string]any)

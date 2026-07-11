@@ -22,20 +22,12 @@ import (
 	"nudgebee/services/relay"
 	"nudgebee/services/security"
 	"nudgebee/services/triage"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v2"
-)
-
-// Compiled once at package init instead of on every extractDiffInfo call.
-var (
-	diffLineNumberRegex = regexp.MustCompile(`@@ -(\d+),`)
-	diffOldChangeRegex  = regexp.MustCompile(`(?m)^-(.*)`)
-	diffNewChangeRegex  = regexp.MustCompile(`(?m)^\+(.*)`)
 )
 
 func init() {
@@ -248,61 +240,6 @@ func updateContainerImage(pod map[any]any, containerName string, newImage string
 		}
 	}
 	return pod, fmt.Errorf("container %s not found", containerName)
-}
-
-func extractDiffInfo(diff string) (lineNumber int, oldChange, newChange string, err error) {
-	diff = replaceTabs(diff)
-	lineNumberMatches := diffLineNumberRegex.FindStringSubmatch(diff)
-	if len(lineNumberMatches) < 2 {
-		return 0, "", "", fmt.Errorf("could not find line number in diff")
-	}
-
-	if _, err1 := fmt.Sscanf(lineNumberMatches[1], "%d", &lineNumber); err1 != nil {
-		return 0, "", "", fmt.Errorf("error parsing line number in diff: %w", err1)
-	}
-
-	oldChangeMatches := diffOldChangeRegex.FindAllStringSubmatch(diff, -1)
-	newChangeMatches := diffNewChangeRegex.FindAllStringSubmatch(diff, -1)
-
-	filterOutFilenames := func(matches [][]string) string {
-		for _, match := range matches {
-			if !strings.HasPrefix(strings.TrimSpace(match[1]), "-- a/") &&
-				!strings.HasPrefix(strings.TrimSpace(match[1]), "++ b/") &&
-				!strings.HasPrefix(strings.TrimSpace(match[0]), "--- a/") &&
-				!strings.HasPrefix(strings.TrimSpace(match[0]), "+++ b/") {
-				return strings.TrimSpace(match[1])
-			}
-		}
-		return ""
-	}
-
-	oldChange = filterOutFilenames(oldChangeMatches)
-	newChange = filterOutFilenames(newChangeMatches)
-	if oldChange == "" && newChange == "" {
-		lines := strings.Split(diff, "\n")
-		inChanges := false
-
-		for _, line := range lines {
-			if strings.HasPrefix(line, "@@") {
-				inChanges = true
-				continue
-			}
-
-			if inChanges {
-				if strings.HasPrefix(line, "-") {
-					oldChange = strings.TrimPrefix(line, "-")
-				} else if strings.HasPrefix(line, "+") {
-					newChange = strings.TrimPrefix(line, "+")
-				}
-			}
-		}
-	}
-
-	return lineNumber, oldChange, newChange, nil
-}
-
-func replaceTabs(str string) string {
-	return strings.ReplaceAll(str, "\t", "    ") // Replacing tab '\t' with 4 spaces
 }
 
 func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendationApplyRequest) (EventRecommendationApplyResponse, error) {
@@ -886,70 +823,85 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 			}
 		}
 	} else if okRaisePR {
-		if raisePR {
-			resolution.Type = models.RecommendationResolutionTypePullRequest
-			eventLogAnalysisRow := dbms.Db.QueryRowx("SELECT analysis from event_log_analysis WHERE analysis_type = 'log_analysis' and cloud_account_id = $1 AND event_id = $2 AND status = 'COMPLETED'", query.AccountId, query.EventId)
-			if eventLogAnalysisRow.Err() != nil {
-				return EventRecommendationApplyResponse{}, fmt.Errorf("invalid event_log_analysis - %s", query.EventId)
-			}
-			eventLogAnalysisDetail := map[string]any{}
-			err = eventLogAnalysisRow.MapScan(eventLogAnalysisDetail)
-			if err != nil {
-				return EventRecommendationApplyResponse{}, err
-			}
-			var result map[string]any
-			err := common.UnmarshalJson([]byte(eventLogAnalysisDetail["analysis"].(string)), &result)
-			if err != nil {
-				return EventRecommendationApplyResponse{}, err
-			}
-			sourceUpdates, ok := result["source_updates"].(map[string]any)
-			if !ok {
-				return EventRecommendationApplyResponse{}, fmt.Errorf("failed to parse 'source_updates' from result")
-			}
-			filepath, ok := sourceUpdates["file_path"].(string)
-			if !ok {
-				return EventRecommendationApplyResponse{}, fmt.Errorf("'file_path' not found or not a string in 'source_updates'")
-			}
-			gitDiff, ok := sourceUpdates["gitDiff"].(string)
-			if !ok {
-				return EventRecommendationApplyResponse{}, fmt.Errorf("'gitDiff' not found or not a string in 'source_updates'")
-			}
-			lineNumber, oldLine, newLine, err1 := extractDiffInfo(gitDiff)
-			if err1 != nil {
-				return EventRecommendationApplyResponse{}, fmt.Errorf("failed to extract diff info from 'gitDiff': %w", err1)
-			}
-			sourceDetails, ok := result["source_details"].(map[string]any)
-			if !ok {
-				return EventRecommendationApplyResponse{}, fmt.Errorf("failed to parse 'source_details' from result")
-			}
-			sha1, ok := sourceDetails[annotations.WorkloadGitHash].(string)
-			if !ok {
-				return EventRecommendationApplyResponse{}, fmt.Errorf("'%s' not found or not a string in 'source_details'", annotations.WorkloadGitHash)
-			}
-			recommendationRequest = adapter.ApplyRecommendationRequest{
-				Data: query.Data.(map[string]any),
-				Recommendation: models.Recommendation{
-					Category:       "EventResolutionRaisePr",
-					RuleName:       *r.AggregationKey,
-					Id:             r.Id,
-					CloudAccountId: *r.CloudAccountId,
-					TenantId:       *r.Tenant,
-					Recommendation: models.NewJsonObject(map[string]any{
-						"account_id": *r.CloudAccountId,
-						"old_change": gitDiff,
-						"fileName":   filepath,
-						"lineNumber": lineNumber + 1,
-						"oldLine":    oldLine,
-						"newLine":    newLine,
-						"sha1":       sha1,
-					}),
-					AccountObjectId: &query.EventId,
-				},
-				Resource:       cr,
-				ProviderConfig: query.ProviderConfig,
-			}
-		} else {
+		if !raisePR {
 			return EventRecommendationApplyResponse{}, fmt.Errorf("resolution: raisePR must be true to create a pull request")
+		}
+		resolution.Type = models.RecommendationResolutionTypePullRequest
+
+		// Re-derive the fix through the code agent. The log-analysis step already
+		// ran agent_code_2 in propose mode (fix, no PR) and stored the drafted
+		// diff under source_updates.gitDiff. Raising the PR dispatches agent_code_2
+		// again (mode=fix, raise_pr=true): the stored diff and the analysis's
+		// root cause are passed as intent, and the agent re-applies or adapts the
+		// fix against the current code before opening the PR. The intent is to fix
+		// the identified issue, not to blindly replay a possibly-stale patch.
+		eventLogAnalysisRow := dbms.Db.QueryRowx("SELECT analysis from event_log_analysis WHERE analysis_type = 'log_analysis' and cloud_account_id = $1 AND event_id = $2 AND status = 'COMPLETED'", query.AccountId, query.EventId)
+		if eventLogAnalysisRow.Err() != nil {
+			return EventRecommendationApplyResponse{}, fmt.Errorf("invalid event_log_analysis - %s", query.EventId)
+		}
+		eventLogAnalysisDetail := map[string]any{}
+		if err = eventLogAnalysisRow.MapScan(eventLogAnalysisDetail); err != nil {
+			return EventRecommendationApplyResponse{}, err
+		}
+		analysisStr, _ := eventLogAnalysisDetail["analysis"].(string)
+		var result map[string]any
+		if err := common.UnmarshalJson([]byte(analysisStr), &result); err != nil {
+			return EventRecommendationApplyResponse{}, err
+		}
+		sourceUpdates, ok := result["source_updates"].(map[string]any)
+		if !ok {
+			return EventRecommendationApplyResponse{}, fmt.Errorf("failed to parse 'source_updates' from result")
+		}
+		gitDiff, _ := sourceUpdates["gitDiff"].(string)
+		if strings.TrimSpace(gitDiff) == "" {
+			return EventRecommendationApplyResponse{}, fmt.Errorf("no proposed code fix is stored for this event; re-run the analysis before raising a PR")
+		}
+		filePath, _ := sourceUpdates["file_path"].(string)
+		// The repo the log-analysis already resolved. The adapter parses the
+		// org/repo from it and passes it straight to the code agent, which
+		// resolves its own git credentials.
+		sourceDetails, _ := result["source_details"].(map[string]any)
+		gitRepo, _ := sourceDetails[annotations.WorkloadGitRepo].(string)
+		// Optional free-text the user added in the Raise-PR panel; threaded into
+		// the agent prompt as guidance that steers how the fix is implemented.
+		guidance, _ := queryData["guidance"].(string)
+		// The identified root cause the agent should fix. Combine the analysis's
+		// title, root-cause narrative, and fix explanation so the agent works from
+		// the issue we identified rather than the (possibly stale) diff alone.
+		var fixContextParts []string
+		for _, v := range []any{
+			result["title"],
+			result["root_cause_analysis"],
+			result["description"],
+			sourceUpdates["explanation"],
+		} {
+			if s, _ := v.(string); strings.TrimSpace(s) != "" {
+				fixContextParts = append(fixContextParts, strings.TrimSpace(s))
+			}
+		}
+		fixContext := strings.Join(fixContextParts, "\n\n")
+
+		recommendationRequest = adapter.ApplyRecommendationRequest{
+			Data: queryData,
+			Recommendation: models.Recommendation{
+				Category:       "EventResolutionRaisePr",
+				RuleName:       *r.AggregationKey,
+				Id:             r.Id,
+				CloudAccountId: *r.CloudAccountId,
+				TenantId:       *r.Tenant,
+				Recommendation: models.NewJsonObject(map[string]any{
+					"account_id":  *r.CloudAccountId,
+					"git_repo":    gitRepo,
+					"fileName":    filePath,
+					"fix_context": fixContext,
+					"gitDiff":     gitDiff,
+					"guidance":    guidance,
+				}),
+				AccountObjectId: &query.EventId,
+			},
+			ResolverType:   "code fix",
+			Resource:       cr,
+			ProviderConfig: query.ProviderConfig,
 		}
 	} else {
 		containerName := ""
