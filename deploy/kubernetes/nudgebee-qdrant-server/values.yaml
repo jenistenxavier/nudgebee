@@ -4,9 +4,11 @@
 replicaCount: 1
 
 image:
-  repository: qdrant/qdrant
+  # ghcr mirror (patched) rather than docker.io/qdrant/qdrant — avoids Docker
+  # Hub rate limits; published by the infra-mirrors workflow.
+  repository: ghcr.io/nudgebee/qdrant
   pullPolicy: IfNotPresent
-  tag: "v1.18.2"
+  tag: "v1.18.2-nb1"
 
 imagePullSecrets: [ ]
 nameOverride: ""

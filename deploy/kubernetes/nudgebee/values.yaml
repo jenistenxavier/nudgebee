@@ -316,8 +316,10 @@ nudgebee-qdrant-server:
   enabled: true
   fullnameOverride: nudgebee-qdrant-server
   image:
-    repository: qdrant/qdrant
-    tag: 'v1.18.2'
+    # ghcr mirror (patched) rather than docker.io/qdrant/qdrant — avoids Docker
+    # Hub rate limits; published by the infra-mirrors workflow.
+    repository: ghcr.io/nudgebee/qdrant
+    tag: 'v1.18.2-nb1'
 temporal:
   enabled: true
   fullnameOverride: temporal
