@@ -29,6 +29,27 @@ const detectGitProvider = (repoUrl) => {
   return null;
 };
 
+// Detects whether a workload is declaratively managed (GitOps / Helm / Argo CD /
+// Flux) so a manual "Update" — which patches the live pods directly — can warn
+// that the change will be reverted on the next reconcile. Returns the manager's
+// display name and the git repo to raise a PR against, when either is known.
+const detectGitOpsManager = (annotations = {}, labels = {}) => {
+  const annKeys = Object.keys(annotations);
+  const labKeys = Object.keys(labels);
+  const gitRepo = annotations[ANNOTATIONS.CI_GIT_REPO] || annotations[ANNOTATIONS.WORKLOAD_GIT_REPO] || null;
+  let manager = null;
+  if (annKeys.some((k) => k.startsWith('argocd.argoproj.io/')) || labels['argocd.argoproj.io/instance']) {
+    manager = 'Argo CD';
+  } else if ([...annKeys, ...labKeys].some((k) => k.includes('fluxcd.io'))) {
+    manager = 'Flux';
+  } else if (labels['app.kubernetes.io/managed-by'] === 'Helm' || annotations['meta.helm.sh/release-name']) {
+    manager = 'Helm';
+  } else if (gitRepo) {
+    manager = 'GitOps';
+  }
+  return { manager, gitRepo };
+};
+
 const KubernetesRightSizingPopupForm = ({
   open,
   title = 'Update Resource Limits',
@@ -54,6 +75,11 @@ const KubernetesRightSizingPopupForm = ({
     memBuffer: 3,
   });
   const [algo, setAlgo] = useState('NBALGO');
+  // Declarative-management detection (GitOps/Helm/Argo/Flux) so a manual "Update"
+  // can warn it will be reverted on the next sync. driftConfirm holds the pending
+  // large-change confirmation rows (null = no confirmation open).
+  const [gitOpsInfo, setGitOpsInfo] = useState({ manager: null, gitRepo: null });
+  const [driftConfirm, setDriftConfirm] = useState(null);
 
   const parsedOldRequest =
     data?.memory?.oldRequest && typeof data?.memory?.oldRequest === 'string'
@@ -130,18 +156,19 @@ const KubernetesRightSizingPopupForm = ({
 
   useEffect(() => {
     if (open) {
-      // Event code-fix PRs need the git integration list too (the backend
-      // resolves the repo, but the provider must be chosen). Workload rightsizing
-      // annotations only apply to the rightsizing flow.
+      // Both flows need these on open: listGitConfigurations for the PR provider
+      // choice (event code-fix PRs and rightsizing PRs alike), and
+      // getWorkloadDeploymentForSelectedRightSize for GitOps detection + the
+      // rightsizing annotations.
       listGitConfigurations();
-      if (recommendationSource != 'event') {
-        getWorkloadDeploymentForSelectedRightSize();
-      }
+      getWorkloadDeploymentForSelectedRightSize();
     } else {
       // Clean up state when modal closes
       setAllGitIntegrations([]);
       setSelectedGitIntegration('');
       setSelectedWorkloadAnnotations({});
+      setGitOpsInfo({ manager: null, gitRepo: null });
+      setDriftConfirm(null);
     }
   }, [open]);
 
@@ -195,7 +222,46 @@ const KubernetesRightSizingPopupForm = ({
     setLoading(false);
   };
 
-  const submitRecommendation = () => {
+  // Rows describing resource changes that deviate sharply (>4x up or >75% down)
+  // from the current allocation. The raw form value and the current allocation
+  // share a display unit, so the ratio is unit-agnostic. Empty when the current
+  // value is unknown or nothing is large — those are handled by the backend
+  // sanity validator, not this confirmation.
+  const computeDriftRows = () => {
+    const memUnit = recommendationSource === 'event' ? 'Mi' : 'GB';
+    const rows = [];
+    // CPU may be a bare-cores number ("0.5") or a millicores string ("500m"); parse
+    // both to cores so the ratio isn't skewed (500m must read as 0.5, not 500).
+    const parseCpu = (val) => {
+      const s = String(val ?? '').trim();
+      if (!s) return NaN;
+      return s.endsWith('m') ? parseFloat(s.slice(0, -1)) / 1000 : parseFloat(s);
+    };
+    const add = (label, oldRaw, newRaw, unit, isCpu = false) => {
+      const from = isCpu ? parseCpu(oldRaw) : parseFloat(oldRaw);
+      const to = isCpu ? parseCpu(newRaw) : parseFloat(newRaw);
+      if (!Number.isFinite(from) || from <= 0 || !Number.isFinite(to) || to <= 0) return;
+      const ratio = to / from;
+      if (ratio >= 0.25 && ratio <= 4) return;
+      rows.push({ label, from: `${from}${unit}`, to: `${to}${unit}`, pct: Math.round((ratio - 1) * 100) });
+    };
+    add('Memory request', allocatedData.memory.request, updatedData?.memory?.request, memUnit);
+    add('Memory limit', allocatedData.memory.limit, updatedData?.memory?.limit, memUnit);
+    add('CPU request', allocatedData.cpu.request, updatedData?.cpu?.request, '', true);
+    add('CPU limit', allocatedData.cpu.limit, updatedData?.cpu?.limit, '', true);
+    return rows;
+  };
+
+  const submitRecommendation = (skipConfirm = false) => {
+    // Warn before a large deviation from the current allocation (a likely mistake
+    // or a fat-fingered value) — the user confirms once, then we proceed.
+    if (!skipConfirm) {
+      const rows = computeDriftRows();
+      if (rows.length > 0) {
+        setDriftConfirm(rows);
+        return;
+      }
+    }
     setLoading(true);
     let dataToSubmit = {
       ...updatedData,
@@ -243,6 +309,17 @@ const KubernetesRightSizingPopupForm = ({
       dataToSubmit.cpu.limit = parseFloat(dataToSubmit.cpu.limit);
     } else {
       dataToSubmit.cpu.limit = null;
+    }
+
+    // Memory is numeric MiB here; serialize it as an explicit Kubernetes quantity
+    // ("160.79Mi"), matching the Raise-PR path. Sent as a bare number the apply
+    // pipeline patches it verbatim and Kubernetes reads it as *bytes* (160.79 ->
+    // "160790m", ~160 bytes), OOM-killing the pod. CPU stays a bare number (cores).
+    if (dataToSubmit.memory.request) {
+      dataToSubmit.memory.request += 'Mi';
+    }
+    if (dataToSubmit.memory.limit) {
+      dataToSubmit.memory.limit += 'Mi';
     }
 
     const { memory, cpu, _, container_name, ...rest } = dataToSubmit;
@@ -301,6 +378,8 @@ const KubernetesRightSizingPopupForm = ({
         if (workloads && workloads.length == 1) {
           const workload = workloads[0];
           const annotations = workload.meta?.config?.annotations || {};
+          const labels = workload.meta?.config?.labels || {};
+          setGitOpsInfo(detectGitOpsManager(annotations, labels));
 
           // Check k8s annotations first
           const filteredKeys = Object.keys(annotations).filter((key) => key.startsWith(CI_PREFIX));
@@ -705,6 +784,22 @@ const KubernetesRightSizingPopupForm = ({
         ))}
       {updateType === 'resourceChange' && (
         <Box display='flex' flexDirection='column' justifyContent='space-between' alignItems='left' my='5px' py='1px'>
+          {gitOpsInfo.manager && (
+            <Box
+              sx={{
+                backgroundColor: ds.amber[100],
+                border: `0.5px solid ${ds.amber[300]}`,
+                p: 'var(--ds-space-4)',
+                mb: 'var(--ds-space-5)',
+              }}
+            >
+              <Typography sx={{ fontSize: 'var(--ds-text-body-md)', color: ds.amber[700] }}>
+                This workload is managed by <strong>{gitOpsInfo.manager}</strong>. “Update” patches the running pods directly, so the change is
+                reverted on the next sync.{' '}
+                {gitOpsInfo.gitRepo ? '“Raise PR” persists it in Git instead.' : 'Persist changes through your GitOps source instead.'}
+              </Typography>
+            </Box>
+          )}
           <Box sx={{ pb: 'var(--ds-space-6)' }}>
             <Box sx={{ display: 'flex', gap: 'var(--ds-space-4)', marginTop: 'var(--ds-space-4)' }}>
               <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-5)' }}>
@@ -743,6 +838,35 @@ const KubernetesRightSizingPopupForm = ({
           </Box>
         </Box>
       )}
+      <Modal open={!!driftConfirm} onClose={() => setDriftConfirm(null)} title='Confirm large resource change' width='sm'>
+        <Box sx={{ p: 'var(--ds-space-4)' }}>
+          <Typography sx={{ fontSize: 'var(--ds-text-body-md)', color: ds.gray[700], mb: 'var(--ds-space-4)' }}>
+            These values deviate sharply from the current allocation. Confirm this is intended:
+          </Typography>
+          <Box component='ul' sx={{ pl: 'var(--ds-space-5)', mb: 'var(--ds-space-5)' }}>
+            {(driftConfirm || []).map((r) => (
+              <li key={r.label}>
+                <strong>{r.label}:</strong> {r.from} → {r.to} ({r.pct > 0 ? '+' : ''}
+                {r.pct}%)
+              </li>
+            ))}
+          </Box>
+          <Box display='flex' justifyContent='flex-end' gap={ds.space[3]}>
+            <Button size='md' tone='secondary' onClick={() => setDriftConfirm(null)}>
+              Cancel
+            </Button>
+            <Button
+              size='md'
+              onClick={() => {
+                setDriftConfirm(null);
+                submitRecommendation(true);
+              }}
+            >
+              Apply anyway
+            </Button>
+          </Box>
+        </Box>
+      </Modal>
     </Modal>
   );
 };

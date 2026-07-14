@@ -25,6 +25,30 @@ import { BetaIcon, ExternalLinkIcon } from '@assets';
 const betaBadge = <SafeIcon src={BetaIcon} alt='Beta Icon' width={16} height={12} style={{ marginLeft: ds.space[0] }} />;
 const externalLinkBadge = <SafeIcon src={ExternalLinkIcon} alt='Open in new tab' width={12} height={12} />;
 
+// Detects whether a workload is declaratively managed (GitOps / Helm / Argo CD /
+// Flux) so a manual "Deploy Fix" — which patches the live pods directly — can warn
+// that the change will be reverted on the next reconcile. Returns the manager's
+// display name and the git repo to raise a PR against, when either is known.
+const detectGitOpsManager = (
+  annotations: Record<string, string> = {},
+  labels: Record<string, string> = {}
+): { manager: string | null; gitRepo: string | null } => {
+  const annKeys = Object.keys(annotations);
+  const labKeys = Object.keys(labels);
+  const gitRepo = annotations[ANNOTATIONS.CI_GIT_REPO] || annotations[ANNOTATIONS.WORKLOAD_GIT_REPO] || null;
+  let manager: string | null = null;
+  if (annKeys.some((k) => k.startsWith('argocd.argoproj.io/')) || labels['argocd.argoproj.io/instance']) {
+    manager = 'Argo CD';
+  } else if ([...annKeys, ...labKeys].some((k) => k.includes('fluxcd.io'))) {
+    manager = 'Flux';
+  } else if (labels['app.kubernetes.io/managed-by'] === 'Helm' || annotations['meta.helm.sh/release-name']) {
+    manager = 'Helm';
+  } else if (gitRepo) {
+    manager = 'GitOps';
+  }
+  return { manager, gitRepo };
+};
+
 interface ResolveModalProps {
   open: boolean;
   onClose: () => void;
@@ -63,6 +87,11 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
   const [inPlace, setInPlace] = useState<boolean>(true);
   const [selectedWorkloadAnnotations, setSelectedWorkloadAnnotations] = useState<Record<string, string>>({});
   const [isGitReposLoading, setIsGitReposLoading] = useState(false);
+  // Declarative-management detection (GitOps/Helm/Argo/Flux) so a manual "Deploy
+  // Fix" can warn it will be reverted on the next sync. driftConfirm holds the
+  // pending large-change confirmation rows (null = no confirmation open).
+  const [gitOpsInfo, setGitOpsInfo] = useState<{ manager: string | null; gitRepo: string | null }>({ manager: null, gitRepo: null });
+  const [driftConfirm, setDriftConfirm] = useState<Array<{ label: string; from: string; to: string; pct: number }> | null>(null);
 
   // Ticket state
   const [isTicketFormOpen, setIsTicketFormOpen] = useState(false);
@@ -173,6 +202,8 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
       if (workloads.length === 1) {
         const workload = workloads[0];
         const annotations = workload.meta?.config?.annotations || {};
+        const labels = workload.meta?.config?.labels || {};
+        setGitOpsInfo(detectGitOpsManager(annotations, labels));
         const filteredKeys = Object.keys(annotations).filter((key) => key.startsWith(CI_PREFIX) || key.startsWith('argocd.argoproj.io'));
         if (filteredKeys.length > 0) {
           const filteredObject: Record<string, string> = {};
@@ -243,6 +274,8 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
     setAllGitIntegrations([]);
     setSelectedGitIntegration('');
     setSelectedWorkloadAnnotations({});
+    setGitOpsInfo({ manager: null, gitRepo: null });
+    setDriftConfirm(null);
     onClose();
   };
 
@@ -441,7 +474,48 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
 
   // ── Deploy Fix ──
 
-  const submitRecommendation = async () => {
+  // Rows describing resource changes that deviate sharply (>4x up or >75% down)
+  // from the current allocation. New and current share a display unit (cores /
+  // MB), so the ratio is unit-agnostic. Empty when the current value is unknown
+  // or nothing is large — those are handled by the backend sanity validator.
+  const computeDriftRows = () => {
+    const rows: Array<{ label: string; from: string; to: string; pct: number }> = [];
+    // CPU may be a bare-cores number ("0.5") or a millicores string ("500m"); parse
+    // both to cores so the ratio isn't skewed (500m must read as 0.5, not 500).
+    const parseCpu = (val: any) => {
+      const s = String(val ?? '').trim();
+      if (!s) return NaN;
+      return s.endsWith('m') ? parseFloat(s.slice(0, -1)) / 1000 : parseFloat(s);
+    };
+    const add = (label: string, oldRaw: any, newRaw: any, unit: string, isCpu = false) => {
+      const from = isCpu ? parseCpu(oldRaw) : parseFloat(String(oldRaw ?? '').replace(/,/g, ''));
+      const to = isCpu ? parseCpu(newRaw) : parseFloat(String(newRaw ?? '').replace(/,/g, ''));
+      if (!Number.isFinite(from) || from <= 0 || !Number.isFinite(to) || to <= 0) return;
+      const ratio = to / from;
+      if (ratio >= 0.25 && ratio <= 4) return;
+      rows.push({ label, from: `${from}${unit}`, to: `${to}${unit}`, pct: Math.round((ratio - 1) * 100) });
+    };
+    for (const c of Object.keys(updatedData)) {
+      const cur = allocatedData[c] || {};
+      const next = updatedData[c] || {};
+      add(`${c} · CPU request`, cur.cpu?.request, next.cpu?.request, '', true);
+      add(`${c} · CPU limit`, cur.cpu?.limit, next.cpu?.limit, '', true);
+      add(`${c} · memory request`, cur.memory?.request, next.memory?.request, 'MB');
+      add(`${c} · memory limit`, cur.memory?.limit, next.memory?.limit, 'MB');
+    }
+    return rows;
+  };
+
+  const submitRecommendation = async (skipConfirm = false) => {
+    // Warn before a large deviation from the current allocation (a likely mistake
+    // or fat-fingered value) — the user confirms once, then we proceed.
+    if (!skipConfirm) {
+      const rows = computeDriftRows();
+      if (rows.length > 0) {
+        setDriftConfirm(rows);
+        return;
+      }
+    }
     setDeploying(true);
     try {
       const dataToSubmit = getDataWithMemorySuffix();
@@ -717,7 +791,7 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
         >
           Schedule Auto Optimize
         </Button>
-        <Button tone='secondary' size='sm' onClick={submitRecommendation} disabled={deploying} id='resolve-modal-deploy'>
+        <Button tone='secondary' size='sm' onClick={() => submitRecommendation()} disabled={deploying} id='resolve-modal-deploy'>
           {deploying ? 'Deploying...' : 'Deploy Fix'}
         </Button>
       </Box>
@@ -750,6 +824,15 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
       >
         <Box sx={{ pb: ds.space.mul(0, 15) }}>
           <AutoPilotHeaderCard header='' data={autoPilotData} />
+          {gitOpsInfo.manager && (
+            <Box sx={{ backgroundColor: ds.amber[100], border: `0.5px solid ${ds.amber[300]}`, p: ds.space[4], mt: ds.space[4] }}>
+              <Typography variant='body2' sx={{ color: ds.amber[700] }}>
+                This workload is managed by <strong>{gitOpsInfo.manager}</strong>. “Deploy Fix” patches the running pods directly, so the change is
+                reverted on the next sync.{' '}
+                {gitOpsInfo.gitRepo ? '“Create PR” persists it in Git instead.' : 'Persist changes through your GitOps source instead.'}
+              </Typography>
+            </Box>
+          )}
           {Object.keys(updatedData).length > 0
             ? Object.keys(updatedData).map((containerName) => (
                 <Box key={containerName} sx={{ display: 'flex', gap: ds.space[4], marginTop: ds.space[4] }}>
@@ -893,6 +976,38 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
             </Button>
           </Box>
         )}
+      </Modal>
+
+      {/* ── Confirm large resource change ── */}
+      <Modal width='sm' open={!!driftConfirm} handleClose={() => setDriftConfirm(null)} title='Confirm large resource change'>
+        <Box sx={{ p: ds.space[4] }}>
+          <Typography variant='body2' sx={{ color: ds.gray[700], mb: ds.space[4] }}>
+            These values deviate sharply from the current allocation. Confirm this is intended:
+          </Typography>
+          <Box component='ul' sx={{ pl: ds.space[5], mb: ds.space[5] }}>
+            {(driftConfirm || []).map((r) => (
+              <li key={r.label}>
+                <strong>{r.label}:</strong> {r.from} → {r.to} ({r.pct > 0 ? '+' : ''}
+                {r.pct}%)
+              </li>
+            ))}
+          </Box>
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: ds.space[3] }}>
+            <Button tone='secondary' size='md' onClick={() => setDriftConfirm(null)}>
+              Cancel
+            </Button>
+            <Button
+              tone='primary'
+              size='md'
+              onClick={() => {
+                setDriftConfirm(null);
+                submitRecommendation(true);
+              }}
+            >
+              Deploy anyway
+            </Button>
+          </Box>
+        </Box>
       </Modal>
 
       {/* ── Schedule Auto Optimize Config Modal ── */}
