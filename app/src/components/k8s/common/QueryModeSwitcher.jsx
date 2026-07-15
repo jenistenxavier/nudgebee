@@ -753,7 +753,7 @@ const QueryModeSwitcher = ({
                 label='Select an Index'
                 value={selectedEsIndex || null}
                 options={esIndexList ?? []}
-                disabled={esIndexList?.length === 0}
+                freeSolo
                 onSelect={(_event, value) => {
                   setPrebuildQueryBlocks((prev) => prev.map((b, i) => (i === 0 ? { ...b, selectedMetric: value || '' } : b)));
                   if (onQueryChange) {

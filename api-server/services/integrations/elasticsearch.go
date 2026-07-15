@@ -163,7 +163,7 @@ func (m Elasticsearch) ConfigSchema() core.IntegrationSchema {
 			},
 			"trace_index": {
 				Type:        core.ToolSchemaTypeString,
-				Description: "Index pattern or exact name, e.g. traces-* or traces-generic.otel-default.",
+				Description: "Index pattern or exact name for Data Prepper spans, e.g. otel-v1-apm-span-*. Leave blank to use otel-v1-apm-span-*.",
 				ShowWhen:    map[string]any{core.DefaultTraceProvider: true},
 				Priority:    19,
 			},

@@ -39,6 +39,7 @@ const (
 	ElasticsearchApiKey         = "api_key"
 	ElasticsearchBearerToken    = "bearer_token"
 	ElasticsearchMetricsIndex   = "metrics_index"
+	ElasticsearchTraceIndex     = "trace_index"
 	ElasticsearchTLSSkipVerify  = "es_tls_skip_verify"
 )
 
@@ -54,6 +55,7 @@ type ElasticsearchConfig struct {
 	ApiKey         string // Base64-encoded id:api_key for ES API Key auth
 	BearerToken    string // OAuth2 / service-account bearer token
 	MetricsIndex   string // index pattern for utilisation queries; defaults to "*"
+	TraceIndex     string // index pattern for trace queries; defaults to esTraceIndex
 	TLSSkipVerify  bool   // user-configured opt-in for self-signed certs
 }
 
@@ -110,6 +112,8 @@ func GetElasticsearchConfig(ctx *security.RequestContext, accountId string) (*El
 			cfg.BearerToken = value
 		case ElasticsearchMetricsIndex:
 			cfg.MetricsIndex = value
+		case ElasticsearchTraceIndex:
+			cfg.TraceIndex = value
 		case ElasticsearchTLSSkipVerify:
 			cfg.TLSSkipVerify = strings.EqualFold(strings.TrimSpace(value), "true")
 		}
