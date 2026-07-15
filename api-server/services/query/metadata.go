@@ -3199,6 +3199,23 @@ var table_metadata = map[string]TableDefinition{
 			needsVulnerabilityId := requestReferencesColumns(request, map[string]bool{"vulnerability_id": true, "count_vulnerability_id": true})
 			needsPackageId := requestReferencesColumns(request, map[string]bool{"package_id": true, "count_package_id": true})
 
+			// includeCleanImages surfaces successfully-scanned images that have ZERO
+			// CVEs — they have an image_scan_summary row but no image_scan row — across
+			// the Images, Apps, and severity-counter groupings so a clean image no
+			// longer silently vanishes. Excluded only where a NULL-CVE synthetic row
+			// would be wrong:
+			//   - the per-CVE listing GROUPs BY vulnerability_id, so a NULL-CVE row would
+			//     create a bogus bucket. That listing selects the RAW `vulnerability_id`
+			//     column (nothing else does — `count_vulnerability_id` is fine, DISTINCT
+			//     ignores the NULL), so gate on that.
+			//   - a severity filter implies the user wants vulnerable rows, and clean
+			//     rows have no severity, so they correctly drop out.
+			// The status filter is applied to the clean branch itself (cleanStatusFilter
+			// below) rather than disabling clean rows — summary rows are written
+			// status='Open', so the default Status=Open view includes them.
+			includeCleanImages := !requestReferencesColumns(request, map[string]bool{"vulnerability_id": true}) &&
+				recSeverityFilter == ""
+
 			lateralVulnCol, outerVulnCol := "", ""
 			if needsVulnerabilityId {
 				lateralVulnCol = ",\n\t\t\t\t\trec2.recommendation->>'VulnerabilityID' as vulnerability_id"
@@ -3213,6 +3230,61 @@ var table_metadata = map[string]TableDefinition{
 			if needsRecommendation {
 				lateralRecCol = ",\n\t\t\t\t\trec2.recommendation::varchar as recommendation"
 				outerRecCol = ",\n\t\t\t\t\tr.recommendation as recommendation"
+			}
+
+			// cleanUnion adds one synthetic row per scanned-but-clean image (an
+			// image_scan_summary row with no live image_scan row). Its column list must
+			// line up with the CVE branch above: severity is an untyped NULL (adopts the
+			// CVE branch's type, yields severity_weight 0 and no count_severity_* match),
+			// status is the summary's own status (a real, valid enum value), and any
+			// conditional package_id/recommendation columns mirror the CVE branch.
+			// gated: includeCleanImages guarantees vulnerability_id is not selected here.
+			cleanUnion := ""
+			if includeCleanImages {
+				// Column list must line up with the CVE branch, including whichever
+				// conditional columns it projects. severity is an untyped NULL (adopts
+				// the CVE branch's type → severity_weight 0, no count_severity_* match);
+				// vulnerability_id/package_id are NULL (DISTINCT counts ignore them);
+				// status is the summary row's own status (a valid enum value).
+				cleanVulnCol := ""
+				if needsVulnerabilityId {
+					cleanVulnCol = ",\n\t\t\t\t\tNULL as vulnerability_id"
+				}
+				cleanPkgCol := ""
+				if needsPackageId {
+					cleanPkgCol = ",\n\t\t\t\t\tNULL as package_id"
+				}
+				cleanRecCol := ""
+				if needsRecommendation {
+					cleanRecCol = ",\n\t\t\t\t\ts.recommendation::varchar as recommendation"
+				}
+				// Apply the same status filter the CVE branch uses, retargeted to the
+				// summary alias, so Status=Open includes clean rows (status='Open') and
+				// Status=Archive excludes them. ReplaceAll (not Replace n=1) in case a
+				// future status filter references the alias more than once.
+				cleanStatusFilter := strings.ReplaceAll(recStatusFilter, "rec2.", "s.")
+				// image_scan_summary rows key account_object_id to the image name, so we
+				// match on that indexed column directly instead of parsing the JSON.
+				cleanUnion = `
+				UNION ALL
+				SELECT s.id, NULL as severity, s.status, s.created_at, s.updated_at` + cleanVulnCol + cleanPkgCol + cleanRecCol + `
+				FROM recommendation s
+				WHERE s.cloud_account_id = pc.cloud_account_id
+					AND s.tenant_id        = pc.tenant_id
+					AND s.account_object_id = pc.image
+					AND s.category          = 'Security'
+					AND s.rule_name         = 'image_scan_summary'
+					AND s.status           != 'Archive'` + cleanStatusFilter + `
+					AND NOT EXISTS (
+						SELECT 1 FROM recommendation v
+						WHERE v.cloud_account_id = pc.cloud_account_id
+							AND v.tenant_id        = pc.tenant_id
+							AND v.recommendation->>'image_name' = pc.image
+							AND v.category          = 'Security'
+							AND v.rule_name         = 'image_scan'
+							AND v.account_object_id IS NOT NULL
+							AND v.status           != 'Archive'
+					)`
 			}
 
 			// Heavy path: LATERAL + OFFSET 0 forces the planner to use a nested-loop
@@ -3264,7 +3336,7 @@ var table_metadata = map[string]TableDefinition{
 					AND rec2.recommendation->>'image_name' = pc.image
 					AND rec2.category          = 'Security'
 					AND rec2.rule_name         = 'image_scan'
-					AND rec2.account_object_id IS NOT NULL` + recStatusFilter + recSeverityFilter + `
+					AND rec2.account_object_id IS NOT NULL` + recStatusFilter + recSeverityFilter + cleanUnion + `
 				OFFSET 0
 			) r
 			WHERE 1=1` + outerAccountFilter + `
