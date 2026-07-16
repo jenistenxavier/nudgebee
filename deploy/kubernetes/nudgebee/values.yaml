@@ -178,7 +178,10 @@ redis:
   image:
     registry: 'ghcr.io/nudgebee'
     repository: redis
-    tag: 7.0.12-debian-11-r0-nb1
+    # -nb2 rebuilds the bitnami wait-for-port startup helper on Go 1.26.5,
+    # clearing 2 CRITICAL + 19 HIGH + 43 MEDIUM Go-stdlib CVEs a debian apt
+    # upgrade can't touch. Residual is the debian-11 NOFIX OS floor only.
+    tag: 7.0.12-debian-11-r0-nb2
   auth:
     password: 'password'
     existingSecret: 'redis'
