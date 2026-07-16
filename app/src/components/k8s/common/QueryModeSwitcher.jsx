@@ -754,6 +754,10 @@ const QueryModeSwitcher = ({
                 value={selectedEsIndex || null}
                 options={esIndexList ?? []}
                 freeSolo
+                // Same affordance as the Build tab's picker: freeSolo alone is
+                // invisible, so the hint is what tells the user a wildcard
+                // pattern outside the listed indices is accepted.
+                searchPlaceholder='Search or type pattern (use * for wildcard)...'
                 onSelect={(_event, value) => {
                   setPrebuildQueryBlocks((prev) => prev.map((b, i) => (i === 0 ? { ...b, selectedMetric: value || '' } : b)));
                   if (onQueryChange) {
