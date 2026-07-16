@@ -5,8 +5,8 @@ FROM alpine:3.22
 # cache key so BuildKit re-runs the apk install and pulls current Alpine security
 # patches instead of a stale cached layer. Committed (not a build-arg) so each
 # refresh is a reviewable, revertable diff; bump when the Trivy scan flags a stale
-# package (e.g. c-ares CVE-2026-33630).
-ARG OS_PKG_EPOCH=2026-W28
+# package (e.g. c-ares CVE-2026-33630); currently W29 pulls curl 8.14.1-r3 (CVE-2026-5545).
+ARG OS_PKG_EPOCH=2026-W29
 RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" \
     && apk upgrade --no-cache \
     && apk add --no-cache curl bc \
