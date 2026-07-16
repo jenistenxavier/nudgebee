@@ -97,10 +97,17 @@ postgresql:
     tag: '16.1.0-debian-11-r16-nb1'
   metrics:
     enabled: true
+    # Upstream prometheus-community postgres_exporter (distroless), mirrored to
+    # ghcr. Replaces the frozen bitnamilegacy build whose stale Go binary +
+    # debian-11 base carried 2 CRITICAL / 35 HIGH fixable that apt-upgrade could
+    # not clear. Drop-in for the bitnami chart's metrics sidecar (same
+    # DATA_SOURCE_* env, verified pg_up=1). NOTE: v0.20.x renamed two metrics the
+    # alert rules below depend on — updated in PostgresReplicationLag /
+    # PostgresLongRunningQuery.
     image:
       registry: 'ghcr.io/nudgebee'
       repository: postgres-exporter
-      tag: '0.15.0-debian-11-r3-nb1'
+      tag: 'v0.20.1'
     serviceMonitor:
       enabled: true
     prometheusRule:
@@ -128,17 +135,24 @@ postgresql:
                     summary: 'PostgreSQL too many connections'
                     description: 'Instance {{ $labels.instance }} has over 100 active connections'
 
+                # prometheus-community v0.20 renamed pg_replication_lag ->
+                # pg_replication_lag_seconds (seconds). The old expr `> 10000000`
+                # with a "> 10MB" byte-oriented description never fired against a
+                # seconds metric (10M s = 115 days); use a 300s (5 min) lag
+                # threshold. TODO(ops): confirm the desired replication-lag SLO.
                 - alert: PostgresReplicationLag
-                  expr: pg_replication_lag{job="postgresql"} > 10000000
+                  expr: pg_replication_lag_seconds{job="postgresql"} > 300
                   for: 5m
                   labels:
                     severity: warning
                   annotations:
                     summary: 'PostgreSQL replication lag detected'
-                    description: 'Replication lag on {{ $labels.instance }} > 10MB'
+                    description: 'Replication lag on {{ $labels.instance }} > 5 minutes'
 
+                # prometheus-community v0.20 renamed pg_stat_activity_max_tx_duration_seconds
+                # -> pg_stat_activity_max_tx_duration (still seconds; 300 = 5 min).
                 - alert: PostgresLongRunningQuery
-                  expr: pg_stat_activity_max_tx_duration_seconds{job="postgresql"} > 300
+                  expr: pg_stat_activity_max_tx_duration{job="postgresql"} > 300
                   for: 5m
                   labels:
                     severity: warning
