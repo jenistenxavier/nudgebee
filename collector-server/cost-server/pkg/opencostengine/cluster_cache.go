@@ -1321,7 +1321,7 @@ func (pcc *NudgebeeClusterCache) GetAllResourceQuotas() []*clustercache.Resource
 		return nil
 	}
 
-	var rqs []*clustercache.ResourceQuota
+	rqs := make([]*clustercache.ResourceQuota, 0, len(rqList.Items))
 	for i := range rqList.Items {
 		rqs = append(rqs, clustercache.TransformResourceQuota(&rqList.Items[i]))
 	}
