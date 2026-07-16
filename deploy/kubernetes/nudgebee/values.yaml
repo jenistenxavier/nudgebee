@@ -3,7 +3,8 @@ global:
     registry: 'ghcr.io/nudgebee'
   imagePullSecrets: []
   initImages:
-    postgres: 'ghcr.io/nudgebee/postgres:16.10-alpine-nb1'
+    # -nb2 rebuilds gosu on Go 1.26.5 (clears 1C/14H Go-stdlib CVEs); fully clean.
+    postgres: 'ghcr.io/nudgebee/postgres:16.10-alpine-nb2'
     curl: 'ghcr.io/nudgebee/curl:8.10.1'
   existingNudgebeeSecretName: ''
 nudgebee_registry_secret:
