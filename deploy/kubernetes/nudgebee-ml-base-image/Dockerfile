@@ -57,5 +57,14 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then MF_ARCH=aarch64; else MF_ARCH=x86_64; f
     # that trivy flags HIGH. The app runs from `myenv`, but the base env still
     # ships in the image, so bump it to the fixed release.
     "${CONDA_DIR}/bin/conda" install -n base -c conda-forge "msgpack-python>=1.2.1" -y && \
+    # conda-rattler-solver is an experimental, optional conda solver plugin
+    # (conda's default remains libmamba, also installed). It vendors py-rattler,
+    # whose rattler.abi3.so statically links pyo3 0.25.1 — trivy flags HIGH
+    # (GHSA-36hh-v3qg-5jq4) + MEDIUM (GHSA-chgr-c6px-7xpp). It is base-env package
+    # tooling never invoked at runtime (the app runs from myenv), so remove it
+    # outright instead of chasing an upstream rattler release; this only nudges
+    # conda one patch (26.5.3->26.5.0, still libmamba-solvered) and clears the
+    # pyo3 finding on both consumers (ml-k8s-server, rag-server).
+    "${CONDA_DIR}/bin/conda" remove -n base conda-rattler-solver py-rattler -y && \
     "${CONDA_DIR}/bin/conda" clean --yes --all && \
     rm -rf /root/.cache
