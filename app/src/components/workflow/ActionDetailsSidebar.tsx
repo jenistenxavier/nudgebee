@@ -1974,30 +1974,33 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
             gap: 1,
           }}
         >
-          {/* Dry Run Button */}
-          <Box>
-            <Button
-              tone='secondary'
-              size='md'
-              fullWidth
-              icon={<PlayArrow sx={{ fontSize: ds.text.title }} />}
-              loading={currentDryRunLoading}
-              disabled={currentDryRunLoading || runTaskLoading || viewOnlyMode || !onDryRunToTask || !supportsDryRun}
-              onClick={handleDryRunCurrentTask}
-            >
-              {currentDryRunLoading ? 'Running...' : 'Dry Run'}
-            </Button>
-            <Typography
-              sx={{
-                fontSize: 'var(--ds-text-caption)',
-                color: !supportsDryRun ? ds.red[500] : ds.gray[400],
-                mt: 0.5,
-                textAlign: 'center',
-              }}
-            >
-              {dryRunHelperText}
-            </Typography>
-          </Box>
+          {/* Dry Run Button — dialog only; dry run simulates the surrounding
+              workflow up to this node, which doesn't exist in inline mode */}
+          {variant === 'dialog' && (
+            <Box>
+              <Button
+                tone='secondary'
+                size='md'
+                fullWidth
+                icon={<PlayArrow sx={{ fontSize: ds.text.title }} />}
+                loading={currentDryRunLoading}
+                disabled={currentDryRunLoading || runTaskLoading || viewOnlyMode || !onDryRunToTask || !supportsDryRun}
+                onClick={handleDryRunCurrentTask}
+              >
+                {currentDryRunLoading ? 'Running...' : 'Dry Run'}
+              </Button>
+              <Typography
+                sx={{
+                  fontSize: 'var(--ds-text-caption)',
+                  color: !supportsDryRun ? ds.red[500] : ds.gray[400],
+                  mt: 0.5,
+                  textAlign: 'center',
+                }}
+              >
+                {dryRunHelperText}
+              </Typography>
+            </Box>
+          )}
 
           {/* Run Task Button */}
           <Box>
@@ -2065,9 +2068,15 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
               }}
             >
               <Typography sx={{ fontSize: 'var(--ds-text-small)', fontStyle: 'italic', textAlign: 'center' }}>
-                Use &quot;Dry Run&quot; to simulate the workflow
-                <br />
-                or &quot;Run Task&quot; to execute in isolation
+                {variant === 'dialog' ? (
+                  <>
+                    Use &quot;Dry Run&quot; to simulate the workflow
+                    <br />
+                    or &quot;Run Task&quot; to execute in isolation
+                  </>
+                ) : (
+                  <>Use &quot;Run Task&quot; to execute this task in isolation</>
+                )}
               </Typography>
             </Box>
           )}
@@ -4856,22 +4865,26 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
             {'Configure and test this automation action'}
           </Typography>
         </Box>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          {!viewOnlyMode && isDirty && (
-            <Button id='action-sidebar-save-btn' tone='primary' size='sm' icon={<Check sx={{ fontSize: ds.text.title }} />} onClick={handleSave}>
-              Save
-            </Button>
-          )}
-          <Button
-            id='action-sidebar-close-btn'
-            composition='icon-only'
-            tone='ghost'
-            size='sm'
-            aria-label='Close'
-            icon={<Close sx={{ fontSize: ds.text.heading, color: 'var(--ds-gray-600)' }} />}
-            onClick={requestClose}
-          />
-        </Box>
+        {/* Save/Close are dialog-only: inline mode has nothing to save into
+            (no workflow node) and is dismissed by selecting another task */}
+        {variant === 'dialog' && (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            {!viewOnlyMode && isDirty && (
+              <Button id='action-sidebar-save-btn' tone='primary' size='sm' icon={<Check sx={{ fontSize: ds.text.title }} />} onClick={handleSave}>
+                Save
+              </Button>
+            )}
+            <Button
+              id='action-sidebar-close-btn'
+              composition='icon-only'
+              tone='ghost'
+              size='sm'
+              aria-label='Close'
+              icon={<Close sx={{ fontSize: ds.text.heading, color: 'var(--ds-gray-600)' }} />}
+              onClick={requestClose}
+            />
+          </Box>
+        )}
       </Box>
 
       {/* Content - 3 columns in dialog mode, 2 columns inline (no workflow graph → no Previous Actions) */}
