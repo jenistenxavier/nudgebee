@@ -1,51 +1,59 @@
-import React, { useEffect, useState } from 'react';
-import { Box, Typography, CircularProgress, Accordion, AccordionSummary, AccordionDetails } from '@mui/material';
-import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import { Box, Typography } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
-import { Button as DsButton } from '@ui/Button';
 import { Input } from '@ui/Input';
-import { Form } from '@ui/Form';
 import { Chip } from '@ui/Chip';
+import { Accordion } from '@ui/Accordion';
 import { Banner } from '@ui/Banner';
+import { Skeleton } from '@ui/Skeleton';
+import { EmptyState } from '@ui/EmptyState';
+import SafeIcon from '@shared/icons/SafeIcon';
 import apiWorkflow from '@api1/workflow';
-
-interface TaskDefinition {
-  name: string;
-  description: string;
-  input_schema: Record<string, any>;
-  output_schema: Record<string, any>;
-  aliases: string[];
-}
+import { parseHttpResponseBodyMessage } from 'src/utils/common';
+import { generateNodeCategories } from './constants/nodeCategories';
+import ActionDetailsSidebar from './ActionDetailsSidebar';
+import type { TaskDefinition } from '@components/workflow/types';
 
 interface TaskRunnerProps {
   accountId: string;
 }
 
+const renderCategoryOrTaskIcon = (icon: any, label: string, size: number) => {
+  if (typeof icon === 'string' && !icon.includes('/') && !icon.includes('.')) {
+    // Emoji icon
+    return <span style={{ fontSize: size >= 24 ? 'var(--ds-text-heading)' : 'var(--ds-text-title)' }}>{icon}</span>;
+  }
+  return <SafeIcon src={icon} alt={label} width={size} height={size} style={{ objectFit: 'contain' }} />;
+};
+
+const matchesAnyAlias = (aliases: string[] | undefined, query: string): boolean => {
+  if (!aliases?.length) return false;
+  return aliases.some((alias) => alias.toLowerCase().includes(query));
+};
+
 const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
   const [taskDefinitions, setTaskDefinitions] = useState<TaskDefinition[]>([]);
   const [loadingTasks, setLoadingTasks] = useState(true);
-  const [selectedTask, setSelectedTask] = useState<TaskDefinition | null>(null);
-  const [params, setParams] = useState<Record<string, string>>({});
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<any>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const [selectedTaskType, setSelectedTaskType] = useState<string | null>(null);
+  const [taskData, setTaskData] = useState<Record<string, any>>({});
 
   useEffect(() => {
     const fetchTasks = async () => {
       setLoadingTasks(true);
+      setLoadError(null);
       try {
         const resp: any = await apiWorkflow.listTaskDefinitions();
-        if (resp instanceof Error) {
-          setError(resp.message || 'Failed to load task definitions.');
-        } else if (resp?.errors?.length) {
-          setError(resp.errors[0]?.message || 'Failed to load task definitions.');
+        const errorMessage = parseHttpResponseBodyMessage(resp);
+        if (errorMessage) {
+          setLoadError(errorMessage);
         } else {
           const tasks: TaskDefinition[] = resp?.data?.workflow_list_taskdefinitions?.tasks || [];
           setTaskDefinitions(tasks);
         }
       } catch {
-        setError('Failed to load task definitions.');
+        setLoadError('Failed to load task definitions.');
       } finally {
         setLoadingTasks(false);
       }
@@ -53,242 +61,205 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
     fetchTasks();
   }, []);
 
-  const handleSelectTask = (task: TaskDefinition) => {
-    setSelectedTask(task);
-    setParams({});
-    setResult(null);
-    setError(null);
-  };
+  // Same category grouping/icons as the workflow builder's "Add Node" listing,
+  // minus the static trigger entries (triggers can't be run standalone).
+  const categories = useMemo(() => {
+    const generated = generateNodeCategories(taskDefinitions);
+    const { triggers: _triggers, ...rest } = generated as Record<string, any>;
+    return rest;
+  }, [taskDefinitions]);
 
-  const handleParamChange = (key: string, value: string) => {
-    setParams((prev) => ({ ...prev, [key]: value }));
-  };
+  const filteredCategories = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return categories;
 
-  const handleRunTask = async () => {
-    if (!accountId) {
-      setError('Account ID is missing.');
-      return;
-    }
-    if (!selectedTask) return;
-    setRunning(true);
-    setResult(null);
-    setError(null);
-    try {
-      // Coerce param types based on input_schema
-      const coercedParams: Record<string, any> = {};
-      for (const [key, value] of Object.entries(params)) {
-        if (value === '') {
-          // If optional and empty, skip sending it to avoid sending invalid format strings
-          if (!selectedTask.input_schema?.required?.includes(key)) {
-            continue;
-          }
+    const filtered: Record<string, any> = {};
+    Object.entries(categories).forEach(([categoryKey, category]: [string, any]) => {
+      const categoryMatches = category.label.toLowerCase().includes(query);
+      const matchingSubcategories: Record<string, any> = {};
+      Object.entries(category.subcategories || {}).forEach(([subKey, sub]: [string, any]) => {
+        if (
+          sub.label.toLowerCase().includes(query) ||
+          subKey.toLowerCase().includes(query) ||
+          matchesAnyAlias(sub.aliases, query) ||
+          categoryMatches
+        ) {
+          matchingSubcategories[subKey] = sub;
         }
-        const fieldSchema = selectedTask.input_schema?.properties?.[key];
-        if (fieldSchema?.type === 'integer') {
-          const parsed = parseInt(value, 10);
-          if (isNaN(parsed)) {
-            throw new Error(`Parameter "${key}" must be an integer.`);
-          }
-          coercedParams[key] = parsed;
-        } else if (fieldSchema?.type === 'boolean') {
-          coercedParams[key] = value === 'true' || value === '1';
-        } else if (fieldSchema?.type === 'number') {
-          const parsed = parseFloat(value);
-          if (isNaN(parsed)) {
-            throw new Error(`Parameter "${key}" must be a number.`);
-          }
-          coercedParams[key] = parsed;
-        } else {
-          coercedParams[key] = value;
+      });
+      if (Object.keys(matchingSubcategories).length > 0) {
+        filtered[categoryKey] = { ...category, subcategories: matchingSubcategories };
+      }
+    });
+    return filtered;
+  }, [categories, search]);
+
+  const handleSelectTask = (taskType: string) => {
+    setTaskData({});
+    setSelectedTaskType(taskType);
+  };
+
+  const handleRunTask = useCallback(
+    async (taskType: string, params: any): Promise<any> => {
+      try {
+        const response: any = await apiWorkflow.triggerTask(accountId, taskType, params);
+        const errorMessage = parseHttpResponseBodyMessage(response);
+        if (errorMessage) {
+          return { error: errorMessage };
         }
+        const taskResult = response?.data?.workflow_execute_task;
+        if (taskResult?.status === 'FAILED') {
+          return { error: taskResult.error || 'Task execution failed' };
+        }
+        return taskResult?.result ?? taskResult;
+      } catch (error: any) {
+        console.error('Failed to run task:', error);
+        return { error: error?.message || 'Failed to run task' };
       }
+    },
+    [accountId]
+  );
 
-      const resp: any = await apiWorkflow.triggerTask(accountId, selectedTask.name, coercedParams);
-      if (resp instanceof Error) {
-        setError(resp.message || 'Task execution failed.');
-      } else if (resp?.errors?.length) {
-        setError(resp.errors[0]?.message || 'Task execution failed.');
-      } else {
-        setResult(resp?.data?.workflow_execute_task ?? resp?.data);
-      }
-    } catch (e: any) {
-      setError(e?.message || 'Task execution failed.');
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  // Fix: handle camelCase names + no-underscore names safely
-  const getCategory = (name: string) => {
-    if (name.includes('_')) return name.split('_')[0].toUpperCase();
-    const fromCamel = name.replace(/([A-Z])/g, ' $1').split(' ')[0];
-    return (fromCamel || 'OTHER').toUpperCase();
-  };
-
-  const grouped = taskDefinitions
-    .filter((t) => t.name.toLowerCase().includes(search.toLowerCase()) || t.description?.toLowerCase().includes(search.toLowerCase()))
-    .reduce<Record<string, TaskDefinition[]>>((acc, task) => {
-      const category = getCategory(task.name);
-      if (!acc[category]) acc[category] = [];
-      acc[category].push(task);
-      return acc;
-    }, {});
-
-  const inputFields = Object.entries(selectedTask?.input_schema?.properties || {});
-
-  return (
-    <Box sx={{ display: 'flex', gap: 3, height: '100%', p: 2 }}>
-      {/* LEFT PANEL — Task List */}
-      <Box sx={{ width: 320, flexShrink: 0, borderRight: '1px solid var(--ds-gray-200)', pr: 2 }}>
-        <Typography variant='h6' sx={{ mb: 1, fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}>
-          Task Types
-        </Typography>
-
-        {/* ✅ Search: use Input with leadingIcon — SearchInput is deleted */}
-        <Box sx={{ mb: 2 }}>
-          <Input
-            size='sm'
-            leadingIcon={<SearchIcon fontSize='small' />}
-            placeholder='Search tasks...'
-            value={search}
-            onChange={(e: any) => setSearch(e?.target?.value ?? e)}
-          />
-        </Box>
-
-        {loadingTasks ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', mt: 4 }}>
-            <CircularProgress size={24} />
+  const accordionItems = useMemo(
+    () =>
+      Object.entries(filteredCategories).map(([categoryKey, category]: [string, any]) => ({
+        id: categoryKey,
+        icon: (
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: '40px',
+              height: '40px',
+              borderRadius: 'var(--ds-radius-lg)',
+              backgroundColor: `color-mix(in srgb, ${category.color} 10%, transparent)`,
+              border: `1px solid color-mix(in srgb, ${category.color} 35%, transparent)`,
+              flexShrink: 0,
+            }}
+          >
+            {renderCategoryOrTaskIcon(category.icon, category.label, 24)}
           </Box>
-        ) : (
-          Object.entries(grouped).map(([category, tasks]) => (
-            <Accordion
-              key={category}
-              disableGutters
-              defaultExpanded={false}
-              sx={{ boxShadow: 'none', border: '1px solid var(--ds-gray-200)', mb: 1 }}
-            >
-              <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                <Typography variant='body2' sx={{ fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}>
-                  {category}
-                </Typography>
-                <Chip variant='count' size='sm' sx={{ ml: 1 }}>
-                  {String(tasks.length)}
-                </Chip>
-              </AccordionSummary>
-              <AccordionDetails sx={{ p: 0 }}>
-                {tasks.map((task) => (
-                  <Box
-                    key={task.name}
-                    onClick={() => handleSelectTask(task)}
+        ),
+        label: category.label,
+        description: category.description,
+        meta: (
+          <Chip variant='count' size='sm'>
+            {String(Object.keys(category.subcategories || {}).length)}
+          </Chip>
+        ),
+        body: (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)' }}>
+            {Object.entries(category.subcategories || {}).map(([taskType, sub]: [string, any]) => (
+              <Box
+                key={taskType}
+                id={`task-runner-task-${taskType}-btn`}
+                role='button'
+                tabIndex={0}
+                onClick={() => handleSelectTask(taskType)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    handleSelectTask(taskType);
+                  }
+                }}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  padding: 'var(--ds-space-2) var(--ds-space-3)',
+                  borderRadius: 'var(--ds-radius-lg)',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
+                  opacity: sub.deprecated ? 0.6 : 1,
+                  '&:hover': { backgroundColor: 'var(--ds-background-200)' },
+                }}
+              >
+                <Box sx={{ marginRight: 'var(--ds-space-3)', display: 'flex', alignItems: 'center', width: '24px', height: '24px', flexShrink: 0 }}>
+                  {renderCategoryOrTaskIcon(sub.icon, sub.label, 20)}
+                </Box>
+                <Box sx={{ textAlign: 'left', flexGrow: 1, minWidth: 0 }}>
+                  <Typography
                     sx={{
-                      px: 2,
-                      py: 1,
-                      cursor: 'pointer',
-                      bgcolor: selectedTask?.name === task.name ? 'var(--ds-blue-100)' : 'transparent',
-                      borderLeft: selectedTask?.name === task.name ? '3px solid var(--ds-brand-600)' : '3px solid transparent',
-                      '&:hover': { bgcolor: 'var(--ds-gray-100)' },
+                      fontSize: 'var(--ds-text-body)',
+                      fontWeight: 'var(--ds-font-weight-semibold)',
+                      color: 'var(--ds-brand-500)',
+                      fontFamily: 'poppins',
                     }}
                   >
-                    <Typography variant='body2' sx={{ fontWeight: 'var(--ds-font-weight-medium)' }}>
-                      {task.name}
-                    </Typography>
-                    {task.description && (
-                      <Typography variant='caption' color='text.secondary' sx={{ display: 'block' }}>
-                        {task.description}
-                      </Typography>
-                    )}
-                  </Box>
-                ))}
-              </AccordionDetails>
-            </Accordion>
-          ))
-        )}
-      </Box>
-
-      {/* RIGHT PANEL — Form + Results */}
-      <Box sx={{ flex: 1, overflow: 'auto' }}>
-        {!selectedTask ? (
-          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'text.secondary' }}>
-            <Typography>Select a task type from the left to get started.</Typography>
-          </Box>
-        ) : (
-          <>
-            <Typography variant='h6' sx={{ mb: 0.5, fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}>
-              {selectedTask.name}
-            </Typography>
-            {selectedTask.description && (
-              <Typography variant='body2' color='text.secondary' sx={{ mb: 2 }}>
-                {selectedTask.description}
-              </Typography>
-            )}
-
-            {/* ✅ Parameter Form: Form.Field owns label, Input has NO label prop */}
-            <Form variant='stacked' density='default'>
-              {inputFields.length === 0 ? (
-                <Typography variant='body2' color='text.secondary'>
-                  This task requires no input parameters.
-                </Typography>
-              ) : (
-                inputFields.map(([key, schema]: [string, any]) => (
-                  // ✅ Form.Field owns the label — Input does NOT get a label prop
-                  <Form.Field
-                    key={key}
-                    label={key}
-                    required={selectedTask.input_schema?.required?.includes(key)}
-                    helperText={schema?.description || ''}
-                  >
-                    <Input
-                      size='sm'
-                      placeholder={schema?.default !== undefined ? String(schema.default) : ''}
-                      value={params[key] || ''}
-                      onChange={(e: any) => handleParamChange(key, e?.target?.value ?? e)}
-                      // ✅ NO label prop here — Form.Field owns it
-                    />
-                  </Form.Field>
-                ))
-              )}
-            </Form>
-
-            <Box sx={{ mt: 3 }}>
-              <DsButton tone='primary' size='md' onClick={handleRunTask} disabled={running}>
-                {running ? <CircularProgress size={16} sx={{ mr: 1 }} /> : null}
-                {running ? 'Running...' : 'Run Task'}
-              </DsButton>
-            </Box>
-
-            {/* ✅ Error: Banner = persistent inline message (matches this use case) */}
-            {error && (
-              <Box sx={{ mt: 3 }}>
-                <Banner tone='critical' title='Error' message={error} />
-              </Box>
-            )}
-
-            {/* Results Panel */}
-            {result !== null && (
-              <Box sx={{ mt: 3 }}>
-                <Typography variant='subtitle2' sx={{ mb: 1, fontWeight: 'var(--ds-font-weight-semibold)', fontFamily: 'var(--ds-font-display)' }}>
-                  Execution Output
-                </Typography>
-                <Box
-                  component='pre'
-                  sx={{
-                    bgcolor: 'var(--ds-background-200)',
-                    borderRadius: 'var(--ds-radius-md)',
-                    p: 2,
-                    overflow: 'auto',
-                    fontSize: 'var(--ds-text-body)',
-                    maxHeight: 400,
-                    border: '1px solid var(--ds-gray-200)',
-                    fontFamily: 'var(--ds-font-mono)',
-                  }}
-                >
-                  {JSON.stringify(result, null, 2)}
+                    {sub.label}
+                  </Typography>
+                  <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)' }}>{sub.description}</Typography>
                 </Box>
               </Box>
-            )}
-          </>
-        )}
+            ))}
+          </Box>
+        ),
+      })),
+    [filteredCategories]
+  );
+
+  return (
+    <Box sx={{ p: 'var(--ds-space-4)', maxWidth: '860px' }}>
+      <Typography
+        sx={{
+          fontSize: 'var(--ds-text-title)',
+          fontWeight: 'var(--ds-font-weight-semibold)',
+          fontFamily: 'poppins',
+          color: 'var(--ds-gray-700)',
+          mb: 'var(--ds-space-1)',
+        }}
+      >
+        Task Runner
+      </Typography>
+      <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', mb: 'var(--ds-space-4)' }}>
+        Configure and run an individual automation action against this account.
+      </Typography>
+
+      <Box sx={{ mb: 'var(--ds-space-4)' }}>
+        <Input
+          id='task-runner-search-input'
+          size='md'
+          placeholder='Search actions...'
+          value={search}
+          onChange={setSearch}
+          leadingIcon={<SearchIcon sx={{ fontSize: 'var(--ds-text-heading)' }} />}
+        />
       </Box>
+
+      {loadError && (
+        <Box sx={{ mb: 'var(--ds-space-3)' }}>
+          <Banner tone='critical' title='Failed to load tasks' message={loadError} />
+        </Box>
+      )}
+
+      {loadingTasks ? (
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-2)' }}>
+          <Skeleton height={64} />
+          <Skeleton height={64} />
+          <Skeleton height={64} />
+          <Skeleton height={64} />
+        </Box>
+      ) : accordionItems.length === 0 && !loadError ? (
+        <EmptyState title='No matching tasks' description='Try a different search term.' />
+      ) : (
+        <Accordion items={accordionItems} selection='single' density='md' />
+      )}
+
+      {/* Same configure-and-test dialog as the workflow builder: dynamic
+          parameter form (API-backed dropdowns included) + individual Run. */}
+      <ActionDetailsSidebar
+        open={!!selectedTaskType}
+        onClose={() => setSelectedTaskType(null)}
+        selectedActionType={selectedTaskType}
+        nodes={[]}
+        edges={[]}
+        onTaskDataChange={(data: any) => setTaskData(data)}
+        taskDefinitions={taskDefinitions}
+        taskData={taskData}
+        viewOnlyMode={false}
+        accountId={accountId}
+        onRunTask={handleRunTask}
+      />
     </Box>
   );
 };
