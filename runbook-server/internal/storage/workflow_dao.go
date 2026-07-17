@@ -299,14 +299,14 @@ func (s *WorkflowDao) List(ctx context.Context, tenantID, accountID string, requ
 		var draftVersionID sql.NullString
 		var draftVersionNumber sql.NullInt64
 		var draftVersionName sql.NullString
- 
+
 		if err := rows.Scan(&wfID, &wfName, &wfBytes, &tagBytes, &status, &lastExecutionStatus, &lastExecutionStatusMessage, &lastExecutionTime, &lastExecutionVersion, &createdBy, &updatedBy, &createdAt, &updatedAt, &createdFromSessionID,
 			&createdByUserID, &createdByDisplayName, &updatedByUserID, &updatedByDisplayName,
 			&liveVersionID, &liveVersionNumber, &liveVersionName, &liveVersionStatus,
 			&draftVersionID, &draftVersionNumber, &draftVersionName); err != nil {
 			return nil, 0, fmt.Errorf("failed to scan workflow: %w", err)
 		}
- 
+
 		var wf model.Workflow
 		if err := json.Unmarshal(wfBytes, &wf.Definition); err != nil {
 			return nil, 0, fmt.Errorf("failed to unmarshal workflow definition: %w", err)
