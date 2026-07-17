@@ -40,6 +40,7 @@ import AutoFixHighIcon from '@mui/icons-material/AutoFixHigh';
 import StopCircleOutlinedIcon from '@mui/icons-material/StopCircleOutlined';
 import CloseIcon from '@mui/icons-material/Close';
 import ArrowDropDownIcon from '@mui/icons-material/ArrowDropDown';
+import MoreVertIcon from '@mui/icons-material/MoreVert';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import PublishedWithChangesIcon from '@mui/icons-material/PublishedWithChanges';
 import PlaylistAddCheckIcon from '@mui/icons-material/PlaylistAddCheck';
@@ -399,6 +400,7 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
   const [runVariant, setRunVariant] = useState<'current' | 'live'>('current');
   // Anchor for the Run-button split menu (chevron next to the primary button).
   const [runMenuAnchor, setRunMenuAnchor] = useState<HTMLElement | null>(null);
+  const [toolbarMoreMenuAnchor, setToolbarMoreMenuAnchor] = useState<HTMLElement | null>(null);
   // Execution ID we want ExecutionsView to auto-select on its next refresh.
   // Pushed by `executeRun` after a `live` trigger; consumed by ExecutionsView's
   // `pendingSelectionRef` path (also used by the Retry flow).
@@ -4142,22 +4144,6 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
                                 a new version; the explicit Publish button in the
                                 top-right state strip is what produces a version. */}
                           {canEdit && (
-                            <Tooltip title='Validate the workflow definition on the server'>
-                              <span style={{ marginRight: 'var(--ds-space-2)' }}>
-                                <Button
-                                  id='workflow-validate-btn'
-                                  tone='ghost'
-                                  size='sm'
-                                  icon={<PlaylistAddCheckIcon sx={{ fontSize: 16 }} />}
-                                  onClick={() => runValidation(true)}
-                                >
-                                  Validate
-                                </Button>
-                              </span>
-                            </Tooltip>
-                          )}
-
-                          {canEdit && (
                             <Tooltip
                               title={
                                 isNewWorkflow
@@ -4339,6 +4325,44 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
                             disabled={nodes.length === 0}
                             onClick={handlePrettifyLayout}
                           />
+
+                          {/* More actions (three-dots) menu */}
+                          {canEdit && (
+                            <>
+                              <Button
+                                id='workflow-toolbar-more-btn'
+                                data-testid='workflow-toolbar-more-btn'
+                                composition='icon-only'
+                                tone='ghost'
+                                size='sm'
+                                tooltip='More actions'
+                                aria-label='More actions'
+                                icon={<MoreVertIcon sx={{ fontSize: 'var(--ds-text-heading)' }} />}
+                                onClick={(e: React.MouseEvent<HTMLElement>) => setToolbarMoreMenuAnchor(e.currentTarget)}
+                              />
+                              <Menu
+                                anchorEl={toolbarMoreMenuAnchor}
+                                open={Boolean(toolbarMoreMenuAnchor)}
+                                onClose={() => setToolbarMoreMenuAnchor(null)}
+                                anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+                                transformOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+                              >
+                                <MenuItem
+                                  id='workflow-validate-menu-item'
+                                  data-testid='workflow-validate-btn'
+                                  onClick={() => {
+                                    setToolbarMoreMenuAnchor(null);
+                                    runValidation(true);
+                                  }}
+                                >
+                                  <ListItemIcon>
+                                    <PlaylistAddCheckIcon fontSize='small' />
+                                  </ListItemIcon>
+                                  <MuiListItemText primary='Validate' secondary='Validate the workflow definition on the server' />
+                                </MenuItem>
+                              </Menu>
+                            </>
+                          )}
 
                           {/* The workflow-row status dropdown that used to live
                               here was removed in the V746 rollout. Status now
