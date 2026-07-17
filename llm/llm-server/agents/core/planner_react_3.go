@@ -1929,10 +1929,14 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 		messageFormatters = append(messageFormatters, LiteralSystemMessage{Content: priorityInstruction})
 	}
 
-	// AccountPrompt is intentionally NOT added as a system message: it is only
-	// populated by the event-analysis path, so injecting it here would alternate
-	// the cacheable prefix per entry-point and bust the Account-scope cache.
+	// AccountPrompt (account GlobalContext + event-analysis additional
+	// instructions) is intentionally NOT added as a system message: its
+	// event-analysis fragment varies per entry-point, so injecting it here
+	// would alternate the cacheable prefix and bust the Account-scope cache.
 	// It is rendered into the human-message <global_preferences> block below.
+	// This is also why ReAct agents need no per-agent GC wiring — custom-planner
+	// agents that bypass this prompt path (fetch_logs, resource_search) attach
+	// AccountPrompt to their own LLM calls explicitly.
 
 	agentAdditionalPrompt, configuredTools, _ := AgentAdditionalInstructionsAndToolsAndConfigs(ctx, request.AccountId, agent.GetName())
 	if agentAdditionalPrompt != "" {
@@ -1971,7 +1975,9 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 	// Move all dynamic context to the final Human message so the system prefix is stable.
 	// today is placed here (not in the system message) so the cached system prefix
 	// does not expire on date rollover.
-	// global_preferences_block carries AccountPrompt (event-analysis path only) so
+	// global_preferences_block carries AccountPrompt (account GlobalContext,
+	// merged with any event-analysis additional instructions — populated on
+	// every entry point by handleDefaultConversation) so
 	// the cacheable system prefix does not flip between entry points.
 	dynamicPrompt := `
 **TODAY's Date:** {{.today}}

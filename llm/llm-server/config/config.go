@@ -182,8 +182,13 @@ type appConfig struct {
 	LlmServerAgentMaxTracesRows      int    `mapstructure:"llm_server_agent_max_tracesrows"`
 	LlmServerAgentMaxScratchpadChars int    `mapstructure:"llm_server_agent_max_scratchpad_chars"`
 	LlmServerMaxGCBytes              int    `mapstructure:"llm_server_max_gc_bytes"`
-	LlmServerMaxSkillContentLength   int    `mapstructure:"llm_server_max_skill_content_length"`
-	LlmServerIntegrationKBEnabled    bool   `mapstructure:"llm_server_integration_kb_enabled"`
+	// LlmServerAgentAccountPromptMaxBytes caps the account GlobalContext
+	// fragment attached to custom-planner agent LLM calls (log/trace/kubectl
+	// intent generators, resource search). Distinct from
+	// llm_server_max_gc_bytes, which limits the stored GC size at upload.
+	LlmServerAgentAccountPromptMaxBytes int  `mapstructure:"llm_server_agent_account_prompt_max_bytes"`
+	LlmServerMaxSkillContentLength      int  `mapstructure:"llm_server_max_skill_content_length"`
+	LlmServerIntegrationKBEnabled       bool `mapstructure:"llm_server_integration_kb_enabled"`
 	// LlmServerKBPrestepEnabled gates the KB pre-step: when on, the executor
 	// retrieves relevant KB content before planning and places it (plus the
 	// skill-lists menu) in the human message instead of the cacheable system
@@ -679,6 +684,7 @@ func init() {
 	viper.SetDefault("otel_grpc_timeout_seconds", 5)
 	viper.SetDefault("otel_grpc_max_msg_size", 8*1024*1024)
 	viper.SetDefault("llm_server_max_gc_bytes", 10240)
+	viper.SetDefault("llm_server_agent_account_prompt_max_bytes", 8192)
 
 	viper.SetDefault("server_heartbeat_frequency_second", 15)
 	viper.SetDefault("server_heartbeat_timeout_second", 30)
