@@ -14,25 +14,12 @@ import {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { useRouter } from 'next/router';
-import {
-  Alert,
-  Box,
-  Typography,
-  CircularProgress,
-  Drawer,
-  Tooltip,
-  Divider,
-  FormControlLabel,
-  Checkbox,
-  Menu,
-  MenuItem,
-  ListItemIcon,
-  ListItemText as MuiListItemText,
-} from '@mui/material';
+import { Alert, Box, Typography, CircularProgress, Drawer, Tooltip, Divider, FormControlLabel, Checkbox } from '@mui/material';
 import { Input } from '@ui/Input';
 import { Select } from '@ui/Select';
 import { Chip as DsChip } from '@ui/Chip';
 import { DropdownMenu } from '@ui/DropdownMenu';
+import ThreeDotsMenu from '@ui/ThreeDotsMenu';
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import AddIcon from '@mui/icons-material/Add';
@@ -40,7 +27,6 @@ import AutoFixHighIcon from '@mui/icons-material/AutoFixHigh';
 import StopCircleOutlinedIcon from '@mui/icons-material/StopCircleOutlined';
 import CloseIcon from '@mui/icons-material/Close';
 import ArrowDropDownIcon from '@mui/icons-material/ArrowDropDown';
-import MoreVertIcon from '@mui/icons-material/MoreVert';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import PublishedWithChangesIcon from '@mui/icons-material/PublishedWithChanges';
 import PlaylistAddCheckIcon from '@mui/icons-material/PlaylistAddCheck';
@@ -399,8 +385,6 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
   //              the user sees what's actually running.
   const [runVariant, setRunVariant] = useState<'current' | 'live'>('current');
   // Anchor for the Run-button split menu (chevron next to the primary button).
-  const [runMenuAnchor, setRunMenuAnchor] = useState<HTMLElement | null>(null);
-  const [toolbarMoreMenuAnchor, setToolbarMoreMenuAnchor] = useState<HTMLElement | null>(null);
   // Execution ID we want ExecutionsView to auto-select on its next refresh.
   // Pushed by `executeRun` after a `live` trigger; consumed by ExecutionsView's
   // `pendingSelectionRef` path (also used by the Retry flow).
@@ -4185,60 +4169,58 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
                               >
                                 {isTestRunning ? 'Running...' : 'Run current'}
                               </Button>
-                              <Button
-                                id='run-variant-menu-btn'
-                                composition='icon-only'
-                                tone='ghost'
+                              <DropdownMenu
+                                align='end'
+                                side='top'
                                 size='sm'
-                                aria-label='More run options'
-                                icon={<ArrowDropDownIcon sx={{ fontSize: ds.text.heading }} />}
-                                disabled={isTestRunning || isDryRunning}
-                                onClick={(e: React.MouseEvent<HTMLElement>) => setRunMenuAnchor(e.currentTarget)}
-                              />
-                              <Menu
-                                anchorEl={runMenuAnchor}
-                                open={Boolean(runMenuAnchor)}
-                                onClose={() => setRunMenuAnchor(null)}
-                                anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-                                transformOrigin={{ vertical: 'top', horizontal: 'right' }}
-                              >
-                                <MenuItem
-                                  id='run-current-menu-item'
-                                  data-testid='run-current-menu-item'
-                                  onClick={() => {
-                                    setRunMenuAnchor(null);
-                                    handleRunButtonClick('current');
-                                  }}
-                                >
-                                  <ListItemIcon>
-                                    <PlayArrowIcon fontSize='small' />
-                                  </ListItemIcon>
-                                  <MuiListItemText primary='Run current' secondary='Run the unsaved/draft definition on screen' />
-                                </MenuItem>
-                                <MenuItem
-                                  id='run-live-menu-item'
-                                  data-testid='run-live-btn'
-                                  disabled={!workflowDataRef.current?.live_version_id}
-                                  onClick={() => {
-                                    setRunMenuAnchor(null);
-                                    handleRunButtonClick('live');
-                                  }}
-                                >
-                                  <ListItemIcon>
-                                    <PublishedWithChangesIcon fontSize='small' />
-                                  </ListItemIcon>
-                                  <MuiListItemText
-                                    primary='Run live version'
-                                    secondary={
-                                      workflowDataRef.current?.live_version_id
-                                        ? `Trigger the published live version${
-                                            workflowDataRef.current?.live_version_number ? ` (v${workflowDataRef.current.live_version_number})` : ''
-                                          }`
-                                        : 'No live version published yet'
-                                    }
+                                minWidth={260}
+                                trigger={
+                                  <Button
+                                    id='run-variant-menu-btn'
+                                    composition='icon-only'
+                                    tone='ghost'
+                                    size='sm'
+                                    aria-label='More run options'
+                                    icon={<ArrowDropDownIcon sx={{ fontSize: ds.text.heading }} />}
+                                    disabled={isTestRunning || isDryRunning}
                                   />
-                                </MenuItem>
-                              </Menu>
+                                }
+                                items={[
+                                  {
+                                    id: 'run-current-menu-item',
+                                    icon: <PlayArrowIcon fontSize='small' />,
+                                    label: (
+                                      <Box data-testid='run-current-menu-item'>
+                                        <Typography sx={{ fontSize: 'var(--ds-text-body)' }}>Run current</Typography>
+                                        <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)' }}>
+                                          Run the unsaved/draft definition on screen
+                                        </Typography>
+                                      </Box>
+                                    ),
+                                    onSelect: () => handleRunButtonClick('current'),
+                                  },
+                                  {
+                                    id: 'run-live-menu-item',
+                                    icon: <PublishedWithChangesIcon fontSize='small' />,
+                                    disabled: !workflowDataRef.current?.live_version_id,
+                                    label: (
+                                      <Box data-testid='run-live-btn'>
+                                        <Typography sx={{ fontSize: 'var(--ds-text-body)' }}>Run live version</Typography>
+                                        <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)' }}>
+                                          {workflowDataRef.current?.live_version_id
+                                            ? `Trigger the published live version${
+                                                workflowDataRef.current?.live_version_number
+                                                  ? ` (v${workflowDataRef.current.live_version_number})`
+                                                  : ''
+                                              }`
+                                            : 'No live version published yet'}
+                                        </Typography>
+                                      </Box>
+                                    ),
+                                    onSelect: () => handleRunButtonClick('live'),
+                                  },
+                                ]}
+                              />
                             </Box>
                           )}
 
@@ -4328,40 +4310,20 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
 
                           {/* More actions (three-dots) menu */}
                           {canEdit && (
-                            <>
-                              <Button
-                                id='workflow-toolbar-more-btn'
-                                data-testid='workflow-toolbar-more-btn'
-                                composition='icon-only'
-                                tone='ghost'
-                                size='sm'
-                                tooltip='More actions'
-                                aria-label='More actions'
-                                icon={<MoreVertIcon sx={{ fontSize: 'var(--ds-text-heading)' }} />}
-                                onClick={(e: React.MouseEvent<HTMLElement>) => setToolbarMoreMenuAnchor(e.currentTarget)}
-                              />
-                              <Menu
-                                anchorEl={toolbarMoreMenuAnchor}
-                                open={Boolean(toolbarMoreMenuAnchor)}
-                                onClose={() => setToolbarMoreMenuAnchor(null)}
-                                anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
-                                transformOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-                              >
-                                <MenuItem
-                                  id='workflow-validate-menu-item'
-                                  data-testid='workflow-validate-btn'
-                                  onClick={() => {
-                                    setToolbarMoreMenuAnchor(null);
-                                    runValidation(true);
-                                  }}
-                                >
-                                  <ListItemIcon>
-                                    <PlaylistAddCheckIcon fontSize='small' />
-                                  </ListItemIcon>
-                                  <MuiListItemText primary='Validate' secondary='Validate the workflow definition on the server' />
-                                </MenuItem>
-                              </Menu>
-                            </>
+                            <ThreeDotsMenu
+                              id='workflow-toolbar-more-btn'
+                              menuItems={[
+                                {
+                                  id: 'workflow-validate-btn',
+                                  label: 'Validate',
+                                  reactIcon: <PlaylistAddCheckIcon fontSize='small' />,
+                                },
+                              ]}
+                              data={{ source: 'workflow-toolbar' }}
+                              onMenuClick={(item: { id: string }) => {
+                                if (item.id === 'workflow-validate-btn') runValidation(true);
+                              }}
+                            />
                           )}
 
                           {/* The workflow-row status dropdown that used to live
