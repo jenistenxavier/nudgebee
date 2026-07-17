@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { Box } from '@mui/material';
 import { Modal } from '@ui/Modal';
 import { Chip, hashHue } from '@components/common/ds/Chip';
@@ -405,24 +405,40 @@ const WorkflowTemplatesModal: React.FC<WorkflowTemplatesModalProps> = ({
     router.push(`/workflow/new?accountId=${accountId}`);
   }, [accountId, onClose, router]);
 
+  // Serialize the filter props so the fetch effect keys on VALUES, not array
+  // identity. The parent passes fresh array literals every render; keying on the
+  // arrays directly refetched on every parent re-render (infinite polling, #34351).
+  const filterKey = JSON.stringify({ eventSources, alertNames, subjectTypes });
+
+  // Bumped per fetch so a late-arriving (stale) response can't overwrite newer
+  // data — previously overlapping requests raced and an empty response could
+  // clobber the loaded templates, showing "No templates available".
+  const fetchSeqRef = useRef(0);
+
   // Fetch templates when modal opens
   const fetchWorkflows = useCallback(async () => {
+    const seq = ++fetchSeqRef.current;
     setLoading(true);
     setSelectedLabels([]); // reset label filter when the template set changes
     try {
       const category = selectedCategory === 'all' ? undefined : selectedCategory;
       const response: any = await apiWorkflow.listTemplates(category, undefined, 50, undefined, eventSources, alertNames, subjectTypes);
-      if (response?.data?.workflow_list_template?.templates) {
-        setWorkflows(response.data.workflow_list_template.templates);
-      } else {
-        setWorkflows([]);
+      if (seq !== fetchSeqRef.current) {
+        return; // a newer fetch superseded this one
       }
+      const templates = response?.data?.workflow_list_template?.templates;
+      setWorkflows(Array.isArray(templates) ? templates : []);
     } catch (error) {
-      console.error('Failed to fetch templates:', error);
+      if (seq === fetchSeqRef.current) {
+        console.error('Failed to fetch templates:', error);
+      }
     } finally {
-      setLoading(false);
+      if (seq === fetchSeqRef.current) {
+        setLoading(false);
+      }
     }
-  }, [selectedCategory, eventSources, alertNames, subjectTypes]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCategory, filterKey]);
 
   useEffect(() => {
     if (open) {
