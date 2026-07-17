@@ -158,6 +158,7 @@ query ListWorkflows($accountId:String!, $status:String, $last_execution_status:S
         display_name
       }
       last_execution_time
+      last_execution_version
       definition {
         output
         timeout
@@ -388,6 +389,8 @@ query listWorkflowExecutions($accountId:String!, $id:String!, $limit:Int, $next_
       trigger_type
       triggered_by
       workflow_id
+      version
+      version_number
     }
   }
 }
@@ -405,6 +408,8 @@ query listWorkflowExecutionsForEvent($accountId: String!, $eventId: String!) {
       close_time
       triggered_by
       trigger_type
+      version
+      version_number
     }
   }
 }
