@@ -1,5 +1,5 @@
 import React, { Fragment, useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Box, Typography, Switch, Dialog, DialogContent, Chip, Tabs, Tab, Autocomplete, TextField, Alert } from '@mui/material';
+import { Box, Typography, Switch, Dialog, Chip, Tabs, Tab, Autocomplete, TextField, Alert } from '@mui/material';
 import { Button } from '@ui/Button';
 import { Modal } from '@ui/Modal';
 import { PlayArrow, Timer, Storage, GridView, ErrorOutline, Close, AltRoute, Check } from '@mui/icons-material';
@@ -260,6 +260,11 @@ interface ActionDetailsSidebarProps {
   // close-confirmation dialog). Consumed once on open and then cleared by parent.
   pendingData?: any;
   onPendingDataConsumed?: () => void;
+  // 'dialog' (default) renders the builder's full-screen modal. 'inline' renders
+  // the same header + Config/Test columns as an embeddable panel that fills its
+  // parent container (used by the standalone Task Runner page). Inline mode drops
+  // the Previous Actions column — there is no surrounding workflow graph.
+  variant?: 'dialog' | 'inline';
 }
 
 interface SchemaProperty {
@@ -455,6 +460,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
   onRequestCloseWithUnsaved,
   pendingData,
   onPendingDataConsumed,
+  variant = 'dialog',
 }) => {
   const [localData, setLocalData] = useState(taskData || {});
 
@@ -724,7 +730,13 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
     }
     // Don't call onClose() here — parent closes the sidebar without deselecting
     // the node, so Cancel→reopen preserves the selected node and its taskData.
-    onRequestCloseWithUnsaved?.(localData);
+    // Parents that don't render a Keep/Discard dialog fall back to a plain close
+    // (otherwise the close button would be dead while the form is dirty).
+    if (onRequestCloseWithUnsaved) {
+      onRequestCloseWithUnsaved(localData);
+    } else {
+      onClose();
+    }
   }, [viewOnlyMode, isDirty, onClose, onRequestCloseWithUnsaved, localData]);
 
   // Resync Time Range mode when switching to a different action node
@@ -4819,25 +4831,8 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
     return null;
   }
 
-  return (
-    <Dialog
-      open={open}
-      onClose={requestClose}
-      fullWidth
-      maxWidth={false}
-      PaperProps={{
-        sx: {
-          width: '95vw',
-          height: '90vh',
-          maxWidth: '1600px',
-          maxHeight: '900px',
-          borderRadius: 'var(--ds-radius-lg)',
-          border: '1px solid var(--ds-brand-150)',
-          overflow: 'hidden',
-          boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
-        },
-      }}
-    >
+  const panelContent = (
+    <>
       {/* Header */}
       <Box
         sx={{
@@ -4848,6 +4843,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
           py: 1.5,
           borderBottom: '1px solid var(--ds-brand-150)',
           background: 'var(--ds-background-100)',
+          flexShrink: 0,
         }}
       >
         <Box>
@@ -4878,19 +4874,29 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
         </Box>
       </Box>
 
-      {/* Content - 3 Columns */}
-      <DialogContent sx={{ p: 0, display: 'flex', height: 'calc(100% - 72px)' }}>
-        {/* Left Column - Previous Actions (25%) */}
-        <Box sx={{ width: '25%', minWidth: 280 }}>{renderPreviousActionsColumn()}</Box>
+      {/* Content - 3 columns in dialog mode, 2 columns inline (no workflow graph → no Previous Actions) */}
+      <Box sx={{ p: 0, display: 'flex', flex: 1, minHeight: 0 }}>
+        {variant === 'dialog' && (
+          /* Left Column - Previous Actions (25%) */
+          <Box sx={{ width: '25%', minWidth: 280 }}>{renderPreviousActionsColumn()}</Box>
+        )}
 
-        {/* Middle Column - Configuration (50%) */}
-        <Box sx={{ width: '50%', overflow: 'hidden', bgcolor: 'var(--ds-background-100)', display: 'flex', flexDirection: 'column' }}>
+        {/* Middle Column - Configuration */}
+        <Box
+          sx={{
+            width: variant === 'dialog' ? '50%' : '60%',
+            overflow: 'hidden',
+            bgcolor: 'var(--ds-background-100)',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
           {renderWorkflowActionContent()}
         </Box>
 
-        {/* Right Column - Test Current Action (25%) */}
-        <Box sx={{ width: '25%', minWidth: 280 }}>{renderTestCurrentActionColumn()}</Box>
-      </DialogContent>
+        {/* Right Column - Test Current Action */}
+        <Box sx={{ width: variant === 'dialog' ? '25%' : '40%', minWidth: 280 }}>{renderTestCurrentActionColumn()}</Box>
+      </Box>
 
       {/* Confirm before disabling a task with downstream dependents */}
       <Modal
@@ -4925,6 +4931,47 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
           </Typography>
         </Box>
       </Modal>
+    </>
+  );
+
+  if (variant === 'inline') {
+    return (
+      <Box
+        sx={{
+          height: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+          backgroundColor: 'white',
+          border: '1px solid var(--ds-brand-150)',
+          borderRadius: 'var(--ds-radius-lg)',
+        }}
+      >
+        {panelContent}
+      </Box>
+    );
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onClose={requestClose}
+      fullWidth
+      maxWidth={false}
+      PaperProps={{
+        sx: {
+          width: '95vw',
+          height: '90vh',
+          maxWidth: '1600px',
+          maxHeight: '900px',
+          borderRadius: 'var(--ds-radius-lg)',
+          border: '1px solid var(--ds-brand-150)',
+          overflow: 'hidden',
+          boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+        },
+      }}
+    >
+      {panelContent}
     </Dialog>
   );
 };
