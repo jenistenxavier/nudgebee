@@ -69,7 +69,7 @@ import { ds } from 'src/utils/colors';
 // Extracted components (lightweight, always visible)
 import { TriggerWarningMessage, ExecutionStatusBar } from './components';
 import Loader from '@shared/Loader';
-import { createWorkflowCreateRequest, createWorkflowUpdateRequest, prepareWorkflowForSave } from './utils/workflowApiUtils';
+import { createWorkflowCreateRequest, createWorkflowUpdateRequest, prepareWorkflowForSave, workflowTagsToMap } from './utils/workflowApiUtils';
 import { convertWorkflowToReactFlow } from './utils/workflowLayoutEngine';
 import { validateWorkflowForSave, wouldCreateCycle } from './utils/workflowValidation';
 import { parseDurationToSeconds } from './utils/taskUtils';
@@ -1584,7 +1584,7 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
         workflow: {
           definition: workflowDefinition,
           name: workflowData?.name || 'New Automation',
-          tags: workflowSettings.tags || {},
+          tags: workflowTagsToMap(workflowSettings.tags || []),
         },
       };
 
