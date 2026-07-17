@@ -8,6 +8,7 @@ import { Banner } from '@ui/Banner';
 import { Skeleton } from '@ui/Skeleton';
 import { EmptyState } from '@ui/EmptyState';
 import SafeIcon from '@shared/icons/SafeIcon';
+import BoxLayout2 from '@shared/BoxLayout2';
 import apiWorkflow from '@api1/workflow';
 import { parseHttpResponseBodyMessage } from 'src/utils/common';
 import { generateNodeCategories } from './constants/nodeCategories';
@@ -199,91 +200,86 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
   );
 
   return (
-    <Box sx={{ display: 'flex', gap: 'var(--ds-space-4)', p: 'var(--ds-space-4)', height: 'calc(100vh - 170px)', minHeight: '520px' }}>
-      {/* LEFT — Task listing (20%) */}
-      <Box className='custom-scrollbar' sx={{ width: '20%', minWidth: '320px', flexShrink: 0, overflowY: 'auto', pr: 'var(--ds-space-2)' }}>
-        <Typography
-          sx={{
-            fontSize: 'var(--ds-text-title)',
-            fontWeight: 'var(--ds-font-weight-semibold)',
-            fontFamily: 'poppins',
-            color: 'var(--ds-gray-700)',
-            mb: 'var(--ds-space-1)',
-          }}
-        >
-          Task Runner
-        </Typography>
-        <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', mb: 'var(--ds-space-4)' }}>
-          Configure and run an individual automation action against this account.
-        </Typography>
+    <BoxLayout2
+      id='task-runner-box'
+      heading='Task Runner'
+      sharingOptions={{ sharing: { enabled: false, onClick: null }, download: { enabled: false, onClick: () => ({ tableId: '' }) } }}
+    >
+      <Box sx={{ display: 'flex', gap: 'var(--ds-space-4)', height: 'calc(100vh - 260px)', minHeight: '520px' }}>
+        {/* LEFT — Task listing (20%) */}
+        <Box className='custom-scrollbar' sx={{ width: '20%', minWidth: '320px', flexShrink: 0, overflowY: 'auto', pr: 'var(--ds-space-2)' }}>
+          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', mb: 'var(--ds-space-4)' }}>
+            Configure and run an individual automation action against this account.
+          </Typography>
 
-        <Box sx={{ mb: 'var(--ds-space-4)' }}>
-          <Input
-            id='task-runner-search-input'
-            size='md'
-            placeholder='Search actions...'
-            value={search}
-            onChange={setSearch}
-            leadingIcon={<SearchIcon sx={{ fontSize: 'var(--ds-text-heading)' }} />}
-          />
+          <Box sx={{ mb: 'var(--ds-space-4)' }}>
+            <Input
+              id='task-runner-search-input'
+              size='md'
+              placeholder='Search actions...'
+              value={search}
+              onChange={setSearch}
+              leadingIcon={<SearchIcon sx={{ fontSize: 'var(--ds-text-heading)' }} />}
+            />
+          </Box>
+
+          {loadError && (
+            <Box sx={{ mb: 'var(--ds-space-3)' }}>
+              <Banner tone='critical' title='Failed to load tasks' message={loadError} />
+            </Box>
+          )}
+
+          {loadingTasks ? (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-2)' }}>
+              <Skeleton height={64} />
+              <Skeleton height={64} />
+              <Skeleton height={64} />
+              <Skeleton height={64} />
+            </Box>
+          ) : accordionItems.length === 0 && !loadError ? (
+            <EmptyState title='No matching tasks' description='Try a different search term.' />
+          ) : (
+            <Accordion items={accordionItems} selection='single' density='md' />
+          )}
         </Box>
 
-        {loadError && (
-          <Box sx={{ mb: 'var(--ds-space-3)' }}>
-            <Banner tone='critical' title='Failed to load tasks' message={loadError} />
-          </Box>
-        )}
-
-        {loadingTasks ? (
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-2)' }}>
-            <Skeleton height={64} />
-            <Skeleton height={64} />
-            <Skeleton height={64} />
-            <Skeleton height={64} />
-          </Box>
-        ) : accordionItems.length === 0 && !loadError ? (
-          <EmptyState title='No matching tasks' description='Try a different search term.' />
-        ) : (
-          <Accordion items={accordionItems} selection='single' density='md' />
-        )}
-      </Box>
-
-      {/* RIGHT — Action configuration + test (80%). Same configure-and-test
+        {/* RIGHT — Action configuration + test (80%). Same configure-and-test
           panel as the workflow builder, embedded inline instead of a dialog:
           dynamic parameter form (API-backed dropdowns included) + Run. */}
-      <Box sx={{ flex: 1, minWidth: 0, height: '100%' }}>
-        {selectedTaskType ? (
-          <ActionDetailsSidebar
-            variant='inline'
-            open
-            onClose={() => setSelectedTaskType(null)}
-            selectedActionType={selectedTaskType}
-            nodes={[]}
-            edges={[]}
-            onTaskDataChange={(data: any) => setTaskData(data)}
-            taskDefinitions={taskDefinitions}
-            taskData={taskData}
-            viewOnlyMode={false}
-            accountId={accountId}
-            onRunTask={handleRunTask}
-          />
-        ) : (
-          <Box
-            sx={{
-              height: '100%',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              border: '1px dashed var(--ds-gray-300)',
-              borderRadius: 'var(--ds-radius-lg)',
-              backgroundColor: 'var(--ds-background-100)',
-            }}
-          >
-            <EmptyState title='No task selected' description='Pick a task from the list to configure and run it.' />
-          </Box>
-        )}
+        <Box sx={{ flex: 1, minWidth: 0, height: '100%' }}>
+          {selectedTaskType ? (
+            <ActionDetailsSidebar
+              variant='inline'
+              open
+              onClose={() => setSelectedTaskType(null)}
+              selectedActionType={selectedTaskType}
+              nodes={[]}
+              edges={[]}
+              onTaskDataChange={(data: any) => setTaskData(data)}
+              taskDefinitions={taskDefinitions}
+              taskData={taskData}
+              viewOnlyMode={false}
+              accountId={accountId}
+              onRunTask={handleRunTask}
+            />
+          ) : (
+            <Box
+              sx={{
+                height: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                border: '1px dashed var(--ds-gray-300)',
+                borderRadius: 'var(--ds-radius-lg)',
+                backgroundColor: 'var(--ds-background-100)',
+              }}
+            >
+              <EmptyState title='No task selected' description='Pick a task from the list to configure and run it.' />
+            </Box>
+          )}
+        </Box>
       </Box>
-    </Box>
+    </BoxLayout2>
   );
 };
 
