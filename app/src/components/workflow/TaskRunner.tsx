@@ -200,8 +200,8 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
 
   return (
     <Box sx={{ display: 'flex', gap: 'var(--ds-space-4)', p: 'var(--ds-space-4)', height: 'calc(100vh - 170px)', minHeight: '520px' }}>
-      {/* LEFT — Task listing (30%) */}
-      <Box className='custom-scrollbar' sx={{ width: '30%', minWidth: '340px', flexShrink: 0, overflowY: 'auto', pr: 'var(--ds-space-2)' }}>
+      {/* LEFT — Task listing (20%) */}
+      <Box className='custom-scrollbar' sx={{ width: '20%', minWidth: '320px', flexShrink: 0, overflowY: 'auto', pr: 'var(--ds-space-2)' }}>
         <Typography
           sx={{
             fontSize: 'var(--ds-text-title)',
@@ -248,7 +248,7 @@ const TaskRunner: React.FC<TaskRunnerProps> = ({ accountId }) => {
         )}
       </Box>
 
-      {/* RIGHT — Action configuration + test (70%). Same configure-and-test
+      {/* RIGHT — Action configuration + test (80%). Same configure-and-test
           panel as the workflow builder, embedded inline instead of a dialog:
           dynamic parameter form (API-backed dropdowns included) + Run. */}
       <Box sx={{ flex: 1, minWidth: 0, height: '100%' }}>
