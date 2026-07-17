@@ -26,6 +26,7 @@ import { useEffect, useRef, useReducer, useMemo, useCallback } from 'react';
 import { ds } from '@utils/colors';
 import AutoSuggestTextarea from '@components/k8s/common/TextAreaV2';
 import { SummaryBlock } from '@components/k8s/KubernetesClusterSummary';
+import { isFailedCachedConversation } from '@api1/ask-nudgebee';
 import { isCompleteWorkflowDefinition } from './utils/isCompleteWorkflowDefinition';
 import ConversationShimmer from './common/ConversationShimmer';
 import { ConversationTokenUsage } from './common/TokenUsageDisplay';
@@ -603,7 +604,8 @@ const KubernetesLLMResponseGenerator = ({
           }
           return;
         }
-        if (!result.exists) {
+        // Regenerate when absent or a stale failure; served from cache otherwise.
+        if (!result.exists || isFailedCachedConversation(result.data)) {
           handleGenerateInvestigation(query);
         }
       }
