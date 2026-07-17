@@ -7,6 +7,7 @@ import type {
   WorkflowRetriggerRequest,
   WorkflowCancelRequest,
   WorkflowCompleteApprovalRequest,
+  WorkflowValidateRequest,
 } from './types';
 
 export const GET_WORKFLOW_BY_ID = `
@@ -138,6 +139,7 @@ query ListWorkflows($accountId:String!, $status:String, $last_execution_status:S
         display_name
       }
       id
+      created_from_session_id
       last_execution_status
       name
       status
@@ -157,6 +159,7 @@ query ListWorkflows($accountId:String!, $status:String, $last_execution_status:S
         display_name
       }
       last_execution_time
+      last_execution_version
       definition {
         output
         timeout
@@ -209,6 +212,14 @@ export const CREATE_WORKFLOW = `
 mutation CreateWorkflow($request: WorkflowCreateRequest!) {
   workflow_create(request: $request) {
     id
+  }
+}
+`;
+
+export const VALIDATE_WORKFLOW = `
+mutation ValidateWorkflow($request: WorkflowValidateRequest!) {
+  workflow_validate(request: $request) {
+    message
   }
 }
 `;
@@ -387,6 +398,8 @@ query listWorkflowExecutions($accountId:String!, $id:String!, $limit:Int, $next_
       trigger_type
       triggered_by
       workflow_id
+      version
+      version_number
     }
   }
 }
@@ -404,6 +417,8 @@ query listWorkflowExecutionsForEvent($accountId: String!, $eventId: String!) {
       close_time
       triggered_by
       trigger_type
+      version
+      version_number
     }
   }
 }
@@ -807,6 +822,20 @@ const apiWorkflow = {
       return error;
     }
   },
+  async validateWorkflow(request: WorkflowValidateRequest) {
+    try {
+      const query = VALIDATE_WORKFLOW;
+      const variables = { request };
+
+      const response = await queryGraphQL(query, 'ValidateWorkflow', variables);
+      return {
+        data: response?.data?.data,
+        errors: response?.data?.errors,
+      };
+    } catch (error) {
+      return error;
+    }
+  },
   async ListWorkflowExecutions(accountId: string, workflowId: string, limit?: number, nextPageToken?: string, status?: string, triggerType?: string) {
     if (accountId === 'demo') return { data: null, errors: null };
     try {
@@ -1125,7 +1154,8 @@ const apiWorkflow = {
     config?: { llm_provider?: string; llm_model_name?: string; workflow_id?: string },
     async?: boolean,
     messageId?: string,
-    agentId?: string
+    agentId?: string,
+    source?: string
   ) {
     if (accountId === 'demo') return { data: null, errors: null };
     try {
@@ -1141,6 +1171,15 @@ const apiWorkflow = {
           agent_id: agentId,
         },
       };
+
+      // Conversation source — when set to a non-"WorkflowBuilder" source (e.g.
+      // "Automation"), the llm-server auto-saves the generated workflow server-side
+      // and returns a summary instead of raw JSON. The standalone "Create Automation"
+      // flow uses this so the workflow is persisted (shows in the Automations list)
+      // rather than handed back as an ephemeral draft.
+      if (source) {
+        variables.request.source = source;
+      }
 
       // Add config if provided
       if (config) {

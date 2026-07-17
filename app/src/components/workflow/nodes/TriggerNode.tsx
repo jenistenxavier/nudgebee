@@ -4,11 +4,10 @@ import { useState } from 'react';
 import { Box, Typography } from '@mui/material';
 import { Modal } from '@ui/Modal';
 import SafeIcon from '@shared/icons/SafeIcon';
-import { manualTriggerIcon, workflowUserIcon, workflowWebhookIcon, workflowCalendarIcon, alertYellowIcon } from '@assets';
+import { manualTriggerIcon, workflowUserIcon, workflowWebhookIcon, workflowCalendarIcon, alertYellowIcon, ErrorIcon } from '@assets';
 import BaseNode from './BaseNode';
 import HalfEdgeAddButton from '@components/workflow/components/HalfEdgeAddButton';
 import { spliceEdgesOnNodeDelete } from '../utils/spliceNode';
-import { colors } from 'src/utils/colors';
 import { Button } from '@ui/Button';
 
 // Function to get trigger icon based on subcategory (matches nodeCategories.ts trigger subcategories exactly)
@@ -37,8 +36,11 @@ const TriggerNode = ({ id, data, isConnectable, selected, onTriggerRun, onAddFro
   // renders its own Handle so the existing edge stays anchored to the node.
   const showHalfEdgeAddButton = !hasOutgoingEdge && isEditorMode && !!onAddFromHandle;
 
-  // Get validation icon - shows yellow alert when trigger is invalid
+  // Get validation icon - shows yellow alert when trigger is invalid, red when server error is present
   const getValidationIcon = () => {
+    if (data.serverError) {
+      return <SafeIcon src={ErrorIcon} alt='server-error-icon' width={24} height={24} />;
+    }
     if (!data.trigger) {
       return null;
     }
@@ -96,18 +98,21 @@ const TriggerNode = ({ id, data, isConnectable, selected, onTriggerRun, onAddFro
   // Get border style based on validation and selection state
   const getBorderStyle = () => {
     if (data.isDeleted) {
-      return '2px dashed #9ca3af'; // Dashed gray for deleted nodes
+      return '2px dashed var(--ds-gray-500)'; // Dashed gray for deleted nodes
     }
     if (data.connectionRejected) {
-      return '3px solid #ef4444'; // Red for connection errors
+      return '3px solid var(--ds-red-500)'; // Red for connection errors
+    }
+    if (data.serverError) {
+      return '2px solid #dc2626'; // Solid red for server errors
     }
     if (data.trigger?.valid === false) {
-      return '2px solid #fbbf24'; // Yellow for validation errors
+      return '2px solid var(--ds-amber-400)'; // Yellow for validation errors
     }
     if (selected) {
-      return '2px solid #1D4ED8'; // Dark blue for selected
+      return '2px solid var(--ds-blue-600)'; // Dark blue for selected
     }
-    return `1px solid ${colors.iconColor}`; // Default gray
+    return '1px solid var(--ds-brand-200)';
   };
 
   // Get status badges showing validation icon
@@ -138,10 +143,37 @@ const TriggerNode = ({ id, data, isConnectable, selected, onTriggerRun, onAddFro
 
   return (
     <div style={{ position: 'relative' }}>
+      {data.serverError && (
+        <div
+          data-testid='trigger-node-server-error-badge'
+          title={data.serverError}
+          style={{
+            position: 'absolute',
+            top: -10,
+            right: 12,
+            zIndex: 10,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+            padding: 'var(--ds-space-1) var(--ds-space-2)',
+            borderRadius: 999,
+            background: '#dc2626',
+            color: 'white',
+            fontSize: 10,
+            fontWeight: 'var(--ds-font-weight-semibold)',
+            letterSpacing: 0.3,
+            textTransform: 'uppercase',
+            boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
+            cursor: 'help',
+          }}
+        >
+          Server Error
+        </div>
+      )}
       <BaseNode
         selected={selected}
         border={getBorderStyle()}
-        background={data.isDeleted ? '#f9fafb' : 'white'}
+        background={data.isDeleted ? 'var(--ds-background-200)' : 'white'}
         nodeStyle={data.isDeleted ? { opacity: 0.7 } : {}}
         onDelete={handleDeleteClick}
         content={{
@@ -172,12 +204,12 @@ const TriggerNode = ({ id, data, isConnectable, selected, onTriggerRun, onAddFro
             <div
               style={{
                 position: 'absolute',
-                top: '-14px',
-                left: '16px',
-                scrollPaddingLeft: '24px',
-                backgroundColor: data.isDeleted ? '#f3f4f6' : '#FFF7ED',
-                border: data.isDeleted ? '1px solid #d1d5db' : '1px solid #F97316',
-                color: data.isDeleted ? '#9ca3af' : '#F97316',
+                top: 'calc(var(--ds-space-0) * -7)',
+                left: 'var(--ds-space-4)',
+                scrollPaddingLeft: 'var(--ds-space-5)',
+                backgroundColor: data.isDeleted ? 'var(--ds-gray-100)' : 'var(--ds-amber-100)',
+                border: data.isDeleted ? '1px solid var(--ds-gray-300)' : '1px solid var(--ds-amber-500)',
+                color: data.isDeleted ? 'var(--ds-gray-500)' : 'var(--ds-amber-500)',
                 fontSize: 'var(--ds-text-caption)',
                 fontWeight: 'bold',
                 padding: 'var(--ds-space-1) var(--ds-space-2)',
@@ -190,11 +222,11 @@ const TriggerNode = ({ id, data, isConnectable, selected, onTriggerRun, onAddFro
             </div>
           ),
           iconContainerStyle: {
-            background: data.isDeleted ? '#9ca3af' : '#F79009',
+            background: data.isDeleted ? 'var(--ds-gray-500)' : 'var(--ds-amber-500)',
             color: 'white',
           },
           labelStyle: {
-            color: data.isDeleted ? '#9ca3af' : colors.text.secondary,
+            color: data.isDeleted ? 'var(--ds-gray-500)' : 'var(--ds-brand-500)',
           },
         }}
         additionalContent={
@@ -210,7 +242,7 @@ const TriggerNode = ({ id, data, isConnectable, selected, onTriggerRun, onAddFro
                 height: '14px',
                 backgroundColor: 'transparent',
                 borderBottom: 'none',
-                borderTop: '4px solid rgb(142, 185, 255)',
+                borderTop: '4px solid var(--ds-blue-300)',
                 borderLeft: 'none',
                 borderRight: 'none',
                 bottom: '-18px',
@@ -227,8 +259,8 @@ const TriggerNode = ({ id, data, isConnectable, selected, onTriggerRun, onAddFro
                 icon: <PlayArrowIcon sx={{ fontSize: 'var(--ds-text-body-lg)', color: 'var(--ds-green-500)', pointerEvents: 'none' }} />,
                 onClick: handleTriggerRun,
                 title: 'Trigger automation execution',
-                hoverBackgroundColor: 'rgb(220, 255, 233)',
-                hoverBorderColor: 'rgb(126, 218, 160)',
+                hoverBackgroundColor: 'var(--ds-green-100)',
+                hoverBorderColor: 'var(--ds-green-300)',
               }
             : undefined
         }

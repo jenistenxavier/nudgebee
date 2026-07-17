@@ -205,6 +205,7 @@ export interface WorkflowDryRunRequest {
 
 export interface WorkflowDryRunTaskResult {
   id: string;
+  type?: string;
   status: string;
   output?: any;
   error?: string;
@@ -293,4 +294,9 @@ export interface WorkflowTemplateListResponse {
   total_count: number;
   templates: WorkflowTemplate[];
   next_page_token?: string;
+}
+
+export interface WorkflowValidateRequest {
+  account_id: string;
+  workflow: WorkflowRequest;
 }

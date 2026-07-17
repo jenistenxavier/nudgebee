@@ -9,7 +9,6 @@ import { Button } from '@ui/Button';
 import { coreOpsIcon, alertYellowIcon, SuccessIcon, ErrorIcon, RunningIcon, SkipForwardIcon, timerSVG } from '@assets';
 import BaseNode from './BaseNode';
 import HalfEdgeAddButton from '@components/workflow/components/HalfEdgeAddButton';
-import { colors } from 'src/utils/colors';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { validateTaskId } from '@components/workflow/utils/taskUtils';
 
@@ -73,6 +72,9 @@ const SwitchNode = ({ id, data, isConnectable, selected, onAddFromHandle }: any)
   };
 
   const getValidationIcon = () => {
+    if (data.serverError) {
+      return <SafeIcon src={ErrorIcon} alt='server-error-icon' width={24} height={24} />;
+    }
     if (!data.taskConfig || data.taskConfig.valid !== false) return null;
     return <SafeIcon src={alertYellowIcon} alt='alert-icon' width={24} height={24} />;
   };
@@ -220,16 +222,45 @@ const SwitchNode = ({ id, data, isConnectable, selected, onAddFromHandle }: any)
 
   return (
     <div style={{ position: 'relative' }}>
+      {data.serverError && (
+        <div
+          data-testid='switch-node-server-error-badge'
+          title={data.serverError}
+          style={{
+            position: 'absolute',
+            top: -10,
+            right: 12,
+            zIndex: 10,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+            padding: 'var(--ds-space-1) var(--ds-space-2)',
+            borderRadius: 999,
+            background: '#dc2626',
+            color: 'white',
+            fontSize: 10,
+            fontWeight: 'var(--ds-font-weight-semibold)',
+            letterSpacing: 0.3,
+            textTransform: 'uppercase',
+            boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
+            cursor: 'help',
+          }}
+        >
+          Server Error
+        </div>
+      )}
       <BaseNode
         selected={selected}
         border={
           data.connectionRejected
-            ? '3px solid #ef4444'
+            ? '3px solid var(--ds-red-500)'
+            : data.serverError
+            ? '2px solid var(--ds-red-600)'
             : data.taskConfig?.valid === false
-            ? '2px solid #fbbf24'
+            ? '2px solid var(--ds-amber-400)'
             : selected
             ? `2px solid ${SWITCH_COLORS.border}`
-            : `1px solid ${colors.iconColor}`
+            : '1px solid var(--ds-brand-200)'
         }
         minWidth='320px'
         maxWidth='400px'
@@ -276,13 +307,13 @@ const SwitchNode = ({ id, data, isConnectable, selected, onAddFromHandle }: any)
                   alignItems: 'center',
                   padding: 'var(--ds-space-1)',
                   borderRadius: 'var(--ds-radius-sm)',
-                  backgroundColor: idError ? '#f3f4f6' : '#f0f9ff',
-                  border: `1px solid ${idError ? '#d1d5db' : '#0ea5e9'}`,
+                  backgroundColor: idError ? 'var(--ds-gray-100)' : 'var(--ds-blue-100)',
+                  border: `1px solid ${idError ? 'var(--ds-gray-300)' : 'var(--ds-blue-500)'}`,
                   opacity: idError ? 0.5 : 1,
                 }}
                 title={idError || 'Save ID'}
               >
-                <CheckIcon sx={{ fontSize: 'var(--ds-text-title)', color: idError ? '#9ca3af' : '#0ea5e9' }} />
+                <CheckIcon sx={{ fontSize: 'var(--ds-text-title)', color: idError ? 'var(--ds-gray-500)' : 'var(--ds-blue-500)' }} />
               </button>
               <button
                 id='wf-node-switch-cancel-id-btn'
@@ -313,10 +344,10 @@ const SwitchNode = ({ id, data, isConnectable, selected, onAddFromHandle }: any)
             </div>
           ) : (
             <Box sx={{ display: 'flex', flexDirection: 'column' }}>
-              <Typography sx={{ fontSize: 'var(--ds-text-body-lg)', fontWeight: 'bold', color: colors.text.secondary }}>
+              <Typography sx={{ fontSize: 'var(--ds-text-body-lg)', fontWeight: 'bold', color: 'var(--ds-brand-500)' }}>
                 {data.label || id}
               </Typography>
-              <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: colors.text.tertiary, mt: -0.5 }}>{id}</Typography>
+              <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', mt: -0.5 }}>{id}</Typography>
             </Box>
           ),
           description: expression ? `switch(${expression})` : 'Configure expression...',
@@ -336,7 +367,7 @@ const SwitchNode = ({ id, data, isConnectable, selected, onAddFromHandle }: any)
                 borderRadius: '0%',
                 height: '14px',
                 backgroundColor: 'transparent',
-                borderBottom: '4px solid rgb(142, 185, 255)',
+                borderBottom: '4px solid var(--ds-blue-300)',
                 borderTop: 'none',
                 borderLeft: 'none',
                 borderRight: 'none',
@@ -350,7 +381,7 @@ const SwitchNode = ({ id, data, isConnectable, selected, onAddFromHandle }: any)
             <Box
               sx={{
                 display: 'flex',
-                borderTop: `1px solid ${colors.border.secondaryLight}`,
+                borderTop: '1px solid var(--ds-gray-200)',
                 mt: 1.5,
               }}
             >
@@ -361,7 +392,7 @@ const SwitchNode = ({ id, data, isConnectable, selected, onAddFromHandle }: any)
                     flex: 1,
                     textAlign: 'center',
                     py: 0.75,
-                    borderRight: i < allHandles.length - 1 ? `1px solid ${colors.border.secondaryLight}` : 'none',
+                    borderRight: i < allHandles.length - 1 ? '1px solid var(--ds-gray-200)' : 'none',
                   }}
                 >
                   <Typography
@@ -396,7 +427,7 @@ const SwitchNode = ({ id, data, isConnectable, selected, onAddFromHandle }: any)
                     borderRadius: '0%',
                     height: '14px',
                     backgroundColor: 'transparent',
-                    borderTop: '4px solid rgb(142, 185, 255)',
+                    borderTop: '4px solid var(--ds-blue-300)',
                     borderBottom: 'none',
                     borderLeft: 'none',
                     borderRight: 'none',

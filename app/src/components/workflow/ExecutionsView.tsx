@@ -18,16 +18,16 @@ import {
 } from '@mui/icons-material';
 import { ReactFlow, Background, Controls, MiniMap, PanOnScrollMode, type Node, type Edge, type ReactFlowInstance } from 'reactflow';
 import 'reactflow/dist/style.css';
-import { colors } from 'src/utils/colors';
+import { ds } from 'src/utils/colors';
 import apiWorkflow from '@api1/workflow';
 import { hasWriteAccess } from '@lib/auth';
 import { parseHttpResponseBodyMessage } from 'src/utils/common';
-import CustomLabels from '@shared/widgets/CustomLabels';
+import { Label } from '@ui/Label';
 import Datetime from '@shared/format/Datetime';
 import FieldRenderer from '@shared/forms/FieldRenderer';
-import AccordionSmall from '@shared/AccordionSmall';
-import { FormCard } from '@shared/NewReusabeFormComponents';
-import { snackbar } from '@shared/snackbarService';
+import { Accordion } from '@ui/Accordion';
+import { FormCard } from '@shared/forms/FormComponents';
+import { toast as snackbar } from '@ui/Toast';
 import type { WorkflowExecutionTaskResponse } from '@api1/workflow/types';
 import CallWorkflowChildren from './components/CallWorkflowChildren';
 import {
@@ -62,6 +62,8 @@ import ConditionalEdge from './components/ConditionalEdge';
 import TriggerDetailsPanel from './components/TriggerDetailsPanel';
 import ExecutionStatusBar, { type PendingApproval } from './components/ExecutionStatusBar';
 import { findExecutionTaskForNode, getSwitchAncestorChain, getSwitchChildNodeIds } from './utils/templateUtils';
+import { getLlmSessionId, buildAskNudgebeeHref } from './utils/llmChat';
+import { useTenantBranding } from '@hooks/useTenantBranding';
 
 // Function to get appropriate icon based on task type (matches ActionNode.tsx exactly)
 const getTaskIcon = (taskType: string) => {
@@ -133,6 +135,8 @@ interface ExecutionData {
   triggered_by?: string;
   workflow_id?: string;
   error?: string;
+  version?: number;
+  version_number?: number;
 }
 
 interface ExecutionsViewProps {
@@ -284,6 +288,8 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
     },
     [rightPanelWidth]
   );
+
+  const { assistantName, nubiIconUrl } = useTenantBranding();
 
   // Helper to check if execution is in a completed state (not running)
   const isExecutionCompleted = (status: string) => {
@@ -470,28 +476,28 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
     switch (status.toUpperCase()) {
       case 'COMPLETED':
       case 'COMPLETE':
-        return colors.success;
+        return ds.green[500];
       case 'COMPLETE_WITH_ERROR':
       case 'CONTINUED_AS_NEW':
-        return colors.yellow;
+        return ds.amber[400];
       case 'FAILED':
-        return colors.error;
+        return ds.red[600];
       case 'TERMINATED':
-        return colors.highest;
+        return ds.red[500];
       case 'TIMED_OUT':
-        return colors.medium;
+        return ds.amber[400];
       case 'RUNNING':
       case 'IN_PROGRESS':
       case 'SCHEDULED':
-        return colors.primary;
+        return ds.blue[500];
       case 'CANCELED':
       case 'CANCELLED':
-        return colors.tertiary;
+        return ds.gray[600];
       case 'SKIPPED':
-        return colors.text.secondaryDark;
+        return ds.gray[400];
       case 'UNSPECIFIED':
       default:
-        return colors.border.secondary;
+        return ds.brand[200];
     }
   };
 
@@ -501,7 +507,32 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
     });
   };
 
-  const filteredExecutions = executions;
+  const [selectedVersion, setSelectedVersion] = useState<string>('All');
+
+  const distinctVersions = useMemo(() => {
+    const versions = new Set<string>();
+    executions.forEach((execution: any) => {
+      const v = execution.version_number ?? execution.version;
+      if (v != null) {
+        versions.add(v.toString());
+      }
+    });
+    return Array.from(versions).sort((a, b) => Number(b) - Number(a));
+  }, [executions]);
+
+  useEffect(() => {
+    if (selectedVersion !== 'All' && !distinctVersions.includes(selectedVersion)) {
+      setSelectedVersion('All');
+    }
+  }, [distinctVersions, selectedVersion]);
+
+  const filteredExecutions = useMemo(() => {
+    return executions.filter((execution: any) => {
+      if (selectedVersion === 'All') return true;
+      const v = execution.version_number ?? execution.version;
+      return v?.toString() === selectedVersion;
+    });
+  }, [executions, selectedVersion]);
 
   const handleRefresh = () => {
     pendingSelectionRef.current = null;
@@ -894,7 +925,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
       );
     }
     return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', color: colors.tertiary }}>
+      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', color: ds.gray[600] }}>
         <Typography sx={{ fontSize: 'var(--ds-text-body-lg)' }}>{tasksLoading ? 'Loading tasks...' : 'Select a node to view details'}</Typography>
       </Box>
     );
@@ -918,7 +949,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
     }
 
     return (
-      <Box sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-body)', color: colors.text.secondary }}>
+      <Box sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-body)', color: ds.gray[700] }}>
         {typeof data === 'string' ? data : JSON.stringify(data, null, 2)}
       </Box>
     );
@@ -1028,22 +1059,22 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
             width: '320px',
             minWidth: '320px',
             height: '100%',
-            borderRight: `1px solid ${colors.border.secondaryLight}`,
-            backgroundColor: colors.background.white,
+            borderRight: `1px solid ${ds.gray[200]}`,
+            backgroundColor: ds.background[100],
             display: 'flex',
             flexDirection: 'column',
           }}
         >
           {/* Section 1 - Panel Header */}
-          <Box sx={{ padding: 'var(--ds-space-3) var(--ds-space-4)', borderBottom: `1px solid ${colors.border.secondaryLight}` }}>
+          <Box sx={{ padding: 'var(--ds-space-3) var(--ds-space-4)', borderBottom: `1px solid ${ds.gray[200]}` }}>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: onStatusChange ? 1 : 0 }}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)' }}>
-                <PlaylistPlay sx={{ fontSize: 'var(--ds-text-heading)', color: colors.tertiary }} />
+                <PlaylistPlay sx={{ fontSize: 'var(--ds-text-heading)', color: ds.gray[600] }} />
                 <Typography
                   sx={{
                     fontSize: 'var(--ds-text-title)',
                     fontWeight: 'var(--ds-font-weight-semibold)',
-                    color: colors.text.secondary,
+                    color: ds.gray[700],
                     fontFamily: 'Poppins, sans-serif',
                     letterSpacing: '-0.2px',
                   }}
@@ -1062,31 +1093,56 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
               />
             </Box>
             {onStatusChange && (
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)' }}>
-                <Typography sx={{ fontSize: 'var(--ds-text-small)', color: colors.tertiary, fontWeight: 'var(--ds-font-weight-medium)' }}>
-                  Status:
-                </Typography>
-                <FormControl size='small' sx={{ minWidth: 120 }}>
-                  <Select
-                    value={selectedStatus}
-                    onChange={(e) => onStatusChange(e.target.value)}
-                    sx={{
-                      fontSize: 'var(--ds-text-caption)',
-                      height: '30px',
-                      '& .MuiSelect-select': { padding: 'var(--ds-space-1) var(--ds-space-2)' },
-                    }}
-                  >
-                    <MenuItem value='All'>All</MenuItem>
-                    <MenuItem value='Running'>Running</MenuItem>
-                    <MenuItem value='Completed'>Completed</MenuItem>
-                    <MenuItem value='Failed'>Failed</MenuItem>
-                    <MenuItem value='Canceled'>Canceled</MenuItem>
-                    <MenuItem value='Terminated'>Terminated</MenuItem>
-                    <MenuItem value='Timed Out'>Timed Out</MenuItem>
-                    <MenuItem value='Continued As New'>Continued As New</MenuItem>
-                    <MenuItem value='Unspecified'>Unspecified</MenuItem>
-                  </Select>
-                </FormControl>
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--ds-space-3)', alignItems: 'center' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
+                  <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[600], fontWeight: 'var(--ds-font-weight-medium)' }}>
+                    Status:
+                  </Typography>
+                  <FormControl size='small' sx={{ minWidth: 90 }}>
+                    <Select
+                      value={selectedStatus}
+                      onChange={(e) => onStatusChange(e.target.value)}
+                      sx={{
+                        fontSize: 'var(--ds-text-caption)',
+                        height: '30px',
+                        '& .MuiSelect-select': { padding: 'var(--ds-space-1) var(--ds-space-2)' },
+                      }}
+                    >
+                      <MenuItem value='All'>All</MenuItem>
+                      <MenuItem value='Running'>Running</MenuItem>
+                      <MenuItem value='Completed'>Completed</MenuItem>
+                      <MenuItem value='Failed'>Failed</MenuItem>
+                      <MenuItem value='Canceled'>Canceled</MenuItem>
+                      <MenuItem value='Terminated'>Terminated</MenuItem>
+                      <MenuItem value='Timed Out'>Timed Out</MenuItem>
+                      <MenuItem value='Continued As New'>Continued As New</MenuItem>
+                      <MenuItem value='Unspecified'>Unspecified</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Box>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
+                  <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[600], fontWeight: 'var(--ds-font-weight-medium)' }}>
+                    Ver:
+                  </Typography>
+                  <FormControl size='small' sx={{ minWidth: 80 }}>
+                    <Select
+                      value={selectedVersion}
+                      onChange={(e) => setSelectedVersion(e.target.value)}
+                      sx={{
+                        fontSize: 'var(--ds-text-caption)',
+                        height: '30px',
+                        '& .MuiSelect-select': { padding: 'var(--ds-space-1) var(--ds-space-2)' },
+                      }}
+                    >
+                      <MenuItem value='All'>All</MenuItem>
+                      {distinctVersions.map((v) => (
+                        <MenuItem key={v} value={v}>
+                          v{v}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                </Box>
               </Box>
             )}
           </Box>
@@ -1094,9 +1150,9 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
           {/* Section 2 - Execution List (scrollable) */}
           <Box className='custom-scrollbar' sx={{ flex: 1, overflowY: 'auto' }}>
             {loading ? (
-              <Box sx={{ textAlign: 'center', padding: 'var(--ds-space-6) var(--ds-space-4)', color: colors.tertiary }}>Loading executions...</Box>
+              <Box sx={{ textAlign: 'center', padding: 'var(--ds-space-6) var(--ds-space-4)', color: ds.gray[600] }}>Loading executions...</Box>
             ) : filteredExecutions.length === 0 ? (
-              <Box sx={{ textAlign: 'center', padding: 'var(--ds-space-6) var(--ds-space-4)', color: colors.tertiary }}>
+              <Box sx={{ textAlign: 'center', padding: 'var(--ds-space-6) var(--ds-space-4)', color: ds.gray[600] }}>
                 <Typography sx={{ fontSize: 'var(--ds-text-body-lg)', marginBottom: 'var(--ds-space-2)' }}>No executions found</Typography>
                 <Typography sx={{ fontSize: 'var(--ds-text-small)' }}>{"This automation hasn't been executed yet."}</Typography>
               </Box>
@@ -1104,6 +1160,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
               <Box sx={{ display: 'flex', flexDirection: 'column', gap: '0px' }}>
                 {filteredExecutions.map((execution: any) => {
                   const isSelected = selectedExecution?.id === execution.id;
+                  const executionVer = execution.version_number ?? execution.version;
 
                   return (
                     <Box
@@ -1115,30 +1172,30 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                       sx={{
                         padding: 'var(--ds-space-2) var(--ds-space-4)',
                         cursor: 'pointer',
-                        backgroundColor: isSelected ? colors.background.primaryLightest : colors.background.white,
-                        borderBottom: `1px solid ${colors.border.secondaryLight}`,
-                        borderLeft: isSelected ? `5px solid ${colors.primary}` : '3px solid transparent',
+                        backgroundColor: isSelected ? ds.blue[100] : ds.background[100],
+                        borderBottom: `1px solid ${ds.gray[200]}`,
+                        borderLeft: isSelected ? `5px solid ${ds.blue[500]}` : '3px solid transparent',
                         transition: 'all 0.15s ease',
                         // Highlight animation for newly retried execution
                         ...(highlightedExecutionId === execution.id && {
                           animation: 'highlightPulse 2.5s ease-out',
                           '@keyframes highlightPulse': {
                             '0%': {
-                              boxShadow: '0 0 0 0 rgba(34, 197, 94, 0.7)',
+                              boxShadow: `0 0 0 0 color-mix(in srgb, ${ds.green[500]} 70%, transparent)`,
                               borderColor: 'var(--ds-green-500)',
                             },
                             '30%': {
-                              boxShadow: '0 0 0 8px rgba(34, 197, 94, 0)',
+                              boxShadow: `0 0 0 ${ds.space[2]} transparent`,
                               borderColor: 'var(--ds-green-500)',
                             },
                             '100%': {
-                              boxShadow: '0 0 0 0 rgba(34, 197, 94, 0)',
-                              borderColor: colors.primary,
+                              boxShadow: '0 0 0 0 transparent',
+                              borderColor: ds.blue[500],
                             },
                           },
                         }),
                         '&:hover': {
-                          backgroundColor: isSelected ? colors.background.primaryLightest : colors.background.tertiaryLightestestest,
+                          backgroundColor: isSelected ? ds.blue[100] : ds.background[200],
                         },
                       }}
                     >
@@ -1162,33 +1219,53 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                             sx={{
                               fontSize: 'var(--ds-text-body)',
                               fontWeight: isSelected ? '600' : '500',
-                              color: colors.text.secondary,
+                              color: ds.gray[700],
                               marginRight: 'var(--ds-space-1)',
                             }}
-                            sxSuffix={{ fontSize: 'var(--ds-text-small)', fontWeight: isSelected ? '500' : '400', color: colors.text.secondary }}
+                            sxSuffix={{ fontSize: 'var(--ds-text-small)', fontWeight: isSelected ? '500' : '400', color: ds.gray[700] }}
                             sxSecondary={false}
                             sxSuffixSecondary={false}
                           />
                         </Box>
                         {/* Status badge - using existing CustomLabels */}
                         <Box sx={{ flexShrink: 0 }}>
-                          <CustomLabels text={execution.status.toLowerCase()} />
+                          <Label text={execution.status.toLowerCase()} />
                         </Box>
                       </Box>
                       {/* Secondary row: trigger type + duration with icons */}
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-3)', mt: 'var(--ds-space-1)', ml: 'var(--ds-space-4)' }}>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
                           <SafeIcon src={PlayCircleIcon} alt='trigger' width={12} height={12} style={{ opacity: 0.6 }} />
-                          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: colors.tertiary }}>
+                          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600] }}>
                             {execution.trigger_type || 'manual'}
                           </Typography>
                         </Box>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
-                          <Schedule sx={{ fontSize: 'var(--ds-text-small)', color: colors.text.secondaryDark }} />
-                          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: colors.tertiary }}>
+                          <Schedule sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[400] }} />
+                          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600] }}>
                             {getDuration(execution?.start_time as string, execution.close_time)}
                           </Typography>
                         </Box>
+                        {executionVer != null && (
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
+                            <Typography
+                              sx={{
+                                fontSize: 'var(--ds-text-caption)',
+                                color: ds.gray[600],
+                                fontFamily: 'monospace',
+                                backgroundColor: 'var(--ds-gray-100)',
+                                border: '1px solid var(--ds-gray-200)',
+                                borderRadius: 'var(--ds-radius-sm)',
+                                px: 0.6,
+                                py: 0.1,
+                                fontWeight: 'var(--ds-font-weight-medium)',
+                                lineHeight: 1,
+                              }}
+                            >
+                              v{executionVer}
+                            </Typography>
+                          </Box>
+                        )}
                       </Box>
                     </Box>
                   );
@@ -1239,7 +1316,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                 left: 0,
                 right: 0,
                 zIndex: 5,
-                backgroundColor: colors.background.white,
+                backgroundColor: ds.background[100],
                 backdropFilter: 'blur(4px)',
                 borderBottom: '1px solid var(--ds-brand-150)',
                 padding: 'var(--ds-space-4) var(--ds-space-4)',
@@ -1251,7 +1328,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                     <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontWeight: 'var(--ds-font-weight-medium)' }}>
                       Started
                     </Typography>
-                    <Typography sx={{ fontSize: 'var(--ds-text-body)', color: colors.text.secondary }}>
+                    <Typography sx={{ fontSize: 'var(--ds-text-body)', color: ds.gray[700] }}>
                       <Datetime value={selectedExecution.start_time} />
                     </Typography>
                   </Box>
@@ -1259,7 +1336,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                     <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontWeight: 'var(--ds-font-weight-medium)' }}>
                       Duration
                     </Typography>
-                    <Typography sx={{ fontSize: 'var(--ds-text-body)', color: colors.text.secondary }}>
+                    <Typography sx={{ fontSize: 'var(--ds-text-body)', color: ds.gray[700] }}>
                       {getDuration(selectedExecution.start_time as string, selectedExecution.close_time)}
                     </Typography>
                   </Box>
@@ -1267,7 +1344,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                     <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontWeight: 'var(--ds-font-weight-medium)' }}>
                       Trigger
                     </Typography>
-                    <Typography sx={{ fontSize: 'var(--ds-text-body)', color: colors.text.secondary }}>
+                    <Typography sx={{ fontSize: 'var(--ds-text-body)', color: ds.gray[700] }}>
                       {selectedExecution.trigger_type || 'Manual'}
                     </Typography>
                   </Box>
@@ -1276,7 +1353,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                       <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontWeight: 'var(--ds-font-weight-medium)' }}>
                         Version
                       </Typography>
-                      <Typography sx={{ fontSize: 'var(--ds-text-body)', color: colors.text.secondary }}>
+                      <Typography sx={{ fontSize: 'var(--ds-text-body)', color: ds.gray[700] }}>
                         v{executionData.version_number}
                         {executionData.version_name ? ` · ${executionData.version_name}` : ''}
                       </Typography>
@@ -1286,7 +1363,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                     <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontWeight: 'var(--ds-font-weight-medium)' }}>
                       Tasks
                     </Typography>
-                    <Typography sx={{ fontSize: 'var(--ds-text-body)', color: colors.text.secondary }}>{effectiveTasks.length}</Typography>
+                    <Typography sx={{ fontSize: 'var(--ds-text-body)', color: ds.gray[700] }}>{effectiveTasks.length}</Typography>
                   </Box>
                 </Box>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-3)' }}>
@@ -1315,143 +1392,161 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                       {cancelLoading ? 'Cancelling...' : 'Cancel'}
                     </Button>
                   )}
-                  <CustomLabels text={selectedExecution.status.toUpperCase()} />
+                  <Label text={selectedExecution.status.toUpperCase()} />
                 </Box>
               </Box>
 
               {executionData?.error && (
                 <Box sx={{ mt: 0.5 }}>
-                  <AccordionSmall
-                    summarySx={{ maxHeight: '28px', my: '0px', boxShadow: '0 6px 10px rgba(0, 0, 0, 0.07)' }}
-                    header={
-                      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
-                        <Typography
-                          sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-semibold)', color: 'var(--ds-red-600)' }}
-                        >
-                          Execution Error
-                        </Typography>
-                        <Button
-                          composition='icon-only'
-                          tone='ghost'
-                          size='xs'
-                          aria-label='Copy execution error'
-                          icon={<ContentCopy sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-red-600)' }} />}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            copyToClipboard(executionData?.error || '', 'Execution Error');
-                          }}
-                        />
-                      </Box>
-                    }
-                    status='FAILED'
-                  >
-                    <Box
-                      sx={{
-                        fontFamily: 'monospace',
-                        fontSize: 'var(--ds-text-caption)',
-                        color: 'var(--ds-red-600)',
-                        wordBreak: 'break-word',
-                        backgroundColor: 'var(--ds-red-100)',
-                        padding: 'var(--ds-space-2)',
-                        borderRadius: 'var(--ds-radius-sm)',
-                        border: '1px solid var(--ds-red-200)',
-                      }}
-                    >
-                      {executionData?.error}
-                    </Box>
-                  </AccordionSmall>
+                  <Accordion
+                    density='sm'
+                    items={[
+                      {
+                        id: 'execution-error',
+                        label: (
+                          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+                            <Typography
+                              sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-semibold)', color: 'var(--ds-red-600)' }}
+                            >
+                              Execution Error
+                            </Typography>
+                            <Button
+                              composition='icon-only'
+                              tone='ghost'
+                              size='xs'
+                              aria-label='Copy execution error'
+                              icon={<ContentCopy sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-red-600)' }} />}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                copyToClipboard(executionData?.error || '', 'Execution Error');
+                              }}
+                            />
+                          </Box>
+                        ),
+                        meta: <Label text='FAILED' />,
+                        body: (
+                          <Box
+                            sx={{
+                              fontFamily: 'monospace',
+                              fontSize: 'var(--ds-text-caption)',
+                              color: 'var(--ds-red-600)',
+                              wordBreak: 'break-word',
+                              backgroundColor: 'var(--ds-red-100)',
+                              padding: 'var(--ds-space-2)',
+                              borderRadius: 'var(--ds-radius-sm)',
+                              border: '1px solid var(--ds-red-200)',
+                            }}
+                          >
+                            {executionData?.error}
+                          </Box>
+                        ),
+                      },
+                    ]}
+                  />
                 </Box>
               )}
 
               {(executionData?.inputs || executionData?.workflow_result) && (
                 <Box sx={{ mt: 1.5 }}>
-                  <AccordionSmall
-                    summarySx={{ maxHeight: '28px', my: '0px', boxShadow: '0 6px 10px rgba(0, 0, 0, 0.07)' }}
-                    header={
-                      <Typography
-                        sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-semibold)', color: colors.text.secondary }}
-                      >
-                        Execution Input/Output
-                      </Typography>
-                    }
-                  >
-                    <Box sx={{ display: 'flex', gap: 'var(--ds-space-3)', flexDirection: 'column' }}>
-                      {executionData?.inputs && (
-                        <Box sx={{ flex: 1 }}>
-                          <FormCard title='Inputs' description={''} icon={null} number={''} columns={1}>
-                            <Box
-                              sx={{
-                                fontFamily: 'monospace',
-                                fontSize: 'var(--ds-text-caption)',
-                                color: colors.text.secondary,
-                                wordBreak: 'break-word',
-                                backgroundColor: 'var(--ds-background-200)',
-                                padding: 'var(--ds-space-2)',
-                                borderRadius: 'var(--ds-radius-sm)',
-                                border: '1px solid var(--ds-brand-150)',
-                                maxHeight: '200px',
-                                overflowY: 'auto',
-                              }}
-                            >
-                              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-                                <Typography
-                                  sx={{ fontSize: 'var(--ds-text-caption)', fontWeight: 'var(--ds-font-weight-medium)', color: 'var(--ds-gray-600)' }}
-                                >
-                                  JSON Data
-                                </Typography>
-                                <Button
-                                  composition='icon-only'
-                                  tone='ghost'
-                                  size='xs'
-                                  aria-label='Copy automation inputs'
-                                  icon={<ContentCopy sx={{ fontSize: 'var(--ds-text-small)' }} />}
-                                  onClick={() => copyToClipboard(JSON.stringify(executionData?.inputs, null, 2), 'Automation Inputs')}
-                                />
+                  <Accordion
+                    density='sm'
+                    items={[
+                      {
+                        id: 'execution-io',
+                        label: (
+                          <Typography sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>
+                            Execution Input/Output
+                          </Typography>
+                        ),
+                        body: (
+                          <Box sx={{ display: 'flex', gap: 'var(--ds-space-3)', flexDirection: 'column' }}>
+                            {executionData?.inputs && (
+                              <Box sx={{ flex: 1 }}>
+                                <FormCard title='Inputs' description={''} icon={null} number={''} columns={1}>
+                                  <Box
+                                    sx={{
+                                      fontFamily: 'monospace',
+                                      fontSize: 'var(--ds-text-caption)',
+                                      color: ds.gray[700],
+                                      wordBreak: 'break-word',
+                                      backgroundColor: 'var(--ds-background-200)',
+                                      padding: 'var(--ds-space-2)',
+                                      borderRadius: 'var(--ds-radius-sm)',
+                                      border: '1px solid var(--ds-brand-150)',
+                                      maxHeight: '200px',
+                                      overflowY: 'auto',
+                                    }}
+                                  >
+                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                                      <Typography
+                                        sx={{
+                                          fontSize: 'var(--ds-text-caption)',
+                                          fontWeight: 'var(--ds-font-weight-medium)',
+                                          color: 'var(--ds-gray-600)',
+                                        }}
+                                      >
+                                        JSON Data
+                                      </Typography>
+                                      <Button
+                                        composition='icon-only'
+                                        tone='ghost'
+                                        size='xs'
+                                        aria-label='Copy automation inputs'
+                                        icon={<ContentCopy sx={{ fontSize: 'var(--ds-text-small)' }} />}
+                                        onClick={() => copyToClipboard(JSON.stringify(executionData?.inputs, null, 2), 'Automation Inputs')}
+                                      />
+                                    </Box>
+                                    {JSON.stringify(executionData?.inputs, null, 2)}
+                                  </Box>
+                                </FormCard>
                               </Box>
-                              {JSON.stringify(executionData?.inputs, null, 2)}
-                            </Box>
-                          </FormCard>
-                        </Box>
-                      )}
-                      {executionData?.workflow_result && (
-                        <Box sx={{ flex: 1 }}>
-                          <FormCard title='Result' description={''} icon={null} number={''} columns={1}>
-                            <Box
-                              sx={{
-                                fontFamily: 'monospace',
-                                fontSize: 'var(--ds-text-caption)',
-                                color: colors.text.secondary,
-                                wordBreak: 'break-word',
-                                backgroundColor: 'var(--ds-blue-100)',
-                                padding: 'var(--ds-space-2)',
-                                borderRadius: 'var(--ds-radius-sm)',
-                                border: '1px solid var(--ds-teal-200)',
-                                maxHeight: '200px',
-                                overflowY: 'auto',
-                              }}
-                            >
-                              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-                                <Typography
-                                  sx={{ fontSize: 'var(--ds-text-caption)', fontWeight: 'var(--ds-font-weight-medium)', color: 'var(--ds-gray-600)' }}
-                                >
-                                  JSON Data
-                                </Typography>
-                                <Button
-                                  composition='icon-only'
-                                  tone='ghost'
-                                  size='xs'
-                                  aria-label='Copy automation result'
-                                  icon={<ContentCopy sx={{ fontSize: 'var(--ds-text-small)' }} />}
-                                  onClick={() => copyToClipboard(JSON.stringify(executionData?.workflow_result, null, 2), 'Automation Result')}
-                                />
+                            )}
+                            {executionData?.workflow_result && (
+                              <Box sx={{ flex: 1 }}>
+                                <FormCard title='Result' description={''} icon={null} number={''} columns={1}>
+                                  <Box
+                                    sx={{
+                                      fontFamily: 'monospace',
+                                      fontSize: 'var(--ds-text-caption)',
+                                      color: ds.gray[700],
+                                      wordBreak: 'break-word',
+                                      backgroundColor: 'var(--ds-blue-100)',
+                                      padding: 'var(--ds-space-2)',
+                                      borderRadius: 'var(--ds-radius-sm)',
+                                      border: '1px solid var(--ds-teal-200)',
+                                      maxHeight: '200px',
+                                      overflowY: 'auto',
+                                    }}
+                                  >
+                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                                      <Typography
+                                        sx={{
+                                          fontSize: 'var(--ds-text-caption)',
+                                          fontWeight: 'var(--ds-font-weight-medium)',
+                                          color: 'var(--ds-gray-600)',
+                                        }}
+                                      >
+                                        JSON Data
+                                      </Typography>
+                                      <Button
+                                        composition='icon-only'
+                                        tone='ghost'
+                                        size='xs'
+                                        aria-label='Copy automation result'
+                                        icon={<ContentCopy sx={{ fontSize: 'var(--ds-text-small)' }} />}
+                                        onClick={() => copyToClipboard(JSON.stringify(executionData?.workflow_result, null, 2), 'Automation Result')}
+                                      />
+                                    </Box>
+                                    {JSON.stringify(executionData?.workflow_result, null, 2)}
+                                  </Box>
+                                </FormCard>
                               </Box>
-                              {JSON.stringify(executionData?.workflow_result, null, 2)}
-                            </Box>
-                          </FormCard>
-                        </Box>
-                      )}
-                    </Box>
-                  </AccordionSmall>
+                            )}
+                          </Box>
+                        ),
+                      },
+                    ]}
+                  />
                 </Box>
               )}
             </Box>
@@ -1498,7 +1593,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
             </Alert>
           )}
           {executionData?.definition_source === 'legacy_live_snapshot' && (
-            <Alert severity='info' sx={{ margin: '8px 16px' }}>
+            <Alert severity='info' sx={{ margin: 'var(--ds-space-2) var(--ds-space-4)' }}>
               This execution predates version tracking — showing the live version snapshot taken at backfill time, which may differ from the exact
               definition that ran.
             </Alert>
@@ -1523,7 +1618,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
             }}
             defaultEdgeOptions={{
               type: 'smoothstep',
-              style: { strokeWidth: 1, stroke: 'rgb(175, 175, 175)' },
+              style: { strokeWidth: 1, stroke: 'var(--ds-gray-400)' },
             }}
             connectionLineType={'smoothstep' as any}
             fitView
@@ -1548,12 +1643,12 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                 width: 50,
                 height: 100,
                 backgroundColor: 'white',
-                border: '1px solid rgb(187, 187, 187)',
+                border: '1px solid var(--ds-gray-400)',
                 borderRadius: 'var(--ds-radius-sm)',
                 margin: '0px var(--ds-space-3) var(--ds-space-4) 0px',
               }}
             />
-            <Background color='rgba(0, 0, 0, 0.42)' />
+            <Background color={`color-mix(in srgb, ${ds.gray[700]} 42%, transparent)`} />
             <Controls />
           </ReactFlow>
         </Box>
@@ -1566,7 +1661,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
             sx={{
               width: '14px',
               cursor: 'col-resize',
-              backgroundColor: colors.background.white,
+              backgroundColor: ds.background[100],
               borderLeft: '1px solid var(--ds-brand-150)',
               flexShrink: 0,
               display: 'flex',
@@ -1635,7 +1730,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                         sx={{
                           fontWeight: 'bold',
                           fontSize: 'var(--ds-text-body-lg)',
-                          color: colors.text.secondary,
+                          color: ds.gray[700],
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
                           whiteSpace: 'nowrap',
@@ -1649,7 +1744,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                         {selectedTaskContext?.displayId || selectedTaskData.id || 'Unknown Task'}
                       </Typography>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)', flexWrap: 'wrap' }}>
-                        <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: colors.text.secondaryDark }}>
+                        <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[400] }}>
                           {selectedTaskData.type || 'No type specified'}
                         </Typography>
                         {selectedTaskContext?.contextLabel && (
@@ -1657,7 +1752,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                             sx={{
                               fontSize: 'var(--ds-text-caption)',
                               fontWeight: 'var(--ds-font-weight-medium)',
-                              color: colors.text.secondary,
+                              color: ds.gray[700],
                               backgroundColor: 'var(--ds-blue-100)',
                               border: '1px solid var(--ds-blue-300)',
                               borderRadius: 'var(--ds-radius-lg)',
@@ -1677,19 +1772,33 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                           display: 'flex',
                           alignItems: 'center',
                           gap: 'var(--ds-space-1)',
-                          backgroundColor: colors.background.tertiaryLightestestest,
+                          backgroundColor: ds.background[200],
                           padding: 'var(--ds-space-1) var(--ds-space-2)',
                           borderRadius: 'var(--ds-radius-sm)',
                         }}
                       >
-                        <AccessTime sx={{ fontSize: 'var(--ds-text-body-lg)', color: colors.text.secondaryDark }} />
-                        <Typography
-                          sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-medium)', color: colors.text.secondary }}
-                        >
+                        <AccessTime sx={{ fontSize: 'var(--ds-text-body-lg)', color: ds.gray[400] }} />
+                        <Typography sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-medium)', color: ds.gray[700] }}>
                           {getDuration(selectedTaskData.start_time, selectedTaskData.end_time)}
                         </Typography>
                       </Box>
-                      <CustomLabels text={selectedTaskData.status.toUpperCase()} />
+                      {(() => {
+                        const sid = getLlmSessionId(selectedTaskData);
+                        if (!sid) return null;
+                        const href = buildAskNudgebeeHref(accountId, sid);
+                        return (
+                          <Button
+                            size='xs'
+                            tone='secondary'
+                            icon={<SafeIcon alt={`Ask ${assistantName}`} src={nubiIconUrl} height={22} width={22} />}
+                            data-testid='workflow-execution-go-to-chat-btn'
+                            onClick={() => window.open(href, '_blank', 'noopener,noreferrer')}
+                          >
+                            Go to chat
+                          </Button>
+                        );
+                      })()}
+                      <Label text={selectedTaskData.status.toUpperCase()} />
                     </Box>
                   </Box>
                 </Box>
@@ -1703,18 +1812,18 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                       sx={{
                         flexShrink: 0,
                         padding: 'var(--ds-space-2) var(--ds-space-4)',
-                        backgroundColor: '#fdf3e69a',
+                        backgroundColor: 'color-mix(in srgb, var(--ds-amber-100) 60%, transparent)',
                         borderRadius: 'var(--ds-radius-lg) 0px 0px var(--ds-radius-lg)',
                       }}
                     >
                       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
-                          <InputIcon sx={{ fontSize: 'var(--ds-text-title)', color: colors.text.secondary }} />
+                          <InputIcon sx={{ fontSize: 'var(--ds-text-title)', color: ds.gray[700] }} />
                           <Typography
                             sx={{
                               fontSize: 'var(--ds-text-small)',
                               fontWeight: 'var(--ds-font-weight-semibold)',
-                              color: colors.text.secondary,
+                              color: ds.gray[700],
                               fontFamily: 'Poppins, sans-serif',
                             }}
                           >
@@ -1725,7 +1834,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                           <Box
                             sx={{
                               display: 'flex',
-                              backgroundColor: colors.background.white,
+                              backgroundColor: ds.background[100],
                               borderRadius: 'var(--ds-radius-md)',
                               padding: 'var(--ds-space-1)',
                             }}
@@ -1773,8 +1882,8 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                     >
                       <Box
                         sx={{
-                          backgroundColor: colors.background.tertiaryLightestestest,
-                          border: `1px solid ${colors.border.secondaryLight}`,
+                          backgroundColor: ds.background[200],
+                          border: `1px solid ${ds.gray[200]}`,
                           borderRadius: 'var(--ds-radius-md)',
                           padding: 'var(--ds-space-3)',
                           wordBreak: 'break-word',
@@ -1783,9 +1892,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                         {inlineInputViewMode === 'formatted' ? (
                           renderFormattedField(selectedTaskData.input, 'input')
                         ) : (
-                          <Box
-                            sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-body)', color: colors.text.secondary, whiteSpace: 'pre-wrap' }}
-                          >
+                          <Box sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-body)', color: ds.gray[700], whiteSpace: 'pre-wrap' }}>
                             {typeof selectedTaskData.input === 'string' ? selectedTaskData.input : JSON.stringify(selectedTaskData.input, null, 2)}
                           </Box>
                         )}
@@ -1800,18 +1907,18 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                       sx={{
                         flexShrink: 0,
                         padding: 'var(--ds-space-2) var(--ds-space-4)',
-                        backgroundColor: '#fdf3e69a',
+                        backgroundColor: 'color-mix(in srgb, var(--ds-amber-100) 60%, transparent)',
                         borderRadius: '0px var(--ds-radius-lg) var(--ds-radius-lg) 0px',
                       }}
                     >
                       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
-                          <OutputIcon sx={{ fontSize: 'var(--ds-text-title)', color: colors.text.secondary }} />
+                          <OutputIcon sx={{ fontSize: 'var(--ds-text-title)', color: ds.gray[700] }} />
                           <Typography
                             sx={{
                               fontSize: 'var(--ds-text-small)',
                               fontWeight: 'var(--ds-font-weight-semibold)',
-                              color: colors.text.secondary,
+                              color: ds.gray[700],
                               fontFamily: 'Poppins, sans-serif',
                             }}
                           >
@@ -1822,7 +1929,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                           <Box
                             sx={{
                               display: 'flex',
-                              backgroundColor: colors.background.white,
+                              backgroundColor: ds.background[100],
                               borderRadius: 'var(--ds-radius-md)',
                               padding: 'var(--ds-space-1)',
                             }}
@@ -1872,8 +1979,8 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                       {selectedTaskData.output ? (
                         <Box
                           sx={{
-                            backgroundColor: colors.background.primaryLightest,
-                            border: `1px solid ${colors.border.primaryLight}`,
+                            backgroundColor: ds.blue[100],
+                            border: `1px solid ${ds.blue[300]}`,
                             borderRadius: 'var(--ds-radius-md)',
                             padding: 'var(--ds-space-3)',
                             wordBreak: 'break-word',
@@ -1882,9 +1989,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                           {inlineOutputViewMode === 'formatted' ? (
                             renderFormattedField(selectedTaskData.output, 'output')
                           ) : (
-                            <Box
-                              sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-body)', color: colors.text.secondary, whiteSpace: 'pre-wrap' }}
-                            >
+                            <Box sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-body)', color: ds.gray[700], whiteSpace: 'pre-wrap' }}>
                               {typeof selectedTaskData.output === 'string'
                                 ? selectedTaskData.output
                                 : JSON.stringify(selectedTaskData.output, null, 2)}
@@ -1892,7 +1997,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                           )}
                         </Box>
                       ) : (
-                        <Box sx={{ textAlign: 'center', color: colors.text.secondaryDark, py: 4 }}>
+                        <Box sx={{ textAlign: 'center', color: ds.gray[400], py: 4 }}>
                           <Typography sx={{ fontSize: 'var(--ds-text-small)' }}>No output data</Typography>
                         </Box>
                       )}
@@ -1901,7 +2006,15 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                       {selectedTaskData.error && (
                         <Box sx={{ mt: 2 }}>
                           <Box
+                            role='button'
+                            tabIndex={0}
                             onClick={() => setLogsExpanded(!logsExpanded)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                setLogsExpanded(!logsExpanded);
+                              }
+                            }}
                             sx={{
                               display: 'flex',
                               justifyContent: 'space-between',
@@ -1915,7 +2028,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                               sx={{
                                 fontSize: 'var(--ds-text-small)',
                                 fontWeight: 'var(--ds-font-weight-semibold)',
-                                color: colors.error,
+                                color: ds.red[600],
                                 fontFamily: 'Poppins, sans-serif',
                               }}
                             >
@@ -1927,31 +2040,31 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                                 tone='ghost'
                                 size='xs'
                                 aria-label='Copy error'
-                                icon={<ContentCopy sx={{ fontSize: 'var(--ds-text-small)', color: colors.error }} />}
+                                icon={<ContentCopy sx={{ fontSize: 'var(--ds-text-small)', color: ds.red[600] }} />}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   copyToClipboard(selectedTaskData.error || '', 'Error');
                                 }}
                               />
                               {logsExpanded ? (
-                                <ExpandLess sx={{ fontSize: 'var(--ds-text-title)', color: colors.error }} />
+                                <ExpandLess sx={{ fontSize: 'var(--ds-text-title)', color: ds.red[600] }} />
                               ) : (
-                                <ExpandMore sx={{ fontSize: 'var(--ds-text-title)', color: colors.error }} />
+                                <ExpandMore sx={{ fontSize: 'var(--ds-text-title)', color: ds.red[600] }} />
                               )}
                             </Box>
                           </Box>
                           {logsExpanded && (
                             <Box
                               sx={{
-                                backgroundColor: colors.background.accordionSummay,
-                                border: `1px solid ${colors.background.errorLight}`,
+                                backgroundColor: ds.red[100],
+                                border: `1px solid ${ds.red[200]}`,
                                 borderRadius: 'var(--ds-radius-md)',
                                 padding: 'var(--ds-space-3)',
                                 fontFamily: 'monospace',
                                 fontSize: 'var(--ds-text-body)',
                                 wordBreak: 'break-word',
                                 whiteSpace: 'pre-wrap',
-                                color: colors.error,
+                                color: ds.red[600],
                               }}
                             >
                               {selectedTaskData.error}

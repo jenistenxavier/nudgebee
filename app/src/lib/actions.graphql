@@ -8181,6 +8181,7 @@ type Workflow {
   status: String
   last_execution_status: String
   last_execution_time: timestamp
+  last_execution_version: Int
   name: String!
   created_by: String
   created_by_user: WorkflowUser
@@ -8336,7 +8337,10 @@ type WorkflowExecutionSummary {
   trigger_type: String
   parent_workflow_id: String
   workflow_name: String
+  version: Int
+  version_number: Int
 }
+
 
 type WorkflowUpdateResponse {
   id: String

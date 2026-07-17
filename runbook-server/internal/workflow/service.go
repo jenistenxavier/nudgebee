@@ -1735,6 +1735,18 @@ func (s *Service) reconcileRunningStatuses(ctx *security.RequestContext, account
 		// Status is stale — update the workflow in the response
 		workflows[i].LastExecutionStatus = latestStatus
 
+		var runVersion *int
+		if latestExec.Memo != nil {
+			if val, ok := latestExec.Memo.Fields[model.MemoWorkflowVersionNumber]; ok {
+				var vn int64
+				if err := s.dataConverter.FromPayload(val, &vn); err == nil {
+					v := int(vn)
+					runVersion = &v
+					workflows[i].LastExecutionVersion = &v
+				}
+			}
+		}
+
 		// Asynchronously update the DB so future reads are correct
 		wfID := workflows[i].ID
 		closeTime := time.Now().UTC()
@@ -1748,7 +1760,7 @@ func (s *Service) reconcileRunningStatuses(ctx *security.RequestContext, account
 		go func() {
 			dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if err := s.store.SetLastExecutionStatus(dbCtx, tenantID, accountId, wfID, latestStatus, closeTime, statusMessage); err != nil {
+			if err := s.store.SetLastExecutionStatus(dbCtx, tenantID, accountId, wfID, latestStatus, closeTime, statusMessage, runVersion); err != nil {
 				slog.Error("Failed to reconcile stale workflow status", "workflowID", wfID, "error", err)
 			}
 		}()
@@ -2373,6 +2385,18 @@ func (s *Service) ListWorkflowExecutions(ctx *security.RequestContext, accountId
 			}
 		}
 
+		if info.Memo != nil {
+			if v, ok := info.Memo.GetFields()[model.MemoWorkflowVersionNumber]; ok {
+				var val any
+				if err := s.dataConverter.FromPayload(v, &val); err == nil {
+					if vn, ok := toInt(val); ok {
+						summary.Version = &vn
+						summary.VersionNumber = &vn
+					}
+				}
+			}
+		}
+
 		summaries = append(summaries, summary)
 	}
 
@@ -2444,6 +2468,19 @@ func (s *Service) ListWorkflowExecutionsForEvent(ctx *security.RequestContext, a
 				}
 			}
 		}
+
+		if info.Memo != nil {
+			if v, ok := info.Memo.GetFields()[model.MemoWorkflowVersionNumber]; ok {
+				var val any
+				if err := s.dataConverter.FromPayload(v, &val); err == nil {
+					if vn, ok := toInt(val); ok {
+						summary.Version = &vn
+						summary.VersionNumber = &vn
+					}
+				}
+			}
+		}
+
 		summaries = append(summaries, summary)
 	}
 
