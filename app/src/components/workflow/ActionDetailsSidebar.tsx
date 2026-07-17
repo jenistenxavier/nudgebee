@@ -4734,6 +4734,16 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
       );
     };
 
+    if (variant === 'inline') {
+      // Standalone runner: Condition and Settings (failure policy, hooks, …)
+      // only apply to a task inside a workflow — show Parameters directly.
+      return (
+        <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+          <Box sx={{ flex: 1, overflow: 'auto', p: 2 }}>{renderParametersTab()}</Box>
+        </Box>
+      );
+    }
+
     return (
       <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
         {/* Tabs Header */}
