@@ -2,11 +2,11 @@ import React, { useEffect, useState } from 'react';
 import { Box, Typography, CircularProgress, Accordion, AccordionSummary, AccordionDetails } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import SearchIcon from '@mui/icons-material/Search';
-import { Button as DsButton } from '@components1/ds/Button';
-import { Input } from '@components1/ds/Input';
-import { Form } from '@components1/ds/Form';
-import { Chip } from '@components1/ds/Chip';
-import { Banner } from '@components1/ds/Banner';
+import { Button as DsButton } from '@ui/Button';
+import { Input } from '@ui/Input';
+import { Form } from '@ui/Form';
+import { Chip } from '@ui/Chip';
+import { Banner } from '@ui/Banner';
 import apiWorkflow from '@api1/workflow';
 
 interface TaskDefinition {
