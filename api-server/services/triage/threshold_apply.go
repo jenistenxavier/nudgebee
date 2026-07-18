@@ -348,7 +348,7 @@ func RewritePromQLThreshold(origExpr string, newThreshold float64) (string, erro
 		return "", fmt.Errorf("cannot locate threshold to rewrite: %w", err)
 	}
 
-	expr, err := parser.ParseExpr(origExpr)
+	expr, err := promQLParser.ParseExpr(origExpr)
 	if err != nil {
 		return "", fmt.Errorf("invalid PromQL: %w", err)
 	}
