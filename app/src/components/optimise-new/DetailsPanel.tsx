@@ -12,7 +12,7 @@ import MarkDowns from '@shared/viewers/MarkDowns';
 import { Label } from '@ui/Label';
 import recommendationApi from '@api1/recommendation';
 import { interpolateMitigations } from '@api1/recommendation/data';
-import { safeParseJSON, formatRuleName } from './utils';
+import { formatRuleName } from './utils';
 import { safetyBandTone, safetyBandLabel, getImpactSummary } from './safetyBand';
 import ApplyMitigationModal from '@components/cloudaccount/ApplyMitigationModal';
 import { hasWriteAccess } from '@lib/auth';

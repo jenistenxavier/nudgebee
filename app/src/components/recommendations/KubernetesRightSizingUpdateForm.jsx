@@ -13,11 +13,12 @@ import AutoOptimizeForm from '@components/autopilot/form/AutoOptimizeVerticalRig
 
 import PropTypes from 'prop-types';
 import CustomButton from '@shared/NewCustomButton';
+import { Button } from '@ui/Button';
 import { PrOpenIcon, UpdateIcon } from '@assets';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { SummaryBlock } from '@components/k8s/KubernetesClusterSummary';
 import MarkDowns from '@shared/viewers/MarkDowns';
-import { colors } from 'src/utils/colors';
+import { colors, ds } from 'src/utils/colors';
 import { parseHttpResponseBodyMessage } from 'src/utils/common';
 
 // Helper to detect git provider from repo URL

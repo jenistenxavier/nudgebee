@@ -34,7 +34,7 @@ import ApiTokens from '@shared/settings/ApiTokens';
 import { snackbar } from '@shared/snackbarService';
 import { tenantSwitcher } from '@lib/tenantSwitcherService';
 import { createGetMenuItem, generateMenuItems } from './UserMenuItems';
-import { colors } from 'src/utils/colors';
+import { colors, ds } from 'src/utils/colors';
 import { isRenderedInIframe } from 'src/utils/common';
 
 const COLLAPSED_WIDTH = 76;
