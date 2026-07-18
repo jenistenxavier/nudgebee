@@ -15,7 +15,10 @@ func TestHandleConversationSuggestionRequest(t *testing.T) {
 		t.Skip("Skipping test: database not available")
 	}
 
-	RequireEnv(t, "TEST_TENANT", "TEST_ACCOUNT", "TEST_USER")
+	// Skip if environment variables are not set
+	if os.Getenv("TEST_TENANT") == "" || os.Getenv("TEST_ACCOUNT") == "" || os.Getenv("TEST_USER") == "" {
+		t.Skip("Skipping test: TEST_TENANT, TEST_ACCOUNT, or TEST_USER environment variables not set")
+	}
 
 	ctx := security.NewRequestContextForTenantAccountAdmin(
 		os.Getenv("TEST_TENANT"),
