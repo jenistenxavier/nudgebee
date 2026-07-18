@@ -1,2 +1,0 @@
-ALTER TABLE messaging_platforms
-DROP CONSTRAINT IF EXISTS uq_messaging_platforms_tenant_platform;
