@@ -22,7 +22,7 @@
   "license": "ISC",
   "devDependencies": {
     "@playwright/test": "^1.60.0",
-    "@types/node": "^25.9.2",
+    "@types/node": "^26.0.0",
     "cross-env": "^10.1.0",
     "dotenv": "^16.6.1",
     "ts-node": "^10.9.2",
@@ -33,7 +33,7 @@
   },
   "dependencies": {
     "@axe-core/playwright": "^4.11.3",
-    "axios": "^1.17.0",
+    "axios": "^1.18.1",
     "googleapis": "^173.0.0",
     "node-fetch": "^3.3.2"
   }

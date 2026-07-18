@@ -21,6 +21,7 @@ import FileDownloadIcon from '@mui/icons-material/FileDownload';
 import Chart from '@ui/Chart';
 import Text from '@shared/format/Text';
 import CustomTable from '@shared/tables/CustomTable';
+import CopyButton from '@shared/buttons/CopyButton';
 import { Divider } from '@ui/Divider';
 import KubernetesTable from '@components/k8s/common/KubernetesTable';
 import { mapToTableData } from '@components/k8s/details/KubernetesLogStash';
@@ -673,32 +674,42 @@ const FormattedToolResponse = ({ responseText, toolName, toolCall, accountId }) 
   if (isLogsTool(toolName)) {
     try {
       const results = JSON.parse(responseText);
-      if (results?.logs?.length > 0) {
+      // logs is an array for the logs_execute_v2/logs tool result, but a string
+      // preview for the fetch_logs agent envelope ({query, provider, logs, file_ref}).
+      // Read query/provider from metadata (tool result) or the envelope's top level.
+      const logsArray = Array.isArray(results?.logs) ? results.logs : null;
+      const query = results?.metadata?.query || results?.query;
+      const provider = results?.metadata?.provider || results?.provider;
+      if ((logsArray && logsArray.length > 0) || query) {
         const headers = [
           { name: 'Date', width: '25%' },
           { name: 'Message', width: '75%' },
         ];
-        const tableData = results.logs.map((m) => {
+        const tableData = (logsArray || []).map((m) => {
           const dateTimestamp = Date.parse(m.timestamp);
           return [{ component: <LogDate timestamp={dateTimestamp} log={m?.message} /> }, { component: <Text value={m?.message} showAutoEllipsis /> }];
         });
         return (
           <Box>
-            {results?.metadata && (
+            {(provider || query) && (
               <Box sx={{ mb: ds.space[2], fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-700)' }}>
-                {results.metadata.provider && (
+                {provider && (
                   <Typography sx={{ fontSize: 'var(--ds-text-small)' }}>
-                    <b>Provider:</b> {results.metadata.provider}
+                    <b>Provider:</b> {provider}
                   </Typography>
                 )}
-                {results.metadata.query && (
+                {query && (
                   <Typography sx={{ fontSize: 'var(--ds-text-small)' }}>
-                    <b>Query:</b> {results.metadata.query}
+                    <b>Query:</b> {query}
                   </Typography>
                 )}
               </Box>
             )}
-            <CustomTable tableData={tableData} headers={headers} renderVertical={tableData.length <= 1} />
+            {logsArray && logsArray.length > 0 ? (
+              <CustomTable tableData={tableData} headers={headers} renderVertical={tableData.length <= 1} />
+            ) : typeof results?.logs === 'string' && results.logs ? (
+              <pre style={preStyle}>{results.logs.replace(/\\n/g, '\n')}</pre>
+            ) : null}
           </Box>
         );
       }
@@ -739,6 +750,24 @@ const contentBoxSx = {
     overflowWrap: 'break-word',
     whiteSpace: 'normal',
   },
+};
+
+/**
+ * Section label row with an optional copy-to-clipboard icon aligned to the right.
+ * Used for the Response section so the raw tool output can be copied even when it's
+ * rendered as a table/chart/markdown rather than plain text.
+ */
+const SectionLabel = ({ label, copyText, toastMessage = 'Copied to clipboard' }) => (
+  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: ds.space[1] }}>
+    <Typography sx={{ ...sectionLabelSx, mb: 0 }}>{label}</Typography>
+    {copyText ? <CopyButton text={copyText} size='xs' toastMessage={toastMessage} /> : null}
+  </Box>
+);
+
+SectionLabel.propTypes = {
+  label: PropTypes.string.isRequired,
+  copyText: PropTypes.string,
+  toastMessage: PropTypes.string,
 };
 
 /**
@@ -826,7 +855,7 @@ const ToolCallSection = ({ tc, index, accountId }) => {
       {/* Response */}
       {responseText && (
         <Box>
-          <Typography sx={sectionLabelSx}>Response</Typography>
+          <SectionLabel label='Response' copyText={responseText} toastMessage='Response copied to clipboard' />
           <Box sx={contentBoxSx}>
             <FormattedToolResponse
               responseText={responseText}
@@ -982,7 +1011,11 @@ const ToolDetails = ({ toolCall, accountId, conversationId }) => {
           )}
           {hasAgentResponse && (
             <Box>
-              <Typography sx={sectionLabelSx}>Response</Typography>
+              <SectionLabel
+                label='Response'
+                copyText={toolCall.response?.text || toolCall.response_text}
+                toastMessage='Response copied to clipboard'
+              />
               <Box sx={contentBoxSx}>
                 <FormattedToolResponse
                   responseText={toolCall.response?.text || toolCall.response_text}

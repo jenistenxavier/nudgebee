@@ -79,13 +79,6 @@ func (t *NBLogTool) QueryLabels() []string {
 	}
 	labels := make([]string, 0, len(logLabels.Labels))
 	for _, label := range logLabels.Labels {
-		// skip some labels like k8s_** as they are only applicable for otel based system, causing confusion
-		// on downside, it may skip some scenarios where data is pushed from outside to loki using otel (TBD)
-		if strings.EqualFold(t.logProvider.Provider, "loki") {
-			if label.Label == "k8s_pod_name" || label.Label == "k8s_pod_namespace" || label.Label == "k8s_deployment_name" {
-				continue
-			}
-		}
 		if IsESLogProvider(t.logProvider.Provider) {
 			if skipESLabel(label.Label) {
 				continue
@@ -239,6 +232,13 @@ func (t *NBLogTool) InputSchema() core.ToolSchema {
 }
 
 func (t *NBLogTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
+	if strings.TrimSpace(input.Command) == "" {
+		return core.NBToolResponse{
+			Status: core.NBToolResponseStatusError,
+			Data:   `logs_execute requires a non-empty query. Provide a JSON object with at minimum a "where" clause, e.g. {"where": "app=my-service", "start_time": "1h"}.`,
+		}, nil
+	}
+
 	nbRequestContext.Ctx.GetLogger().Info("logs: executing getLogs tool call", "query", input.Command)
 
 	queryBuilder, err := core.BuildLogQueryBuilder(nbRequestContext, input.Command)

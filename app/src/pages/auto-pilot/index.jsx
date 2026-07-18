@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { Box } from '@mui/material';
 import AnchorComponent from '@components/common/navigation/AnchorComponent';
+import { withAccountGuard } from '@shared/AccountGuard';
 import ErrorBoundary from '@shared/ErrorBoundary';
 import { useRouter } from 'next/router';
 import { hasWriteAccess, getUserSession } from '@lib/auth';
@@ -161,4 +162,4 @@ const AutoPilot = () => {
   );
 };
 
-export default AutoPilot;
+export default withAccountGuard(AutoPilot, { hideContent: true });

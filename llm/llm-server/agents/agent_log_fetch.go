@@ -45,7 +45,11 @@ func init() {
 	toolOutput := "JSON envelope: {\"query\": \"<rendered backend query>\", \"logs\": \"<raw lines or preview>\", \"file_ref\": \"<workspace file path or empty>\"}"
 
 	core.RegisterNBAgentFactoryAsTool(FetchLogsAgentName, func(accountId string) (core.NBAgent, error) {
-		return newFetchLogsAgent(accountId), nil
+		// Always construct v2. It embeds v1 and gates the canonical path on the
+		// LLM_SERVER_LOG_AGENT_V2_ENABLED env var (FetchLogsAgentV2.Execute); when
+		// the gate is off it delegates to the embedded v1 agent, so behaviour is
+		// identical to v1.
+		return newFetchLogsAgentV2(accountId), nil
 	}, toolDescription, toolInput, toolOutput)
 }
 
@@ -396,6 +400,7 @@ func makeFetchResponse(agentName, query, logs, fileRef string, refs []toolcore.N
 		"query":    query,
 		"logs":     inlineLogs,
 		"file_ref": fileRef,
+		"provider": providerFromLogs(logs),
 	}
 	body, err := common.MarshalJson(envelope)
 	if err != nil {

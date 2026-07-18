@@ -995,10 +995,23 @@ const WorkflowListing: React.FC<WorkflowListingProps> = ({ accountId }) => {
           workflowJson = lastGenMsg?.response || '';
         }
       }
+      // Automation / post-approval builds keep JSON out of `response` (that holds a human-readable
+      // summary, and the last followup `response` is just the user's "Approve and Build" click).
+      // The built workflow lives in the finalize tool call — use it as the success signal.
       if (!workflowJson) {
-        workflowJson = lastGenMsg?.response || '';
+        const finalizeCall = reversedMessages
+          .flatMap((m: any) => m.llm_conversation_agents || [])
+          .flatMap((a: any) => a.llm_conversation_tool_calls || [])
+          .find((tc: any) => tc.tool_name === 'finalize' && tc.status === 'success');
+        if (finalizeCall?.response) {
+          workflowJson = finalizeCall.response;
+        }
       }
-      return { status: 'COMPLETED', workflowJson, conversationId: conversation.id };
+      // Don't fall back to non-JSON responses — they're text answers, not workflows.
+      // The polling loop handles COMPLETED without workflowJson separately.
+      // `summaryText` is the human-readable build summary (markdown) shown on the success screen.
+      const summaryText = lastGenMsg?.response || '';
+      return { status: 'COMPLETED', workflowJson, summaryText, conversationId: conversation.id };
     }
 
     if (status === 'FAILED') {

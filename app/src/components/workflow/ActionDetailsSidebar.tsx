@@ -4221,10 +4221,14 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
       const timeFieldNames = new Set(hasFullTimeGroup ? ['duration', 'start_time', 'end_time'] : ['start_time', 'end_time']);
       const fullTimeGroupTrigger = hasFullTimeGroup ? fields.find(([n]) => timeFieldNames.has(n))?.[0] : null;
 
-      // Detect paired resize fields (change_by + change_to) — only one is meaningful at a time
+      // Detect paired resize fields (change_by + change_to) — only one is meaningful at a time.
+      // Suppressed when the task also exposes a `scaling_mode` selector (e.g. horizontal_rightsize):
+      // there the backend already gates change_by/change_to via visible_when, so this synthetic
+      // "Resize" dropdown would duplicate the schema's "Scaling Mode" dropdown (issue #32725).
+      const hasScalingMode = fields.some(([name]) => name === 'scaling_mode');
       const hasChangeBy = fields.some(([name]) => name === 'change_by');
       const hasChangeTo = fields.some(([name]) => name === 'change_to');
-      const hasChangeGroup = hasChangeBy && hasChangeTo;
+      const hasChangeGroup = hasChangeBy && hasChangeTo && !hasScalingMode;
       const changeFieldNames = new Set(['change_by', 'change_to']);
       const changeGroupTrigger = hasChangeGroup ? fields.find(([n]) => changeFieldNames.has(n))?.[0] : null;
 
@@ -4352,13 +4356,21 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
               if (fieldName !== changeGroupTrigger) return null;
               const changeBySchema = inputSchema['change_by'] as SchemaProperty;
               const changeToSchema = inputSchema['change_to'] as SchemaProperty;
-              const modeOptions = [
-                { label: 'Change By (%)', value: 'by' },
-                { label: 'Change To (absolute)', value: 'to' },
-              ];
               const activeSchema = changeMode === 'by' ? changeBySchema : changeToSchema;
               const activeFieldName = changeMode === 'by' ? 'change_by' : 'change_to';
-              const activePlaceholder = changeMode === 'by' ? "e.g. '10%'" : "e.g. '20Gi'";
+              // Some tasks (e.g. k8s.horizontal_rightsize) declare change_by/change_to as
+              // numbers (replica counts); others (e.g. k8s.pv_rightsize) as strings ('10%',
+              // '20Gi'). Coerce and label per the active field's schema type so we never send
+              // a string for a number-typed param (which fails task parameter validation).
+              const isNumericChange = activeSchema?.type === 'number' || activeSchema?.type === 'integer';
+              // Label the "by" option from change_by's own schema (not the active one,
+              // which follows changeMode) so the "(%)" suffix is correct regardless of mode.
+              const isByNumeric = changeBySchema?.type === 'number' || changeBySchema?.type === 'integer';
+              const modeOptions = [
+                { label: isByNumeric ? 'Change By' : 'Change By (%)', value: 'by' },
+                { label: 'Change To (absolute)', value: 'to' },
+              ];
+              const activePlaceholder = isNumericChange ? "e.g. '2'" : changeMode === 'by' ? "e.g. '10%'" : "e.g. '20Gi'";
               return (
                 <Box key='change-group' sx={{ mb: 2, display: 'flex', alignItems: 'flex-start', gap: 2 }}>
                   <Typography
@@ -4388,7 +4400,29 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                       {...DEFAULT_FORM_FIELD_PROPS}
                       fieldType='textfield'
                       value={localData?.[activeFieldName] ?? ''}
-                      onChange={(e: any) => handleDataChange(activeFieldName, e.target.value)}
+                      onChange={(e: any) => {
+                        const raw = e.target.value;
+                        if (!isNumericChange) {
+                          handleDataChange(activeFieldName, raw);
+                          return;
+                        }
+                        if (raw === '') {
+                          handleDataChange(activeFieldName, undefined);
+                          return;
+                        }
+                        // Strip a stray '%' (the legacy "(%)" label) before coercing.
+                        const clean = String(raw).replace('%', '').trim();
+                        // Keep in-progress inputs ('-', '1.', '1.0') as strings so the user
+                        // can finish typing negatives/decimals; they coerce once complete.
+                        if (clean === '-' || clean.endsWith('.') || clean.endsWith('.0')) {
+                          handleDataChange(activeFieldName, clean);
+                          return;
+                        }
+                        const numeric = Number(clean);
+                        if (!Number.isNaN(numeric)) {
+                          handleDataChange(activeFieldName, numeric);
+                        }
+                      }}
                       placeholder={activePlaceholder}
                       description={activeSchema?.description || ''}
                       disabled={viewOnlyMode}
