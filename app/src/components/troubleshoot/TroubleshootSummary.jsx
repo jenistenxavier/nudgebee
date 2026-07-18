@@ -549,7 +549,10 @@ const TroubleshootSummary = ({ type = 'events', tab = 'auto', onWidgetFilter, ra
         />
       </WidgetCard>
 
-      <WidgetCard sx={eventCardSx('widget-high-severity')} {...cardInteractionProps({ eventPriority: 'HIGH', status: 'ALL' }, 'widget-high-severity')}>
+      <WidgetCard
+        sx={eventCardSx('widget-high-severity')}
+        {...cardInteractionProps({ eventPriority: 'HIGH', status: 'ALL' }, 'widget-high-severity')}
+      >
         <Stat
           size='md'
           sx={clickable ? { cursor: 'inherit' } : undefined}
